@@ -1,0 +1,386 @@
+"""tmemory 独立 WebUI 服务器。
+
+使用 aiohttp 在单独端口运行，支持：
+- 管理员账户登录（JWT token）
+- IP 白名单
+- 信任反向代理（X-Forwarded-For / X-Real-IP）
+"""
+
+from __future__ import annotations
+
+import hashlib
+import hmac
+import json
+import os
+import secrets
+import time
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
+
+from aiohttp import web
+
+try:
+    from astrbot.api import logger as _astrbot_logger  # available at runtime
+except ImportError:
+    import logging
+
+    _astrbot_logger = logging.getLogger("tmemory")  # type: ignore[assignment]
+
+if TYPE_CHECKING:
+    from main import TMemoryPlugin
+
+# JWT 极简实现（不引入外部依赖）
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def _b64url_encode(data: bytes) -> str:
+    import base64
+
+    return base64.urlsafe_b64encode(data).rstrip(b"=").decode("ascii")
+
+
+def _b64url_decode(s: str) -> bytes:
+    import base64
+
+    s += "=" * (4 - len(s) % 4)
+    return base64.urlsafe_b64decode(s)
+
+
+def jwt_encode(payload: dict, secret: str, exp_seconds: int = 86400) -> str:
+    header = {"alg": "HS256", "typ": "JWT"}
+    payload = {
+        **payload,
+        "exp": int(time.time()) + exp_seconds,
+        "iat": int(time.time()),
+    }
+    h = _b64url_encode(json.dumps(header).encode())
+    p = _b64url_encode(json.dumps(payload).encode())
+    sig = hmac.new(secret.encode(), f"{h}.{p}".encode(), hashlib.sha256).digest()
+    return f"{h}.{p}.{_b64url_encode(sig)}"
+
+
+def jwt_decode(token: str, secret: str) -> Optional[dict]:
+    try:
+        parts = token.split(".")
+        if len(parts) != 3:
+            return None
+        h, p, s = parts
+        expected_sig = hmac.new(
+            secret.encode(), f"{h}.{p}".encode(), hashlib.sha256
+        ).digest()
+        if not hmac.compare_digest(_b64url_decode(s), expected_sig):
+            return None
+        payload = json.loads(_b64url_decode(p))
+        if payload.get("exp", 0) < time.time():
+            return None
+        return payload
+    except Exception:
+        return None
+
+
+# 服务器类
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+class TMemoryWebServer:
+    """tmemory 独立 Web 面板服务器。"""
+
+    def __init__(self, plugin: TMemoryPlugin, config: Dict[str, Any]):
+        self.plugin = plugin
+        self.enabled: bool = bool(config.get("webui_enabled", False))
+        self.host: str = str(config.get("webui_host", "0.0.0.0"))
+        self.port: int = int(config.get("webui_port", 9966))
+        self.username: str = str(config.get("webui_username", "admin"))
+        self.password: str = str(config.get("webui_password", ""))
+        self.trust_proxy: bool = bool(config.get("webui_trust_proxy", False))
+        self.token_expire: int = int(config.get("webui_token_expire_hours", 24)) * 3600
+
+        whitelist_raw = config.get("webui_ip_whitelist", "")
+        if isinstance(whitelist_raw, list):
+            self.ip_whitelist: List[str] = [
+                s.strip() for s in whitelist_raw if s.strip()
+            ]
+        else:
+            self.ip_whitelist = [
+                s.strip() for s in str(whitelist_raw).split(",") if s.strip()
+            ]
+
+        # JWT secret：每次启动随机生成，重启后旧 token 自动失效
+        self._jwt_secret = secrets.token_hex(32)
+
+        self._app: Optional[web.Application] = None
+        self._runner: Optional[web.AppRunner] = None
+
+    # ── 生命周期 ──────────────────────────────────────────────────────────
+
+    async def start(self):
+        if not self.enabled:
+            return
+        if not self.password:
+            _astrbot_logger.warning(
+                "[tmemory-web] webui_password 未设置，WebUI 面板不会启动。请在插件配置中设置密码。"
+            )
+            return
+
+        self._app = web.Application(middlewares=[self._middleware])
+        self._setup_routes()
+        self._runner = web.AppRunner(self._app)
+        await self._runner.setup()
+        site = web.TCPSite(self._runner, self.host, self.port)
+        await site.start()
+        _astrbot_logger.info(
+            "[tmemory-web] WebUI 面板已启动: http://%s:%s", self.host, self.port
+        )
+
+    async def stop(self):
+        if self._runner:
+            await self._runner.cleanup()
+            self._runner = None
+            self._app = None
+
+    # ── 路由 ──────────────────────────────────────────────────────────────
+
+    def _setup_routes(self):
+        app = self._app
+        assert app is not None
+        app.router.add_get("/", self._handle_page)
+        app.router.add_post("/api/login", self._handle_login)
+        app.router.add_get("/api/users", self._handle_get_users)
+        app.router.add_get("/api/stats", self._handle_get_stats)
+        app.router.add_get("/api/memories", self._handle_get_memories)
+        app.router.add_get("/api/events", self._handle_get_events)
+        app.router.add_post("/api/memory/add", self._handle_add_memory)
+        app.router.add_post("/api/memory/update", self._handle_update_memory)
+        app.router.add_post("/api/memory/delete", self._handle_delete_memory)
+        app.router.add_post("/api/distill", self._handle_trigger_distill)
+
+    # ── 中间件：IP 白名单 + JWT 鉴权 ─────────────────────────────────────
+
+    @web.middleware
+    async def _middleware(self, request: web.Request, handler: Callable):
+        client_ip = self._get_client_ip(request)
+
+        # IP 白名单检查
+        if self.ip_whitelist:
+            if client_ip not in self.ip_whitelist:
+                return web.json_response({"error": "IP not allowed"}, status=403)
+
+        path = request.path
+
+        # 登录接口和首页不需要 token
+        if path in ("/", "/api/login"):
+            return await handler(request)
+
+        # 其余 API 需要 JWT
+        auth_header = request.headers.get("Authorization", "")
+        token = ""
+        if auth_header.startswith("Bearer "):
+            token = auth_header[7:]
+        if not token:
+            token = request.query.get("token", "")
+
+        if not token:
+            return web.json_response({"error": "未登录"}, status=401)
+
+        payload = jwt_decode(token, self._jwt_secret)
+        if not payload:
+            return web.json_response({"error": "登录已过期，请重新登录"}, status=401)
+
+        request["user"] = payload.get("user", "")
+        return await handler(request)
+
+    def _get_client_ip(self, request: web.Request) -> str:
+        if self.trust_proxy:
+            forwarded = request.headers.get("X-Forwarded-For", "")
+            if forwarded:
+                return forwarded.split(",")[0].strip()
+            real_ip = request.headers.get("X-Real-IP", "")
+            if real_ip:
+                return real_ip.strip()
+        peername = (
+            request.transport.get_extra_info("peername") if request.transport else None
+        )
+        return peername[0] if peername else "unknown"
+
+    # ── Handlers ─────────────────────────────────────────────────────────
+
+    async def _handle_page(self, request: web.Request):
+        html_path = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "templates", "dashboard.html"
+        )
+        try:
+            with open(html_path, "r", encoding="utf-8") as f:
+                return web.Response(
+                    text=f.read(), content_type="text/html", charset="utf-8"
+                )
+        except FileNotFoundError:
+            return web.Response(text="dashboard.html not found", status=500)
+
+    async def _handle_login(self, request: web.Request):
+        try:
+            data = await request.json()
+        except Exception:
+            return web.json_response({"error": "invalid json"}, status=400)
+
+        username = str(data.get("username", ""))
+        password = str(data.get("password", ""))
+
+        if username == self.username and password == self.password:
+            token = jwt_encode({"user": username}, self._jwt_secret, self.token_expire)
+            return web.json_response({"ok": True, "token": token})
+
+        return web.json_response({"error": "用户名或密码错误"}, status=401)
+
+    async def _handle_get_users(self, request: web.Request):
+        with self.plugin._db() as conn:
+            rows = conn.execute(
+                """
+                SELECT canonical_user_id, COUNT(*) as cnt
+                FROM memories WHERE is_active = 1
+                GROUP BY canonical_user_id ORDER BY cnt DESC
+                """
+            ).fetchall()
+        users = [
+            {"id": str(r["canonical_user_id"]), "count": int(r["cnt"])} for r in rows
+        ]
+        return web.json_response({"users": users})
+
+    async def _handle_get_stats(self, request: web.Request):
+        return web.json_response(self.plugin._get_global_stats())
+
+    async def _handle_get_memories(self, request: web.Request):
+        user = request.query.get("user", "")
+        if not user:
+            return web.json_response({"memories": []})
+        with self.plugin._db() as conn:
+            rows = conn.execute(
+                """
+                SELECT id, memory_type, memory, score, importance, confidence,
+                       reinforce_count, is_active, last_seen_at, created_at, updated_at
+                FROM memories WHERE canonical_user_id = ? AND is_active = 1
+                ORDER BY importance DESC, score DESC, updated_at DESC LIMIT 200
+                """,
+                (user,),
+            ).fetchall()
+        memories = [
+            {
+                "id": int(r["id"]),
+                "memory_type": str(r["memory_type"]),
+                "memory": str(r["memory"]),
+                "score": float(r["score"]),
+                "importance": float(r["importance"]),
+                "confidence": float(r["confidence"]),
+                "reinforce_count": int(r["reinforce_count"]),
+                "is_active": int(r["is_active"]),
+                "last_seen_at": str(r["last_seen_at"]),
+                "created_at": str(r["created_at"]),
+                "updated_at": str(r["updated_at"]),
+            }
+            for r in rows
+        ]
+        return web.json_response({"memories": memories})
+
+    async def _handle_get_events(self, request: web.Request):
+        user = request.query.get("user", "")
+        if not user:
+            return web.json_response({"events": []})
+        with self.plugin._db() as conn:
+            rows = conn.execute(
+                "SELECT id, event_type, payload_json, created_at FROM memory_events WHERE canonical_user_id = ? ORDER BY id DESC LIMIT 100",
+                (user,),
+            ).fetchall()
+        events = [
+            {
+                "id": int(r["id"]),
+                "event_type": str(r["event_type"]),
+                "payload_json": str(r["payload_json"]),
+                "created_at": str(r["created_at"]),
+            }
+            for r in rows
+        ]
+        return web.json_response({"events": events})
+
+    async def _handle_add_memory(self, request: web.Request):
+        data = await request.json()
+        user = str(data.get("user", ""))
+        memory = str(data.get("memory", "")).strip()
+        if not user or not memory:
+            return web.json_response(
+                {"error": "user and memory are required"}, status=400
+            )
+        mem_id = self.plugin._insert_memory(
+            canonical_id=user,
+            adapter="webui",
+            adapter_user=user,
+            memory=memory,
+            score=float(data.get("score", 0.7)),
+            memory_type=str(data.get("memory_type", "fact")),
+            importance=float(data.get("importance", 0.6)),
+            confidence=float(data.get("confidence", 0.7)),
+            source_channel="webui",
+        )
+        return web.json_response({"ok": True, "memory_id": mem_id})
+
+    async def _handle_update_memory(self, request: web.Request):
+        data = await request.json()
+        mem_id = int(data.get("id", 0))
+        if not mem_id:
+            return web.json_response({"error": "id is required"}, status=400)
+
+        now = self.plugin._now()
+        fields: list[str] = []
+        params: list = []
+
+        for col, key, conv in [
+            ("memory", "memory", str),
+            ("memory_type", "memory_type", lambda v: self.plugin._safe_memory_type(v)),
+            ("score", "score", lambda v: self.plugin._clamp01(v)),
+            ("importance", "importance", lambda v: self.plugin._clamp01(v)),
+            ("confidence", "confidence", lambda v: self.plugin._clamp01(v)),
+        ]:
+            if key in data:
+                fields.append(f"{col} = ?")
+                params.append(conv(data[key]))
+
+        if not fields:
+            return web.json_response({"error": "no fields to update"}, status=400)
+
+        if "memory" in data:
+            new_hash = hashlib.sha256(
+                self.plugin._normalize_text(str(data["memory"])).encode()
+            ).hexdigest()
+            fields.append("memory_hash = ?")
+            params.append(new_hash)
+
+        fields.append("updated_at = ?")
+        params.append(now)
+        params.append(mem_id)
+
+        with self.plugin._db() as conn:
+            conn.execute(
+                f"UPDATE memories SET {', '.join(fields)} WHERE id = ?", params
+            )
+
+        self.plugin._log_memory_event(
+            canonical_user_id=str(data.get("user", "")),
+            event_type="webui_update",
+            payload={"memory_id": mem_id, "updated_fields": list(data.keys())},
+        )
+        return web.json_response({"ok": True})
+
+    async def _handle_delete_memory(self, request: web.Request):
+        data = await request.json()
+        mem_id = int(data.get("id", 0))
+        if not mem_id:
+            return web.json_response({"error": "id is required"}, status=400)
+        deleted = self.plugin._delete_memory(mem_id)
+        return web.json_response({"ok": deleted})
+
+    async def _handle_trigger_distill(self, request: web.Request):
+        processed_users, total_memories = await self.plugin._run_distill_cycle()
+        return web.json_response(
+            {
+                "ok": True,
+                "processed_users": processed_users,
+                "total_memories": total_memories,
+            }
+        )
