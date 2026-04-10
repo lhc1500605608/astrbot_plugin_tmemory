@@ -1,0 +1,119 @@
+{
+  "enable_auto_capture": {
+    "type": "bool",
+    "description": "自动采集用户消息",
+    "hint": "开启后，每条用户消息会自动写入 conversation_cache，供后续定时蒸馏。",
+    "default": true
+  },
+  "capture_assistant_reply": {
+    "type": "bool",
+    "description": "采集助手回复",
+    "hint": "开启后，LLM 回复也会被采集到 conversation_cache。",
+    "default": true
+  },
+  "enable_memory_injection": {
+    "type": "bool",
+    "description": "启用记忆注入",
+    "hint": "在 on_llm_request 阶段将召回记忆追加到 system_prompt。",
+    "default": true
+  },
+  "inject_memory_limit": {
+    "type": "int",
+    "description": "注入记忆条数上限",
+    "hint": "每次请求最多注入多少条长期记忆。",
+    "default": 5
+  },
+  "distill_interval_sec": {
+    "type": "int",
+    "description": "蒸馏间隔（秒）",
+    "hint": "后台 worker 的轮询间隔。建议 >= 300，避免实时蒸馏造成 token 浪费。",
+    "default": 300
+  },
+  "distill_min_batch_count": {
+    "type": "int",
+    "description": "最小蒸馏批量",
+    "hint": "单用户未蒸馏消息达到该数量才触发蒸馏。",
+    "default": 8
+  },
+  "distill_batch_limit": {
+    "type": "int",
+    "description": "单次蒸馏上限",
+    "hint": "每次蒸馏最多处理多少条缓存消息。",
+    "default": 24
+  },
+  "distill_provider_id": {
+    "type": "string",
+    "description": "蒸馏模型提供商",
+    "hint": "留空则按消息来源自动推断当前 chat provider。",
+    "default": "",
+    "_special": "select_provider"
+  },
+  "cache_max_rows": {
+    "type": "int",
+    "description": "缓存保留行数",
+    "hint": "conversation_cache 超出后会触发规则摘要压缩，保留最近 N 行。",
+    "default": 20
+  },
+  "memory_max_chars": {
+    "type": "int",
+    "description": "记忆最大字符数",
+    "hint": "规则蒸馏 fallback 时单条记忆的最大长度。",
+    "default": 220
+  },
+  "webui_settings": {
+    "type": "object",
+    "description": "WebUI 管理面板",
+    "hint": "独立端口的记忆管理面板，包含思维导图、记忆编辑、审计日志等功能。",
+    "items": {
+      "webui_enabled": {
+        "type": "bool",
+        "description": "启用 WebUI 面板",
+        "hint": "开启后将在独立端口启动记忆管理面板。",
+        "default": false
+      },
+      "webui_port": {
+        "type": "int",
+        "description": "监听端口",
+        "hint": "WebUI 面板监听的端口号。",
+        "default": 9966
+      },
+      "webui_host": {
+        "type": "string",
+        "description": "监听地址",
+        "hint": "绑定的 IP 地址。0.0.0.0 表示监听所有接口，127.0.0.1 表示仅本机。",
+        "default": "0.0.0.0"
+      },
+      "webui_username": {
+        "type": "string",
+        "description": "管理员用户名",
+        "hint": "登录 WebUI 面板的用户名。",
+        "default": "admin"
+      },
+      "webui_password": {
+        "type": "string",
+        "description": "管理员密码",
+        "hint": "登录 WebUI 面板的密码。必须设置密码后面板才会启动。",
+        "obvious_hint": true,
+        "default": ""
+      },
+      "webui_ip_whitelist": {
+        "type": "string",
+        "description": "IP 白名单",
+        "hint": "允许访问的 IP 地址，多个用逗号分隔。留空表示允许所有 IP。示例：127.0.0.1,192.168.1.0",
+        "default": ""
+      },
+      "webui_trust_proxy": {
+        "type": "bool",
+        "description": "信任反向代理",
+        "hint": "开启后将从 X-Forwarded-For / X-Real-IP 头获取真实客户端 IP，适用于 Nginx 等反代场景。",
+        "default": false
+      },
+      "webui_token_expire_hours": {
+        "type": "int",
+        "description": "登录有效期（小时）",
+        "hint": "JWT token 的有效时间。",
+        "default": 24
+      }
+    }
+  }
+}
