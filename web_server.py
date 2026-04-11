@@ -156,6 +156,10 @@ class TMemoryWebServer:
         app.router.add_get("/api/identities", self._handle_get_identities)
         app.router.add_post("/api/identity/merge", self._handle_merge_users)
         app.router.add_post("/api/identity/rebind", self._handle_rebind_user)
+        app.router.add_get("/api/distill/history", self._handle_distill_history)
+        app.router.add_post("/api/distill/pause", self._handle_distill_pause)
+        app.router.add_post("/api/user/export", self._handle_export_user)
+        app.router.add_post("/api/user/purge", self._handle_purge_user)
 
     # ── 中间件：IP 白名单 + JWT 鉴权 ─────────────────────────────────────
 
@@ -412,7 +416,7 @@ class TMemoryWebServer:
         return web.json_response({"ok": deleted})
 
     async def _handle_trigger_distill(self, request: web.Request):
-        processed_users, total_memories = await self.plugin._run_distill_cycle(force=True)
+        processed_users, total_memories = await self.plugin._run_distill_cycle(force=True, trigger="manual_web")
         return web.json_response(
             {
                 "ok": True,
@@ -505,3 +509,34 @@ class TMemoryWebServer:
             },
         )
         return web.json_response({"ok": True})
+
+
+    async def _handle_distill_history(self, request: web.Request):
+        """返回蒸馏历史记录。"""
+        history = self.plugin._get_distill_history(limit=30)
+        return web.json_response({"history": history})
+
+    async def _handle_distill_pause(self, request: web.Request):
+        """暂停或恢复自动蒸馏。"""
+        data = await request.json()
+        pause = bool(data.get("pause", True))
+        self.plugin.distill_pause = pause
+        return web.json_response({"ok": True, "distill_pause": pause})
+
+    async def _handle_export_user(self, request: web.Request):
+        """导出用户数据。"""
+        data = await request.json()
+        user = str(data.get("user", "")).strip()
+        if not user:
+            return web.json_response({"error": "user is required"}, status=400)
+        export = self.plugin._export_user_data(user)
+        return web.json_response(export)
+
+    async def _handle_purge_user(self, request: web.Request):
+        """清除用户全部数据。"""
+        data = await request.json()
+        user = str(data.get("user", "")).strip()
+        if not user:
+            return web.json_response({"error": "user is required"}, status=400)
+        result = self.plugin._purge_user_data(user)
+        return web.json_response({"ok": True, **result})

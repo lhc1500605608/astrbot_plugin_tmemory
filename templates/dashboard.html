@@ -161,6 +161,8 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Ar
     <div class="header-right">
       <button class="btn btn-sm" onclick="refreshAll()">🔄 刷新</button>
       <button class="btn btn-sm btn-primary" onclick="openDistillModal()">⚡ 立即蒸馏</button>
+      <button class="btn btn-sm" onclick="exportCurrentUser()">📦 导出</button>
+      <button class="btn btn-sm btn-danger" onclick="purgeCurrentUser()">🗑️ 清除</button>
       <button class="btn btn-sm btn-danger" onclick="logout()">🚪 登出</button>
     </div>
   </div>
@@ -195,6 +197,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Ar
         <button onclick="switchTab('pending',this)">⏳ 待蒸馏队列</button>
         <button onclick="switchTab('events',this)">📜 审计日志</button>
         <button onclick="switchTab('identity',this)">👥 用户管理</button>
+        <button onclick="switchTab('health',this)">💊 系统健康</button>
       </div>
 
       <!-- Mindmap View -->
@@ -250,6 +253,27 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Ar
         <table class="mem-table">
           <thead><tr><th style="width:40px">ID</th><th style="width:80px">时间</th><th style="width:100px">事件类型</th><th>详情</th></tr></thead>
           <tbody id="eventsTableBody"></tbody>
+        </table>
+      </div>
+
+      <!-- Health View -->
+      <div class="table-panel" id="panelHealth" style="display:none">
+        <div style="margin-bottom:12px;display:flex;gap:8px;align-items:center;">
+          <button class="btn btn-sm" id="pauseBtn" onclick="togglePause()">⏸️ 暂停自动蒸馏</button>
+          <span id="pauseStatus" style="font-size:12px;color:var(--text2)"></span>
+        </div>
+        <h3 style="font-size:13px;color:var(--text2);margin-bottom:8px">最近蒸馏记录</h3>
+        <table class="mem-table">
+          <thead><tr>
+            <th style="width:140px">开始时间</th>
+            <th style="width:70px">触发方式</th>
+            <th style="width:60px">用户数</th>
+            <th style="width:60px">新记忆</th>
+            <th style="width:60px">失败数</th>
+            <th style="width:70px">耗时(s)</th>
+            <th>错误详情</th>
+          </tr></thead>
+          <tbody id="healthTableBody"></tbody>
         </table>
       </div>
 
@@ -489,14 +513,15 @@ function selectUser(userId) {
 function switchTab(tab, btn) {
   document.querySelectorAll('.tab-bar button').forEach(b => b.classList.remove('active'));
   btn.classList.add('active');
-  ['panelMindmap','panelTable','panelPending','panelEvents','panelIdentity'].forEach(id => {
+  ['panelMindmap','panelTable','panelPending','panelEvents','panelIdentity','panelHealth'].forEach(id => {
     document.getElementById(id).style.display = 'none';
   });
-  const panelMap = { mindmap:'panelMindmap', table:'panelTable', pending:'panelPending', events:'panelEvents', identity:'panelIdentity' };
+  const panelMap = { mindmap:'panelMindmap', table:'panelTable', pending:'panelPending', events:'panelEvents', identity:'panelIdentity', health:'panelHealth' };
   document.getElementById(panelMap[tab]).style.display = '';
   if (tab === 'mindmap') requestAnimationFrame(() => renderMindmap(allMemories, currentUser));
   if (tab === 'pending') loadPendingQueue();
   if (tab === 'identity') loadIdentities();
+  if (tab === 'health') loadHealth();
 }
 
 // ── Pending queue ───────────────────────────────────────────────────────────
@@ -791,6 +816,65 @@ async function doRebind() {
     await refreshAll();
   } else {
     toast('改绑失败: ' + (res?.error || 'unknown'), 'error');
+  }
+}
+// ── Health panel ─────────────────────────────────────────────────────────────
+async function loadHealth() {
+  const data = await api('/distill/history');
+  const tbody = document.getElementById('healthTableBody');
+  if (!data || !data.history || data.history.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;color:var(--text2);padding:40px">暂无蒸馏记录</td></tr>';
+    return;
+  }
+  tbody.innerHTML = data.history.map(h => {
+    const triggerBadge = h.trigger_type === 'auto' ? 'type-fact' : 'type-preference';
+    const failStyle = h.users_failed > 0 ? 'color:var(--danger);font-weight:600' : '';
+    const errText = h.errors && h.errors !== '[]' ? h.errors : '-';
+    return `<tr>
+      <td style="font-size:12px">${h.started_at}</td>
+      <td><span class="type-badge ${triggerBadge}">${h.trigger_type}</span></td>
+      <td style="text-align:center">${h.users_processed}</td>
+      <td style="text-align:center">${h.memories_created}</td>
+      <td style="text-align:center;${failStyle}">${h.users_failed}</td>
+      <td style="text-align:center">${h.duration_sec}</td>
+      <td style="font-size:11px;max-width:300px;word-break:break-all;color:var(--text2)">${escHtml(typeof errText === 'string' ? errText : JSON.stringify(errText))}</td>
+    </tr>`;
+  }).join('');
+}
+
+let isPaused = false;
+async function togglePause() {
+  isPaused = !isPaused;
+  const res = await api('/distill/pause', { method: 'POST', body: JSON.stringify({ pause: isPaused }) });
+  if (res && res.ok) {
+    document.getElementById('pauseBtn').textContent = isPaused ? '▶️ 恢复自动蒸馏' : '⏸️ 暂停自动蒸馏';
+    document.getElementById('pauseStatus').textContent = isPaused ? '自动蒸馏已暂停' : '自动蒸馏运行中';
+    toast(isPaused ? '已暂停自动蒸馏' : '已恢复自动蒸馏', 'success');
+  }
+}
+
+// ── Export / Purge ───────────────────────────────────────────────────────────
+async function exportCurrentUser() {
+  if (!currentUser) { toast('请先选择用户', 'error'); return; }
+  const res = await api('/user/export', { method: 'POST', body: JSON.stringify({ user: currentUser }) });
+  if (res && !res.error) {
+    const blob = new Blob([JSON.stringify(res, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = `tmemory_export_${currentUser}.json`;
+    a.click(); URL.revokeObjectURL(url);
+    toast('导出成功', 'success');
+  }
+}
+
+async function purgeCurrentUser() {
+  if (!currentUser) { toast('请先选择用户', 'error'); return; }
+  if (!confirm(`确认清除 "${currentUser}" 的所有记忆和缓存？此操作不可撤销！`)) return;
+  const res = await api('/user/purge', { method: 'POST', body: JSON.stringify({ user: currentUser }) });
+  if (res && res.ok) {
+    toast(`已清除：${res.memories} 条记忆，${res.cache} 条缓存`, 'success');
+    currentUser = null;
+    await refreshAll();
   }
 }
 </script>
