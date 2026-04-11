@@ -312,7 +312,7 @@ class TMemoryWebServer:
                 "confidence": float(r["confidence"]),
                 "reinforce_count": int(r["reinforce_count"]),
                 "is_active": int(r["is_active"]),
-                "is_pinned": int(r.get("is_pinned", 0)),
+                "is_pinned": int(r["is_pinned"]) if "is_pinned" in r.keys() else 0,
                 "last_seen_at": str(r["last_seen_at"]),
                 "created_at": str(r["created_at"]),
                 "updated_at": str(r["updated_at"]),
