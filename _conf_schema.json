@@ -115,5 +115,11 @@
         "default": 24
       }
     }
+  },
+  "distill_pause": {
+    "type": "bool",
+    "description": "暂停自动蒸馏",
+    "hint": "开启后停止后台自动蒸馏（手动蒸馏不受影响），用于成本控制或调试。",
+    "default": false
   }
 }

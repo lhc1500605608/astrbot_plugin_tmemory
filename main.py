@@ -57,6 +57,12 @@ class TMemoryPlugin(Star):
         )
         self.inject_memory_limit = int(self.config.get("inject_memory_limit", 5))
 
+        # ── 蒸馏暂停开关 ──────────────────────────────────────────────────────
+        self.distill_pause = bool(self.config.get("distill_pause", False))
+
+        # ── 敏感信息脱敏 ──────────────────────────────────────────────────────
+        self._sanitize_patterns = self._build_sanitize_patterns()
+
         # ── 内部状态 ──────────────────────────────────────────────────────────
         self._distill_task: Optional[asyncio.Task] = None
         self._worker_running = False
@@ -149,7 +155,7 @@ class TMemoryPlugin(Star):
         self._insert_conversation(
             canonical_id=canonical_id,
             role="user",
-            content=text,
+            content=self._sanitize_text(text),
             source_adapter=adapter,
             source_user_id=adapter_user,
             unified_msg_origin=umo,
@@ -207,7 +213,7 @@ class TMemoryPlugin(Star):
     @filter.command("tm_distill_now")
     async def tm_distill_now(self, event: AstrMessageEvent):
         """手动触发一次批量精馏：/tm_distill_now"""
-        processed_users, total_memories = await self._run_distill_cycle(force=True)
+        processed_users, total_memories = await self._run_distill_cycle(force=True, trigger="manual_cmd")
         yield event.plain_result(
             f"批量精馏完成：处理用户 {processed_users} 个，新增/更新记忆 {total_memories} 条。"
         )
@@ -328,68 +334,91 @@ class TMemoryPlugin(Star):
     # =========================================================================
 
     async def _distill_worker_loop(self):
-        """后台定时蒸馏循环。
-
-        等待 8 秒启动，然后每隔 distill_interval_sec 执行一次批量蒸馏。
-        只对积累了足够多未蒸馏消息的用户进行处理，避免实时蒸馏。
-        """
+        """后台定时蒸馏循环。"""
         await asyncio.sleep(8)
         while self._worker_running:
-            try:
-                users, memories = await self._run_distill_cycle(force=False)
-                if users > 0:
-                    logger.info(
-                        "[tmemory] distill cycle done: users=%s memories=%s",
-                        users,
-                        memories,
-                    )
-            except Exception as e:
-                logger.warning("[tmemory] distill worker error: %s", e)
+            if not self.distill_pause:
+                try:
+                    users, memories = await self._run_distill_cycle(force=False, trigger="auto")
+                    if users > 0:
+                        logger.info(
+                            "[tmemory] distill cycle done: users=%s memories=%s",
+                            users,
+                            memories,
+                        )
+                except Exception as e:
+                    logger.warning("[tmemory] distill worker error: %s", e)
 
             await asyncio.sleep(max(3600, self.distill_interval_sec))
 
-    async def _run_distill_cycle(self, force: bool = False) -> Tuple[int, int]:
-        """执行一轮蒸馏。
-
-        - force=False: 按最小批量门槛蒸馏（节省 token）
-        - force=True: 处理所有待蒸馏用户（用于手动触发）
-        """
+    async def _run_distill_cycle(
+        self, force: bool = False, trigger: str = "manual"
+    ) -> Tuple[int, int]:
+        """执行一轮蒸馏，记录历史，单用户失败不中断整轮。"""
+        started_at = self._now()
+        t0 = time.time()
         min_required = 1 if force else self.distill_min_batch_count
-        pending_users = self._pending_distill_users(limit=(100 if force else 20), min_batch_count=min_required)
+        pending_users = self._pending_distill_users(
+            limit=(100 if force else 20), min_batch_count=min_required
+        )
         processed_users = 0
         total_memories = 0
+        failed_users = 0
+        errors: list = []
 
         for canonical_id in pending_users:
-            rows = self._fetch_pending_rows(canonical_id, self.distill_batch_limit)
-            if (not force) and len(rows) < self.distill_min_batch_count:
-                continue
-
-            llm_items = await self._distill_rows_with_llm(rows)
-            if not llm_items:
-                self._mark_rows_distilled([int(r["id"]) for r in rows])
-                continue
-
-            for item in llm_items:
-                mem_text = self._normalize_text(str(item.get("memory", "")))
-                if not mem_text:
+            try:
+                rows = self._fetch_pending_rows(canonical_id, self.distill_batch_limit)
+                if (not force) and len(rows) < self.distill_min_batch_count:
                     continue
 
-                self._insert_memory(
-                    canonical_id=canonical_id,
-                    adapter=str(rows[0]["source_adapter"]),
-                    adapter_user=str(rows[0]["source_user_id"]),
-                    memory=mem_text,
-                    score=self._clamp01(item.get("score", 0.7)),
-                    memory_type=str(item.get("memory_type", "fact")),
-                    importance=self._clamp01(item.get("importance", 0.6)),
-                    confidence=self._clamp01(item.get("confidence", 0.7)),
-                    source_channel="scheduled_distill",
-                )
-                total_memories += 1
+                llm_items = await self._distill_rows_with_llm(rows)
+                if not llm_items:
+                    self._mark_rows_distilled([int(r["id"]) for r in rows])
+                    continue
 
-            self._mark_rows_distilled([int(r["id"]) for r in rows])
-            self._optimize_context(canonical_id)
-            processed_users += 1
+                valid_items = self._validate_distill_output(llm_items)
+                for item in valid_items:
+                    mem_text = self._sanitize_text(
+                        self._normalize_text(str(item.get("memory", "")))
+                    )
+                    if not mem_text:
+                        continue
+                    self._insert_memory(
+                        canonical_id=canonical_id,
+                        adapter=str(rows[0]["source_adapter"]),
+                        adapter_user=str(rows[0]["source_user_id"]),
+                        memory=mem_text,
+                        score=self._clamp01(item.get("score", 0.7)),
+                        memory_type=str(item.get("memory_type", "fact")),
+                        importance=self._clamp01(item.get("importance", 0.6)),
+                        confidence=self._clamp01(item.get("confidence", 0.7)),
+                        source_channel="scheduled_distill",
+                    )
+                    total_memories += 1
+
+                self._mark_rows_distilled([int(r["id"]) for r in rows])
+                self._optimize_context(canonical_id)
+                processed_users += 1
+            except Exception as e:
+                failed_users += 1
+                errors.append(f"{canonical_id}: {type(e).__name__}: {e}")
+                logger.warning("[tmemory] distill failed for user %s: %s", canonical_id, e)
+
+        # 记录蒸馏历史
+        duration = round(time.time() - t0, 2)
+        self._record_distill_history(
+            started_at=started_at,
+            trigger=trigger,
+            users_processed=processed_users,
+            memories_created=total_memories,
+            users_failed=failed_users,
+            errors=errors,
+            duration=duration,
+        )
+
+        # 顺便执行记忆衰减
+        self._decay_stale_memories()
 
         return processed_users, total_memories
 
@@ -683,6 +712,21 @@ class TMemoryPlugin(Star):
                 )
                 """
             )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS distill_history (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    started_at TEXT NOT NULL,
+                    finished_at TEXT NOT NULL,
+                    trigger_type TEXT NOT NULL DEFAULT 'auto',
+                    users_processed INTEGER NOT NULL DEFAULT 0,
+                    memories_created INTEGER NOT NULL DEFAULT 0,
+                    users_failed INTEGER NOT NULL DEFAULT 0,
+                    errors TEXT NOT NULL DEFAULT '',
+                    duration_sec REAL NOT NULL DEFAULT 0
+                )
+                """
+            )
 
     def _migrate_schema(self):
         self._ensure_columns(
@@ -721,6 +765,21 @@ class TMemoryPlugin(Star):
                     event_type TEXT NOT NULL,
                     payload_json TEXT NOT NULL,
                     created_at TEXT NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS distill_history (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    started_at TEXT NOT NULL,
+                    finished_at TEXT NOT NULL,
+                    trigger_type TEXT NOT NULL DEFAULT 'auto',
+                    users_processed INTEGER NOT NULL DEFAULT 0,
+                    memories_created INTEGER NOT NULL DEFAULT 0,
+                    users_failed INTEGER NOT NULL DEFAULT 0,
+                    errors TEXT NOT NULL DEFAULT '',
+                    duration_sec REAL NOT NULL DEFAULT 0
                 )
                 """
             )
@@ -1335,6 +1394,166 @@ class TMemoryPlugin(Star):
             )
 
         self._trim_conversation(canonical_id, keep_last=self.cache_max_rows)
+
+    @filter.command("tm_export")
+    async def tm_export(self, event: AstrMessageEvent):
+        """导出当前用户的所有记忆（JSON）：/tm_export"""
+        canonical_id, _, _ = self._resolve_current_identity(event)
+        data = self._export_user_data(canonical_id)
+        yield event.plain_result(json.dumps(data, ensure_ascii=False, indent=2)[:3000])
+
+    @filter.command("tm_purge")
+    async def tm_purge(self, event: AstrMessageEvent):
+        """删除当前用户的所有记忆和缓存：/tm_purge"""
+        canonical_id, _, _ = self._resolve_current_identity(event)
+        deleted = self._purge_user_data(canonical_id)
+        yield event.plain_result(
+            f"已清除 {canonical_id} 的所有数据：{deleted['memories']} 条记忆，{deleted['cache']} 条缓存。"
+        )
+
+    # =========================================================================
+    # 蒸馏历史与健康监测
+    # =========================================================================
+
+    def _record_distill_history(
+        self,
+        started_at: str,
+        trigger: str,
+        users_processed: int,
+        memories_created: int,
+        users_failed: int,
+        errors: list,
+        duration: float,
+    ):
+        with self._db() as conn:
+            conn.execute(
+                """
+                INSERT INTO distill_history(
+                    started_at, finished_at, trigger_type, users_processed,
+                    memories_created, users_failed, errors, duration_sec
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    started_at,
+                    self._now(),
+                    trigger,
+                    users_processed,
+                    memories_created,
+                    users_failed,
+                    json.dumps(errors, ensure_ascii=False),
+                    duration,
+                ),
+            )
+
+    def _get_distill_history(self, limit: int = 20) -> List[Dict]:
+        with self._db() as conn:
+            rows = conn.execute(
+                "SELECT * FROM distill_history ORDER BY id DESC LIMIT ?", (limit,)
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    # =========================================================================
+    # 蒸馏输出校验器
+    # =========================================================================
+
+    def _validate_distill_output(self, items: List[Dict[str, object]]) -> List[Dict[str, object]]:
+        """校验 LLM 蒸馏输出，过滤无效条目。"""
+        valid = []
+        for item in items:
+            mem = str(item.get("memory", "")).strip()
+            if not mem or len(mem) < 4:
+                continue
+            if len(mem) > 500:
+                mem = mem[:500]
+                item["memory"] = mem
+            mtype = str(item.get("memory_type", ""))
+            if mtype not in {"preference", "fact", "task", "restriction", "style"}:
+                item["memory_type"] = self._infer_memory_type(mem)
+            for field in ("score", "importance", "confidence"):
+                try:
+                    v = float(item.get(field, 0.5))
+                    if not (0.0 <= v <= 1.0):
+                        item[field] = max(0.0, min(1.0, v))
+                except (TypeError, ValueError):
+                    item[field] = 0.5
+            valid.append(item)
+        return valid
+
+    # =========================================================================
+    # 记忆生命周期衰减
+    # =========================================================================
+
+    def _decay_stale_memories(self):
+        """将长期未命中的记忆标记为 stale（is_active=2），超久的归档（is_active=3）。"""
+        now_ts = int(time.time())
+        stale_threshold = 30 * 86400   # 30 天未命中 → stale
+        archive_threshold = 90 * 86400  # 90 天未命中 → archived
+
+        with self._db() as conn:
+            rows = conn.execute(
+                "SELECT id, last_seen_at FROM memories WHERE is_active = 1"
+            ).fetchall()
+            for row in rows:
+                try:
+                    last_ts = int(time.mktime(time.strptime(str(row["last_seen_at"]), "%Y-%m-%d %H:%M:%S")))
+                except Exception:
+                    continue
+                age = now_ts - last_ts
+                if age > archive_threshold:
+                    conn.execute("UPDATE memories SET is_active = 3 WHERE id = ?", (int(row["id"]),))
+                elif age > stale_threshold:
+                    conn.execute("UPDATE memories SET is_active = 2 WHERE id = ?", (int(row["id"]),))
+
+    # =========================================================================
+    # 数据导出与清除
+    # =========================================================================
+
+    def _export_user_data(self, canonical_id: str) -> Dict:
+        memories = self._list_memories(canonical_id, limit=500)
+        with self._db() as conn:
+            bindings = [
+                dict(r) for r in conn.execute(
+                    "SELECT adapter, adapter_user_id FROM identity_bindings WHERE canonical_user_id = ?",
+                    (canonical_id,),
+                ).fetchall()
+            ]
+        return {
+            "canonical_user_id": canonical_id,
+            "memories": memories,
+            "bindings": bindings,
+            "exported_at": self._now(),
+        }
+
+    def _purge_user_data(self, canonical_id: str) -> Dict[str, int]:
+        with self._db() as conn:
+            m = conn.execute("DELETE FROM memories WHERE canonical_user_id = ?", (canonical_id,)).rowcount
+            c = conn.execute("DELETE FROM conversation_cache WHERE canonical_user_id = ?", (canonical_id,)).rowcount
+            conn.execute("DELETE FROM memory_events WHERE canonical_user_id = ?", (canonical_id,))
+        self._log_memory_event(
+            canonical_user_id=canonical_id,
+            event_type="purge",
+            payload={"memories_deleted": m, "cache_deleted": c},
+        )
+        return {"memories": m, "cache": c}
+
+    # =========================================================================
+    # 敏感信息脱敏
+    # =========================================================================
+
+    def _build_sanitize_patterns(self) -> list:
+        """构建脱敏正则列表。"""
+        return [
+            (re.compile(r"1[3-9]\d{9}"), "[手机号]"),
+            (re.compile(r"[\w.+-]+@[\w-]+\.[\w.-]+"), "[邮箱]"),
+            (re.compile(r"\d{17}[\dXx]"), "[身份证]"),
+            (re.compile(r"\d{15,19}"), "[长数字]"),
+        ]
+
+    def _sanitize_text(self, text: str) -> str:
+        """对文本进行敏感信息脱敏。"""
+        for pattern, replacement in self._sanitize_patterns:
+            text = pattern.sub(replacement, text)
+        return text
 
     # =========================================================================
     # 工具方法
