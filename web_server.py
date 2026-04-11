@@ -296,7 +296,9 @@ class TMemoryWebServer:
             rows = conn.execute(
                 """
                 SELECT id, memory_type, memory, score, importance, confidence,
-                       reinforce_count, is_active, is_pinned, last_seen_at, created_at, updated_at
+                       reinforce_count, is_active,
+                       COALESCE(is_pinned, 0) AS is_pinned,
+                       last_seen_at, created_at, updated_at
                 FROM memories WHERE canonical_user_id = ? AND is_active = 1
                 ORDER BY importance DESC, score DESC, updated_at DESC LIMIT 200
                 """,
@@ -312,7 +314,7 @@ class TMemoryWebServer:
                 "confidence": float(r["confidence"]),
                 "reinforce_count": int(r["reinforce_count"]),
                 "is_active": int(r["is_active"]),
-                "is_pinned": int(r["is_pinned"]) if "is_pinned" in r.keys() else 0,
+                "is_pinned": int(r["is_pinned"]),
                 "last_seen_at": str(r["last_seen_at"]),
                 "created_at": str(r["created_at"]),
                 "updated_at": str(r["updated_at"]),
