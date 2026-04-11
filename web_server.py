@@ -153,6 +153,9 @@ class TMemoryWebServer:
         app.router.add_post("/api/memory/delete", self._handle_delete_memory)
         app.router.add_post("/api/distill", self._handle_trigger_distill)
         app.router.add_get("/api/pending", self._handle_get_pending)
+        app.router.add_get("/api/identities", self._handle_get_identities)
+        app.router.add_post("/api/identity/merge", self._handle_merge_users)
+        app.router.add_post("/api/identity/rebind", self._handle_rebind_user)
 
     # ── 中间件：IP 白名单 + JWT 鉴权 ─────────────────────────────────────
 
@@ -423,3 +426,68 @@ class TMemoryWebServer:
             for r in rows
         ]
         return web.json_response({"pending": pending})
+
+
+    async def _handle_get_identities(self, request: web.Request):
+        """返回所有身份绑定关系。"""
+        with self.plugin._db() as conn:
+            rows = conn.execute(
+                "SELECT id, adapter, adapter_user_id, canonical_user_id, updated_at "
+                "FROM identity_bindings ORDER BY canonical_user_id, adapter"
+            ).fetchall()
+        bindings = [
+            {
+                "id": int(r["id"]),
+                "adapter": str(r["adapter"]),
+                "adapter_user_id": str(r["adapter_user_id"]),
+                "canonical_user_id": str(r["canonical_user_id"]),
+                "updated_at": str(r["updated_at"]),
+            }
+            for r in rows
+        ]
+        return web.json_response({"bindings": bindings})
+
+    async def _handle_merge_users(self, request: web.Request):
+        """合并两个用户：将 from_user 的所有记忆和绑定迁移到 to_user。"""
+        data = await request.json()
+        from_id = str(data.get("from_user", "")).strip()
+        to_id = str(data.get("to_user", "")).strip()
+        if not from_id or not to_id:
+            return web.json_response({"error": "from_user and to_user are required"}, status=400)
+        if from_id == to_id:
+            return web.json_response({"error": "两个用户 ID 相同，无需合并"}, status=400)
+
+        moved = self.plugin._merge_identity(from_id, to_id)
+        return web.json_response({"ok": True, "moved": moved, "from_user": from_id, "to_user": to_id})
+
+    async def _handle_rebind_user(self, request: web.Request):
+        """将一个适配器账号改绑到新的统一用户 ID。"""
+        data = await request.json()
+        binding_id = int(data.get("binding_id", 0))
+        new_canonical = str(data.get("new_canonical_user_id", "")).strip()
+        if not binding_id or not new_canonical:
+            return web.json_response({"error": "binding_id and new_canonical_user_id are required"}, status=400)
+
+        now = self.plugin._now()
+        with self.plugin._db() as conn:
+            row = conn.execute("SELECT adapter, adapter_user_id, canonical_user_id FROM identity_bindings WHERE id = ?", (binding_id,)).fetchone()
+            if not row:
+                return web.json_response({"error": "binding not found"}, status=404)
+            old_canonical = str(row["canonical_user_id"])
+            conn.execute(
+                "UPDATE identity_bindings SET canonical_user_id = ?, updated_at = ? WHERE id = ?",
+                (new_canonical, now, binding_id),
+            )
+
+        self.plugin._log_memory_event(
+            canonical_user_id=new_canonical,
+            event_type="rebind",
+            payload={
+                "binding_id": binding_id,
+                "adapter": str(row["adapter"]),
+                "adapter_user_id": str(row["adapter_user_id"]),
+                "old_canonical": old_canonical,
+                "new_canonical": new_canonical,
+            },
+        )
+        return web.json_response({"ok": True})
