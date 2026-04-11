@@ -210,6 +210,7 @@ class TMemoryPlugin(Star):
     # 管理指令
     # =========================================================================
 
+    @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("tm_distill_now")
     async def tm_distill_now(self, event: AstrMessageEvent):
         """手动触发一次批量精馏：/tm_distill_now"""
@@ -218,6 +219,7 @@ class TMemoryPlugin(Star):
             f"批量精馏完成：处理用户 {processed_users} 个，新增/更新记忆 {total_memories} 条。"
         )
 
+    @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("tm_worker")
     async def tm_worker(self, event: AstrMessageEvent):
         """查看蒸馏 worker 状态：/tm_worker"""
@@ -235,6 +237,7 @@ class TMemoryPlugin(Star):
             )
         )
 
+    @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("tm_memory")
     async def tm_memory(self, event: AstrMessageEvent):
         """查看当前用户的记忆：/tm_memory"""
@@ -252,6 +255,7 @@ class TMemoryPlugin(Star):
             )
         yield event.plain_result("\n".join(lines))
 
+    @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("tm_context")
     async def tm_context(self, event: AstrMessageEvent):
         """预览记忆召回上下文：/tm_context 今天吃什么"""
@@ -265,6 +269,7 @@ class TMemoryPlugin(Star):
         context_block = self.build_memory_context(canonical_id, query, limit=6)
         yield event.plain_result(context_block)
 
+    @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("tm_bind")
     async def tm_bind(self, event: AstrMessageEvent):
         """绑定当前账号到统一用户 ID：/tm_bind alice"""
@@ -281,6 +286,7 @@ class TMemoryPlugin(Star):
             f"绑定成功：{adapter}:{adapter_user} -> {canonical_id}"
         )
 
+    @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("tm_merge")
     async def tm_merge(self, event: AstrMessageEvent):
         """合并两个统一用户 ID 的记忆：/tm_merge old_id new_id"""
@@ -302,6 +308,7 @@ class TMemoryPlugin(Star):
             f"合并完成：{from_id} -> {to_id}，迁移记忆 {moved} 条。"
         )
 
+    @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("tm_forget")
     async def tm_forget(self, event: AstrMessageEvent):
         """删除一条记忆：/tm_forget 12"""
@@ -317,6 +324,7 @@ class TMemoryPlugin(Star):
             return
         yield event.plain_result(f"未找到记忆 {arg}")
 
+    @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("tm_stats")
     async def tm_stats(self, event: AstrMessageEvent):
         """查看全局统计信息：/tm_stats"""
@@ -1414,6 +1422,7 @@ class TMemoryPlugin(Star):
 
         self._trim_conversation(canonical_id, keep_last=self.cache_max_rows)
 
+    @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("tm_pin")
     async def tm_pin(self, event: AstrMessageEvent):
         """常驻一条记忆（不会被衰减/剪枝/冲突覆盖）：/tm_pin 12"""
@@ -1425,6 +1434,7 @@ class TMemoryPlugin(Star):
         ok = self._set_pinned(int(arg), True)
         yield event.plain_result(f"记忆 {arg} 已设为常驻" if ok else f"未找到记忆 {arg}")
 
+    @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("tm_unpin")
     async def tm_unpin(self, event: AstrMessageEvent):
         """取消常驻一条记忆：/tm_unpin 12"""
@@ -1436,6 +1446,7 @@ class TMemoryPlugin(Star):
         ok = self._set_pinned(int(arg), False)
         yield event.plain_result(f"记忆 {arg} 已取消常驻" if ok else f"未找到记忆 {arg}")
 
+    @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("tm_export")
     async def tm_export(self, event: AstrMessageEvent):
         """导出当前用户的所有记忆（JSON）：/tm_export"""
@@ -1443,6 +1454,7 @@ class TMemoryPlugin(Star):
         data = self._export_user_data(canonical_id)
         yield event.plain_result(json.dumps(data, ensure_ascii=False, indent=2)[:3000])
 
+    @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("tm_purge")
     async def tm_purge(self, event: AstrMessageEvent):
         """删除当前用户的所有记忆和缓存：/tm_purge"""
