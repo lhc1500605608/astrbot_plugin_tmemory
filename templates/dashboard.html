@@ -194,6 +194,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Ar
         <button onclick="switchTab('table',this)">📋 记忆列表</button>
         <button onclick="switchTab('pending',this)">⏳ 待蒸馏队列</button>
         <button onclick="switchTab('events',this)">📜 审计日志</button>
+        <button onclick="switchTab('identity',this)">👥 用户管理</button>
       </div>
 
       <!-- Mindmap View -->
@@ -251,6 +252,25 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Ar
           <tbody id="eventsTableBody"></tbody>
         </table>
       </div>
+
+      <!-- Identity View -->
+      <div class="table-panel" id="panelIdentity" style="display:none">
+        <div style="margin-bottom:12px;display:flex;gap:8px;align-items:center;">
+          <button class="btn btn-sm btn-primary" onclick="openMergeModal()">🔗 合并用户</button>
+          <span style="font-size:12px;color:var(--text2)">将不同适配器的账号识别为同一个人，合并其记忆</span>
+        </div>
+        <table class="mem-table">
+          <thead><tr>
+            <th style="width:40px">ID</th>
+            <th style="width:100px">适配器</th>
+            <th>适配器用户 ID</th>
+            <th>统一用户 ID</th>
+            <th style="width:120px">更新时间</th>
+            <th style="width:80px">操作</th>
+          </tr></thead>
+          <tbody id="identityTableBody"></tbody>
+        </table>
+      </div>
     </div>
   </div>
 </div>
@@ -286,6 +306,39 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Ar
     <div class="modal-footer">
       <button class="btn" onclick="closeModal('distillModal')">取消</button>
       <button class="btn btn-primary" onclick="triggerDistill()">确认蒸馏</button>
+    </div>
+  </div>
+</div>
+
+<!-- Merge Modal -->
+<div class="modal-backdrop" id="mergeModal">
+  <div class="modal" style="width:420px">
+    <div class="modal-header"><h3>合并用户</h3><button class="btn btn-icon btn-sm" onclick="closeModal('mergeModal')">✕</button></div>
+    <div class="modal-body">
+      <p style="font-size:12px;color:var(--text2);margin-bottom:14px">将来源用户的所有记忆、缓存和绑定迁移到目标用户。合并后来源用户的数据将归入目标用户名下。</p>
+      <div class="form-group"><label>来源用户 (将被合并)</label><input id="mergeFrom" type="text" placeholder="例如 qq:123456"></div>
+      <div class="form-group"><label>目标用户 (保留)</label><input id="mergeTo" type="text" placeholder="例如 alice"></div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn" onclick="closeModal('mergeModal')">取消</button>
+      <button class="btn btn-primary" onclick="doMerge()">确认合并</button>
+    </div>
+  </div>
+</div>
+
+<!-- Rebind Modal -->
+<div class="modal-backdrop" id="rebindModal">
+  <div class="modal" style="width:420px">
+    <div class="modal-header"><h3>改绑用户</h3><button class="btn btn-icon btn-sm" onclick="closeModal('rebindModal')">✕</button></div>
+    <div class="modal-body">
+      <p style="font-size:12px;color:var(--text2);margin-bottom:14px">将此适配器账号重新绑定到另一个统一用户 ID。</p>
+      <div class="form-group"><label>当前绑定</label><input id="rebindInfo" type="text" disabled style="opacity:.7"></div>
+      <input type="hidden" id="rebindId">
+      <div class="form-group"><label>新的统一用户 ID</label><input id="rebindNewCanonical" type="text" placeholder="输入目标统一用户 ID"></div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn" onclick="closeModal('rebindModal')">取消</button>
+      <button class="btn btn-primary" onclick="doRebind()">确认改绑</button>
     </div>
   </div>
 </div>
@@ -424,13 +477,14 @@ function selectUser(userId) {
 function switchTab(tab, btn) {
   document.querySelectorAll('.tab-bar button').forEach(b => b.classList.remove('active'));
   btn.classList.add('active');
-  ['panelMindmap','panelTable','panelPending','panelEvents'].forEach(id => {
+  ['panelMindmap','panelTable','panelPending','panelEvents','panelIdentity'].forEach(id => {
     document.getElementById(id).style.display = 'none';
   });
-  const panelMap = { mindmap:'panelMindmap', table:'panelTable', pending:'panelPending', events:'panelEvents' };
+  const panelMap = { mindmap:'panelMindmap', table:'panelTable', pending:'panelPending', events:'panelEvents', identity:'panelIdentity' };
   document.getElementById(panelMap[tab]).style.display = '';
   if (tab === 'mindmap') requestAnimationFrame(() => renderMindmap(allMemories, currentUser));
   if (tab === 'pending') loadPendingQueue();
+  if (tab === 'identity') loadIdentities();
 }
 
 // ── Pending queue ───────────────────────────────────────────────────────────
@@ -657,6 +711,76 @@ document.addEventListener('DOMContentLoaded', () => {
 document.querySelectorAll('.modal-backdrop').forEach(el => {
   el.addEventListener('click', e => { if (e.target === el) el.classList.remove('show'); });
 });
+
+// ── Identity management ─────────────────────────────────────────────────────
+async function loadIdentities() {
+  const data = await api('/identities');
+  const tbody = document.getElementById('identityTableBody');
+  if (!data || !data.bindings || data.bindings.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;color:var(--text2);padding:40px">暂无绑定记录</td></tr>';
+    return;
+  }
+  // Group by canonical_user_id for visual grouping
+  let lastCanonical = '';
+  tbody.innerHTML = data.bindings.map(b => {
+    const isNewGroup = b.canonical_user_id !== lastCanonical;
+    lastCanonical = b.canonical_user_id;
+    const sep = isNewGroup ? 'border-top:2px solid var(--border)' : '';
+    return `<tr style="${sep}">
+      <td>${b.id}</td>
+      <td><span class="type-badge type-fact">${escHtml(b.adapter)}</span></td>
+      <td>${escHtml(b.adapter_user_id)}</td>
+      <td style="font-weight:${isNewGroup ? '600' : '400'}">${escHtml(b.canonical_user_id)}</td>
+      <td style="font-size:12px;color:var(--text2)">${b.updated_at}</td>
+      <td><button class="btn btn-sm" onclick="openRebindModal(${b.id}, '${escHtml(b.adapter)}:${escHtml(b.adapter_user_id)}', '${escHtml(b.canonical_user_id)}')">✏️ 改绑</button></td>
+    </tr>`;
+  }).join('');
+}
+
+function openMergeModal() {
+  document.getElementById('mergeFrom').value = '';
+  document.getElementById('mergeTo').value = '';
+  document.getElementById('mergeModal').classList.add('show');
+}
+
+async function doMerge() {
+  const from = document.getElementById('mergeFrom').value.trim();
+  const to = document.getElementById('mergeTo').value.trim();
+  if (!from || !to) { toast('请填写来源和目标用户 ID', 'error'); return; }
+  if (from === to) { toast('两个 ID 相同', 'error'); return; }
+  if (!confirm(`确认将 "${from}" 的所有数据合并到 "${to}"？此操作不可撤销。`)) return;
+  const res = await api('/identity/merge', { method: 'POST', body: JSON.stringify({ from_user: from, to_user: to }) });
+  if (res && res.ok) {
+    toast(`合并完成：${res.from_user} → ${res.to_user}，迁移 ${res.moved} 条记忆`, 'success');
+    closeModal('mergeModal');
+    await refreshAll();
+    loadIdentities();
+  } else {
+    toast('合并失败: ' + (res?.error || 'unknown'), 'error');
+  }
+}
+
+function openRebindModal(bindingId, displayInfo, currentCanonical) {
+  document.getElementById('rebindId').value = bindingId;
+  document.getElementById('rebindInfo').value = displayInfo + ' → ' + currentCanonical;
+  document.getElementById('rebindNewCanonical').value = '';
+  document.getElementById('rebindModal').classList.add('show');
+}
+
+async function doRebind() {
+  const bindingId = parseInt(document.getElementById('rebindId').value);
+  const newCanonical = document.getElementById('rebindNewCanonical').value.trim();
+  if (!bindingId || !newCanonical) { toast('请填写新的统一用户 ID', 'error'); return; }
+  const res = await api('/identity/rebind', { method: 'POST', body: JSON.stringify({ binding_id: bindingId, new_canonical_user_id: newCanonical }) });
+  if (res && res.ok) {
+    toast('改绑成功', 'success');
+    closeModal('rebindModal');
+    loadIdentities();
+    await refreshAll();
+  } else {
+    toast('改绑失败: ' + (res?.error || 'unknown'), 'error');
+  }
+}
 </script>
 </body>
 </html>
