@@ -39,14 +39,14 @@ class TMemoryPlugin(Star):
         )
 
         # ── 蒸馏调度 ──────────────────────────────────────────────────────────
-        # distill_interval_sec: 两次蒸馏之间的最小间隔（秒），默认 300s（5 分钟）。
+        # distill_interval_sec: 两次蒸馏之间的最小间隔（秒），默认 1800s（30 分钟）。
         # 只有积累了 distill_min_batch_count 条未蒸馏消息的用户才会被蒸馏，
         # 从而避免实时蒸馏造成的 token 浪费。
-        self.distill_interval_sec = int(self.config.get("distill_interval_sec", 300))
-        self.distill_min_batch_count = int(
-            self.config.get("distill_min_batch_count", 8)
+        self.distill_interval_sec = max(600, int(self.config.get("distill_interval_sec", 1800)))
+        self.distill_min_batch_count = max(
+            12, int(self.config.get("distill_min_batch_count", 20))
         )
-        self.distill_batch_limit = int(self.config.get("distill_batch_limit", 24))
+        self.distill_batch_limit = max(8, int(self.config.get("distill_batch_limit", 24)))
         # 指定用于蒸馏的 provider ID；留空时自动从消息上下文推断。
         self.distill_provider_id = str(
             self.config.get("distill_provider_id", "")
@@ -348,7 +348,7 @@ class TMemoryPlugin(Star):
             except Exception as e:
                 logger.warning("[tmemory] distill worker error: %s", e)
 
-            await asyncio.sleep(max(30, self.distill_interval_sec))
+            await asyncio.sleep(max(300, self.distill_interval_sec))
 
     async def _run_distill_cycle(self) -> Tuple[int, int]:
         """执行一轮蒸馏，跳过积累不够多的用户，避免 token 浪费。"""
@@ -1000,7 +1000,7 @@ class TMemoryPlugin(Star):
                     canonical_user_id, source_adapter, source_user_id, source_channel, memory_type,
                     memory, memory_hash, score, importance, confidence, reinforce_count, is_active,
                     last_seen_at, created_at, updated_at
-                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     canonical_id,

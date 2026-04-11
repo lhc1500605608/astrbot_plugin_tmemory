@@ -26,14 +26,14 @@
   "distill_interval_sec": {
     "type": "int",
     "description": "蒸馏间隔（秒）",
-    "hint": "后台 worker 的轮询间隔。建议 >= 300，避免实时蒸馏造成 token 浪费。",
-    "default": 300
+    "hint": "后台 worker 的轮询间隔。建议 >= 1800（30 分钟），避免实时蒸馏造成 token 浪费。",
+    "default": 1800
   },
   "distill_min_batch_count": {
     "type": "int",
     "description": "最小蒸馏批量",
     "hint": "单用户未蒸馏消息达到该数量才触发蒸馏。",
-    "default": 8
+    "default": 20
   },
   "distill_batch_limit": {
     "type": "int",
