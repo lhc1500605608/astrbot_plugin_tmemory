@@ -743,22 +743,32 @@ class TMemoryPlugin(Star):
         return conn
 
     def _log_memory_event(
-        self, canonical_user_id: str, event_type: str, payload: Dict[str, object]
+        self,
+        canonical_user_id: str,
+        event_type: str,
+        payload: Dict[str, object],
+        conn: Optional[sqlite3.Connection] = None,
     ):
-        """记录记忆相关事件到审计日志 memory_events。"""
-        with self._db() as conn:
-            conn.execute(
-                """
-                INSERT INTO memory_events(canonical_user_id, event_type, payload_json, created_at)
-                VALUES(?, ?, ?, ?)
-                """,
-                (
-                    canonical_user_id,
-                    event_type,
-                    json.dumps(payload, ensure_ascii=False),
-                    self._now(),
-                ),
-            )
+        """记录记忆相关事件到审计日志 memory_events。
+
+        当已在一个 with self._db() 块内时，传入 conn 以复用连接，
+        避免嵌套打开第二个写事务导致 database is locked。
+        """
+        row = (
+            canonical_user_id,
+            event_type,
+            json.dumps(payload, ensure_ascii=False),
+            self._now(),
+        )
+        sql = (
+            "INSERT INTO memory_events(canonical_user_id, event_type, payload_json, created_at)"
+            " VALUES(?, ?, ?, ?)"
+        )
+        if conn is not None:
+            conn.execute(sql, row)
+        else:
+            with self._db() as _conn:
+                _conn.execute(sql, row)
 
     # =========================================================================
     # 身份管理
@@ -1025,7 +1035,7 @@ class TMemoryPlugin(Star):
             )
             new_id = int(cur.lastrowid or 0)
 
-            # 记录蒸馏创建事件，如果有失效记忆也记录
+            # 记录蒸馏创建事件，传入 conn 避免嵌套打开第二个写事务
             if deactivated > 0:
                 self._log_memory_event(
                     canonical_user_id=canonical_id,
@@ -1035,6 +1045,7 @@ class TMemoryPlugin(Star):
                         "memory_type": memory_type_safe,
                         "deactivated_count": deactivated,
                     },
+                    conn=conn,
                 )
             else:
                 self._log_memory_event(
@@ -1044,6 +1055,7 @@ class TMemoryPlugin(Star):
                         "memory_id": new_id,
                         "memory_type": memory_type_safe,
                     },
+                    conn=conn,
                 )
 
             return new_id
@@ -1060,6 +1072,7 @@ class TMemoryPlugin(Star):
                     canonical_user_id=str(row["canonical_user_id"]),
                     event_type="delete",
                     payload={"memory_id": memory_id},
+                    conn=conn,
                 )
             return deleted
 
