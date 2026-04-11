@@ -160,6 +160,7 @@ class TMemoryWebServer:
         app.router.add_post("/api/distill/pause", self._handle_distill_pause)
         app.router.add_post("/api/user/export", self._handle_export_user)
         app.router.add_post("/api/user/purge", self._handle_purge_user)
+        app.router.add_post("/api/memory/pin", self._handle_pin_memory)
 
     # ── 中间件：IP 白名单 + JWT 鉴权 ─────────────────────────────────────
 
@@ -295,7 +296,7 @@ class TMemoryWebServer:
             rows = conn.execute(
                 """
                 SELECT id, memory_type, memory, score, importance, confidence,
-                       reinforce_count, is_active, last_seen_at, created_at, updated_at
+                       reinforce_count, is_active, is_pinned, last_seen_at, created_at, updated_at
                 FROM memories WHERE canonical_user_id = ? AND is_active = 1
                 ORDER BY importance DESC, score DESC, updated_at DESC LIMIT 200
                 """,
@@ -311,6 +312,7 @@ class TMemoryWebServer:
                 "confidence": float(r["confidence"]),
                 "reinforce_count": int(r["reinforce_count"]),
                 "is_active": int(r["is_active"]),
+                "is_pinned": int(r.get("is_pinned", 0)),
                 "last_seen_at": str(r["last_seen_at"]),
                 "created_at": str(r["created_at"]),
                 "updated_at": str(r["updated_at"]),
@@ -376,6 +378,7 @@ class TMemoryWebServer:
             ("score", "score", lambda v: self.plugin._clamp01(v)),
             ("importance", "importance", lambda v: self.plugin._clamp01(v)),
             ("confidence", "confidence", lambda v: self.plugin._clamp01(v)),
+            ("is_pinned", "is_pinned", lambda v: 1 if v else 0),
         ]:
             if key in data:
                 fields.append(f"{col} = ?")
@@ -540,3 +543,13 @@ class TMemoryWebServer:
             return web.json_response({"error": "user is required"}, status=400)
         result = self.plugin._purge_user_data(user)
         return web.json_response({"ok": True, **result})
+
+    async def _handle_pin_memory(self, request: web.Request):
+        """设置/取消记忆常驻。"""
+        data = await request.json()
+        mem_id = int(data.get("id", 0))
+        pinned = bool(data.get("pinned", True))
+        if not mem_id:
+            return web.json_response({"error": "id is required"}, status=400)
+        ok = self.plugin._set_pinned(mem_id, pinned)
+        return web.json_response({"ok": ok, "pinned": pinned})

@@ -233,7 +233,8 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Ar
               <th style="width:60px">重要度</th>
               <th style="width:60px">置信度</th>
               <th style="width:45px">强化</th>
-              <th style="width:100px">操作</th>
+              <th style="width:30px">📌</th>
+              <th style="width:120px">操作</th>
             </tr>
           </thead>
           <tbody id="memoryTableBody"></tbody>
@@ -308,6 +309,10 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Ar
       <div class="form-group"><label>记忆内容</label><textarea id="editMemory" rows="3"></textarea></div>
       <div class="form-group"><label>类型</label>
         <select id="editType"><option value="preference">preference</option><option value="fact">fact</option><option value="task">task</option><option value="restriction">restriction</option><option value="style">style</option></select>
+      </div>
+      <div class="form-group" style="display:flex;align-items:center;gap:8px">
+        <input id="editPinned" type="checkbox">
+        <label style="margin:0">📌 常驻记忆（不会被衰减/剪枝/冲突覆盖）</label>
       </div>
       <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px">
         <div class="form-group"><label>分数</label><input id="editScore" type="number" step="0.01" min="0" max="1"></div>
@@ -549,7 +554,7 @@ function renderMemoryTable(memories) {
   const filtered = memoryFilter ? memories.filter(m => m.memory.toLowerCase().includes(memoryFilter)) : memories;
   const tbody = document.getElementById('memoryTableBody');
   if (filtered.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="8" style="text-align:center;color:var(--text2);padding:40px">暂无记忆</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="9" style="text-align:center;color:var(--text2);padding:40px">暂无记忆</td></tr>';
     return;
   }
   tbody.innerHTML = filtered.map(m => `
@@ -561,7 +566,9 @@ function renderMemoryTable(memories) {
       <td>${scoreBar(m.importance)}</td>
       <td>${scoreBar(m.confidence)}</td>
       <td style="text-align:center">${m.reinforce_count}</td>
+      <td style="text-align:center">${m.is_pinned ? '📌' : ''}</td>
       <td>
+        <button class="btn btn-sm" onclick="togglePin(${m.id}, ${!m.is_pinned})" title="${m.is_pinned ? '取消常驻' : '设为常驻'}">${m.is_pinned ? '📌' : '📍'}</button>
         <button class="btn btn-sm" onclick='openEditModal(${JSON.stringify(m)})'>✏️</button>
         <button class="btn btn-sm btn-danger" onclick="deleteMemory(${m.id})">🗑️</button>
       </td>
@@ -669,11 +676,12 @@ function openEditModal(m) {
   document.getElementById('editScore').value = m.score ?? 0.7;
   document.getElementById('editImportance').value = m.importance ?? 0.6;
   document.getElementById('editConfidence').value = m.confidence ?? 0.7;
+  document.getElementById('editPinned').checked = !!m.is_pinned;
   document.getElementById('editModal').classList.add('show');
 }
 
 function openAddMemoryModal() {
-  openEditModal({ id: '', memory: '', memory_type: 'fact', score: 0.7, importance: 0.6, confidence: 0.7 });
+  openEditModal({ id: '', memory: '', memory_type: 'fact', score: 0.7, importance: 0.6, confidence: 0.7, is_pinned: false });
   document.getElementById('editModalTitle').textContent = '添加新记忆';
 }
 
@@ -686,6 +694,7 @@ async function saveMemory() {
     score: parseFloat(document.getElementById('editScore').value) || 0.7,
     importance: parseFloat(document.getElementById('editImportance').value) || 0.6,
     confidence: parseFloat(document.getElementById('editConfidence').value) || 0.7,
+    is_pinned: document.getElementById('editPinned').checked,
   };
   if (id) body.id = parseInt(id);
   const endpoint = id ? '/memory/update' : '/memory/add';
@@ -854,6 +863,14 @@ async function togglePause() {
 }
 
 // ── Export / Purge ───────────────────────────────────────────────────────────
+async function togglePin(id, pinned) {
+  const res = await api('/memory/pin', { method: 'POST', body: JSON.stringify({ id, pinned }) });
+  if (res && res.ok) {
+    toast(pinned ? '已设为常驻 📌' : '已取消常驻', 'success');
+    if (currentUser) loadUserData(currentUser);
+  }
+}
+
 async function exportCurrentUser() {
   if (!currentUser) { toast('请先选择用户', 'error'); return; }
   const res = await api('/user/export', { method: 'POST', body: JSON.stringify({ user: currentUser }) });

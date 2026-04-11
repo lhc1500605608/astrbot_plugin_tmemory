@@ -246,8 +246,9 @@ class TMemoryPlugin(Star):
 
         lines = [f"canonical_id={canonical_id}"]
         for row in memories:
+            pin = "📌 " if row.get("is_pinned") else ""
             lines.append(
-                f"[{row['id']}] [{row['memory_type']}] s={row['score']:.2f} i={row['importance']:.2f} c={row['confidence']:.2f} r={row['reinforce_count']} | {row['memory']}"
+                f"[{row['id']}] {pin}[{row['memory_type']}] s={row['score']:.2f} i={row['importance']:.2f} c={row['confidence']:.2f} r={row['reinforce_count']} | {row['memory']}"
             )
         yield event.plain_result("\n".join(lines))
 
@@ -696,6 +697,7 @@ class TMemoryPlugin(Star):
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
                     is_active INTEGER NOT NULL DEFAULT 1,
+                    is_pinned INTEGER NOT NULL DEFAULT 0,
                     UNIQUE(canonical_user_id, memory_hash)
                 )
                 """
@@ -754,6 +756,7 @@ class TMemoryPlugin(Star):
                 "reinforce_count": "INTEGER NOT NULL DEFAULT 0",
                 "last_seen_at": "TEXT NOT NULL DEFAULT ''",
                 "is_active": "INTEGER NOT NULL DEFAULT 1",
+                "is_pinned": "INTEGER NOT NULL DEFAULT 0",
             },
         )
         self._ensure_columns(
@@ -1060,7 +1063,7 @@ class TMemoryPlugin(Star):
             candidate_rows = conn.execute(
                 """
                 SELECT id, memory FROM memories
-                WHERE canonical_user_id=? AND memory_type=? AND is_active=1
+                WHERE canonical_user_id=? AND memory_type=? AND is_active=1 AND is_pinned=0
                 ORDER BY created_at DESC
                 LIMIT 15
                 """,
@@ -1156,7 +1159,7 @@ class TMemoryPlugin(Star):
         with self._db() as conn:
             rows = conn.execute(
                 """
-                SELECT id, memory_type, memory, score, importance, confidence, reinforce_count, updated_at
+                SELECT id, memory_type, memory, score, importance, confidence, reinforce_count, updated_at, is_pinned
                 FROM memories
                 WHERE canonical_user_id=? AND is_active=1
                 ORDER BY importance DESC, score DESC, updated_at DESC
@@ -1175,6 +1178,7 @@ class TMemoryPlugin(Star):
                 "confidence": float(r["confidence"]),
                 "reinforce_count": int(r["reinforce_count"]),
                 "updated_at": str(r["updated_at"]),
+                "is_pinned": int(r["is_pinned"]),
             }
             for r in rows
         ]
@@ -1410,6 +1414,28 @@ class TMemoryPlugin(Star):
 
         self._trim_conversation(canonical_id, keep_last=self.cache_max_rows)
 
+    @filter.command("tm_pin")
+    async def tm_pin(self, event: AstrMessageEvent):
+        """常驻一条记忆（不会被衰减/剪枝/冲突覆盖）：/tm_pin 12"""
+        raw = (event.message_str or "").strip()
+        arg = re.sub(r"^/tm_pin\s*", "", raw, flags=re.IGNORECASE).strip()
+        if not arg.isdigit():
+            yield event.plain_result("用法: /tm_pin <记忆ID>")
+            return
+        ok = self._set_pinned(int(arg), True)
+        yield event.plain_result(f"记忆 {arg} 已设为常驻" if ok else f"未找到记忆 {arg}")
+
+    @filter.command("tm_unpin")
+    async def tm_unpin(self, event: AstrMessageEvent):
+        """取消常驻一条记忆：/tm_unpin 12"""
+        raw = (event.message_str or "").strip()
+        arg = re.sub(r"^/tm_unpin\s*", "", raw, flags=re.IGNORECASE).strip()
+        if not arg.isdigit():
+            yield event.plain_result("用法: /tm_unpin <记忆ID>")
+            return
+        ok = self._set_pinned(int(arg), False)
+        yield event.plain_result(f"记忆 {arg} 已取消常驻" if ok else f"未找到记忆 {arg}")
+
     @filter.command("tm_export")
     async def tm_export(self, event: AstrMessageEvent):
         """导出当前用户的所有记忆（JSON）：/tm_export"""
@@ -1425,6 +1451,15 @@ class TMemoryPlugin(Star):
         yield event.plain_result(
             f"已清除 {canonical_id} 的所有数据：{deleted['memories']} 条记忆，{deleted['cache']} 条缓存。"
         )
+
+    def _set_pinned(self, memory_id: int, pinned: bool) -> bool:
+        """设置/取消常驻标记。常驻记忆不会被衰减、剪枝、冲突覆盖。"""
+        with self._db() as conn:
+            cur = conn.execute(
+                "UPDATE memories SET is_pinned = ? WHERE id = ?",
+                (1 if pinned else 0, memory_id),
+            )
+            return cur.rowcount > 0
 
     # =========================================================================
     # 蒸馏历史与健康监测
@@ -1565,7 +1600,7 @@ class TMemoryPlugin(Star):
 
         with self._db() as conn:
             rows = conn.execute(
-                "SELECT id, last_seen_at FROM memories WHERE is_active = 1"
+                "SELECT id, last_seen_at FROM memories WHERE is_active = 1 AND is_pinned = 0"
             ).fetchall()
             for row in rows:
                 try:
@@ -1590,7 +1625,7 @@ class TMemoryPlugin(Star):
             rows = conn.execute(
                 """
                 SELECT id, score, importance, confidence, reinforce_count, created_at
-                FROM memories WHERE is_active = 1
+                FROM memories WHERE is_active = 1 AND is_pinned = 0
                 """
             ).fetchall()
 
