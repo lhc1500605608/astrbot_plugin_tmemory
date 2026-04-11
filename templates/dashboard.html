@@ -401,7 +401,19 @@ async function api(path, opts = {}) {
       ...opts
     });
     if (resp.status === 401) { logout(); toast('登录已过期', 'error'); return null; }
-    return await resp.json();
+    const ct = resp.headers.get('content-type') || '';
+    if (!ct.includes('application/json')) {
+      const text = await resp.text();
+      console.error('Non-JSON response:', resp.status, text.slice(0, 200));
+      toast(`服务端错误 (${resp.status})`, 'error');
+      return null;
+    }
+    const data = await resp.json();
+    if (resp.status >= 400 && data.error) {
+      toast(data.error, 'error');
+      return null;
+    }
+    return data;
   } catch (e) {
     console.error('API error:', e);
     toast('请求失败: ' + e.message, 'error');

@@ -172,7 +172,14 @@ class TMemoryWebServer:
 
         # 登录接口和首页不需要 token
         if path in ("/", "/api/login"):
-            return await handler(request)
+            try:
+                return await handler(request)
+            except Exception as exc:
+                _astrbot_logger.exception("[tmemory-web] handler error: %s %s", request.method, request.path)
+                return web.json_response(
+                    {"error": f"内部错误: {type(exc).__name__}: {exc}"},
+                    status=500,
+                )
 
         # 其余 API 需要 JWT
         auth_header = request.headers.get("Authorization", "")
@@ -190,7 +197,14 @@ class TMemoryWebServer:
             return web.json_response({"error": "登录已过期，请重新登录"}, status=401)
 
         request["user"] = payload.get("user", "")
-        return await handler(request)
+        try:
+            return await handler(request)
+        except Exception as exc:
+            _astrbot_logger.exception("[tmemory-web] handler error: %s %s", request.method, request.path)
+            return web.json_response(
+                {"error": f"内部错误: {type(exc).__name__}: {exc}"},
+                status=500,
+            )
 
     def _get_client_ip(self, request: web.Request) -> str:
         if self.trust_proxy:
