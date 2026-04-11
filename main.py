@@ -39,14 +39,12 @@ class TMemoryPlugin(Star):
         )
 
         # ── 蒸馏调度 ──────────────────────────────────────────────────────────
-        # distill_interval_sec: 两次蒸馏之间的最小间隔（秒），默认 1800s（30 分钟）。
+        # distill_interval_sec: 两次蒸馏之间的最小间隔（秒），默认 17280s（约 4.8 小时，每天约 5 次）。
         # 只有积累了 distill_min_batch_count 条未蒸馏消息的用户才会被蒸馏，
         # 从而避免实时蒸馏造成的 token 浪费。
-        self.distill_interval_sec = max(600, int(self.config.get("distill_interval_sec", 1800)))
-        self.distill_min_batch_count = max(
-            12, int(self.config.get("distill_min_batch_count", 20))
-        )
-        self.distill_batch_limit = max(8, int(self.config.get("distill_batch_limit", 24)))
+        self.distill_interval_sec = max(4 * 3600, int(self.config.get("distill_interval_sec", 17280)))
+        self.distill_min_batch_count = max(8, int(self.config.get("distill_min_batch_count", 20)))
+        self.distill_batch_limit = max(20, int(self.config.get("distill_batch_limit", 80)))
         # 指定用于蒸馏的 provider ID；留空时自动从消息上下文推断。
         self.distill_provider_id = str(
             self.config.get("distill_provider_id", "")
@@ -209,7 +207,7 @@ class TMemoryPlugin(Star):
     @filter.command("tm_distill_now")
     async def tm_distill_now(self, event: AstrMessageEvent):
         """手动触发一次批量精馏：/tm_distill_now"""
-        processed_users, total_memories = await self._run_distill_cycle()
+        processed_users, total_memories = await self._run_distill_cycle(force=True)
         yield event.plain_result(
             f"批量精馏完成：处理用户 {processed_users} 个，新增/更新记忆 {total_memories} 条。"
         )
@@ -338,7 +336,7 @@ class TMemoryPlugin(Star):
         await asyncio.sleep(8)
         while self._worker_running:
             try:
-                users, memories = await self._run_distill_cycle()
+                users, memories = await self._run_distill_cycle(force=False)
                 if users > 0:
                     logger.info(
                         "[tmemory] distill cycle done: users=%s memories=%s",
@@ -348,17 +346,22 @@ class TMemoryPlugin(Star):
             except Exception as e:
                 logger.warning("[tmemory] distill worker error: %s", e)
 
-            await asyncio.sleep(max(300, self.distill_interval_sec))
+            await asyncio.sleep(max(3600, self.distill_interval_sec))
 
-    async def _run_distill_cycle(self) -> Tuple[int, int]:
-        """执行一轮蒸馏，跳过积累不够多的用户，避免 token 浪费。"""
-        pending_users = self._pending_distill_users(limit=20)
+    async def _run_distill_cycle(self, force: bool = False) -> Tuple[int, int]:
+        """执行一轮蒸馏。
+
+        - force=False: 按最小批量门槛蒸馏（节省 token）
+        - force=True: 处理所有待蒸馏用户（用于手动触发）
+        """
+        min_required = 1 if force else self.distill_min_batch_count
+        pending_users = self._pending_distill_users(limit=(100 if force else 20), min_batch_count=min_required)
         processed_users = 0
         total_memories = 0
 
         for canonical_id in pending_users:
             rows = self._fetch_pending_rows(canonical_id, self.distill_batch_limit)
-            if len(rows) < self.distill_min_batch_count:
+            if (not force) and len(rows) < self.distill_min_batch_count:
                 continue
 
             llm_items = await self._distill_rows_with_llm(rows)
@@ -1209,7 +1212,10 @@ class TMemoryPlugin(Star):
             ).fetchall()
         return [(str(r["role"]), str(r["content"])) for r in reversed(rows)]
 
-    def _pending_distill_users(self, limit: int) -> List[str]:
+    def _pending_distill_users(
+        self, limit: int, min_batch_count: Optional[int] = None
+    ) -> List[str]:
+        min_required = self.distill_min_batch_count if min_batch_count is None else max(1, int(min_batch_count))
         with self._db() as conn:
             rows = conn.execute(
                 """
@@ -1221,7 +1227,7 @@ class TMemoryPlugin(Star):
                 ORDER BY cnt DESC
                 LIMIT ?
                 """,
-                (self.distill_min_batch_count, limit),
+                (min_required, limit),
             ).fetchall()
         return [str(r["canonical_user_id"]) for r in rows]
 

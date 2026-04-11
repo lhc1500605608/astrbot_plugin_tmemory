@@ -152,6 +152,7 @@ class TMemoryWebServer:
         app.router.add_post("/api/memory/update", self._handle_update_memory)
         app.router.add_post("/api/memory/delete", self._handle_delete_memory)
         app.router.add_post("/api/distill", self._handle_trigger_distill)
+        app.router.add_get("/api/pending", self._handle_get_pending)
 
     # ── 中间件：IP 白名单 + JWT 鉴权 ─────────────────────────────────────
 
@@ -231,21 +232,39 @@ class TMemoryWebServer:
         return web.json_response({"error": "用户名或密码错误"}, status=401)
 
     async def _handle_get_users(self, request: web.Request):
+        """返回所有用户：合并 memories 和 conversation_cache 两张表。"""
         with self.plugin._db() as conn:
-            rows = conn.execute(
-                """
-                SELECT canonical_user_id, COUNT(*) as cnt
-                FROM memories WHERE is_active = 1
-                GROUP BY canonical_user_id ORDER BY cnt DESC
-                """
+            # 已蒸馏记忆的用户
+            mem_rows = conn.execute(
+                "SELECT canonical_user_id, COUNT(*) as cnt "
+                "FROM memories WHERE is_active = 1 "
+                "GROUP BY canonical_user_id"
             ).fetchall()
-        users = [
-            {"id": str(r["canonical_user_id"]), "count": int(r["cnt"])} for r in rows
-        ]
+            # 待蒸馏缓存的用户
+            cache_rows = conn.execute(
+                "SELECT canonical_user_id, COUNT(*) as cnt "
+                "FROM conversation_cache WHERE distilled = 0 "
+                "GROUP BY canonical_user_id"
+            ).fetchall()
+
+        merged: dict = {}
+        for r in mem_rows:
+            uid = str(r["canonical_user_id"])
+            merged[uid] = {"id": uid, "memory_count": int(r["cnt"]), "pending_count": 0}
+        for r in cache_rows:
+            uid = str(r["canonical_user_id"])
+            if uid in merged:
+                merged[uid]["pending_count"] = int(r["cnt"])
+            else:
+                merged[uid] = {"id": uid, "memory_count": 0, "pending_count": int(r["cnt"])}
+
+        users = sorted(merged.values(), key=lambda u: u["memory_count"] + u["pending_count"], reverse=True)
         return web.json_response({"users": users})
 
     async def _handle_get_stats(self, request: web.Request):
-        return web.json_response(self.plugin._get_global_stats())
+        stats = self.plugin._get_global_stats()
+        stats["pending_users"] = self.plugin._count_pending_users()
+        return web.json_response(stats)
 
     async def _handle_get_memories(self, request: web.Request):
         user = request.query.get("user", "")
@@ -376,7 +395,7 @@ class TMemoryWebServer:
         return web.json_response({"ok": deleted})
 
     async def _handle_trigger_distill(self, request: web.Request):
-        processed_users, total_memories = await self.plugin._run_distill_cycle()
+        processed_users, total_memories = await self.plugin._run_distill_cycle(force=True)
         return web.json_response(
             {
                 "ok": True,
@@ -384,3 +403,23 @@ class TMemoryWebServer:
                 "total_memories": total_memories,
             }
         )
+
+    async def _handle_get_pending(self, request: web.Request):
+        """返回待蒸馏队列详情。"""
+        with self.plugin._db() as conn:
+            rows = conn.execute(
+                "SELECT canonical_user_id, COUNT(*) as cnt, "
+                "MIN(created_at) as oldest, MAX(created_at) as newest "
+                "FROM conversation_cache WHERE distilled = 0 "
+                "GROUP BY canonical_user_id ORDER BY cnt DESC LIMIT 100"
+            ).fetchall()
+        pending = [
+            {
+                "user": str(r["canonical_user_id"]),
+                "count": int(r["cnt"]),
+                "oldest": str(r["oldest"]),
+                "newest": str(r["newest"]),
+            }
+            for r in rows
+        ]
+        return web.json_response({"pending": pending})
