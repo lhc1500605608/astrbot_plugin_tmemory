@@ -196,6 +196,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Ar
         <button onclick="switchTab('table',this)">📋 记忆列表</button>
         <button onclick="switchTab('pending',this)">⏳ 待蒸馏队列</button>
         <button onclick="switchTab('events',this)">📜 审计日志</button>
+        <button onclick="switchTab('refine',this)">✂️ 手动精馏</button>
         <button onclick="switchTab('identity',this)">👥 用户管理</button>
         <button onclick="switchTab('health',this)">💊 系统健康</button>
       </div>
@@ -276,6 +277,74 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Ar
           </tr></thead>
           <tbody id="healthTableBody"></tbody>
         </table>
+      </div>
+
+      <!-- Refine View -->
+      <div class="table-panel" id="panelRefine" style="display:none">
+        <!-- 工具栏 -->
+        <div style="margin-bottom:14px;display:flex;flex-wrap:wrap;gap:8px;align-items:center;">
+          <select id="refineMode" class="search-box" style="max-width:130px">
+            <option value="both">both（合并+拆分）</option>
+            <option value="merge">merge（仅合并）</option>
+            <option value="split">split（仅拆分）</option>
+          </select>
+          <input id="refineLimit" type="number" min="1" max="200" value="20"
+            class="search-box" style="max-width:80px" placeholder="条数">
+          <label style="display:flex;align-items:center;gap:4px;font-size:13px;cursor:pointer">
+            <input id="refineDryRun" type="checkbox"> 预览模式(dry_run)
+          </label>
+          <label style="display:flex;align-items:center;gap:4px;font-size:13px;cursor:pointer">
+            <input id="refineIncludePinned" type="checkbox"> 包含常驻记忆
+          </label>
+          <input id="refineExtra" class="search-box" style="flex:1;min-width:180px"
+            placeholder="附加要求（可选），例如：删除闲聊噪声并合并重复偏好">
+          <button class="btn btn-sm btn-primary" onclick="runRefine()">🔬 执行精馏</button>
+        </div>
+        <!-- 结果预览 -->
+        <div id="refineResult" style="display:none;margin-bottom:14px;padding:12px 14px;background:var(--surface2);border-radius:var(--radius);font-size:13px;"></div>
+
+        <!-- 手动合并区 -->
+        <div style="border-top:1px solid var(--border);padding-top:14px;margin-top:4px">
+          <h3 style="font-size:12px;text-transform:uppercase;color:var(--text2);letter-spacing:1px;margin-bottom:10px">
+            手动合并记忆
+          </h3>
+          <div style="display:flex;gap:8px;align-items:flex-start">
+            <div style="flex:1">
+              <div class="form-group">
+                <label>选择要合并的记忆 <span style="color:var(--text2)">(Ctrl/Cmd 多选)</span></label>
+                <select id="mergeMemSelect" multiple style="height:130px;font-size:12px"></select>
+              </div>
+              <div class="form-group">
+                <label>合并后的记忆内容（留空自动合并）</label>
+                <textarea id="mergeMemText" rows="2" placeholder="用户..."></textarea>
+              </div>
+            </div>
+            <button class="btn btn-sm btn-primary" style="margin-top:22px;white-space:nowrap"
+              onclick="doMemMerge()">🔀 合并</button>
+          </div>
+        </div>
+
+        <!-- 手动拆分区 -->
+        <div style="border-top:1px solid var(--border);padding-top:14px;margin-top:4px">
+          <h3 style="font-size:12px;text-transform:uppercase;color:var(--text2);letter-spacing:1px;margin-bottom:10px">
+            手动拆分记忆
+          </h3>
+          <div style="display:flex;gap:8px;align-items:flex-start">
+            <div style="flex:1">
+              <div class="form-group">
+                <label>选择要拆分的记忆</label>
+                <select id="splitMemSelect" style="font-size:12px"></select>
+              </div>
+              <div class="form-group">
+                <label>拆分片段（用 | 分隔，留空调用 LLM 自动拆分）</label>
+                <textarea id="splitMemSegments" rows="2"
+                  placeholder="用户偏好吃辛辣食物|用户担心体重管理"></textarea>
+              </div>
+            </div>
+            <button class="btn btn-sm btn-primary" style="margin-top:22px;white-space:nowrap"
+              onclick="doMemSplit()">✂️ 拆分</button>
+          </div>
+        </div>
       </div>
 
       <!-- Identity View -->
@@ -518,15 +587,16 @@ function selectUser(userId) {
 function switchTab(tab, btn) {
   document.querySelectorAll('.tab-bar button').forEach(b => b.classList.remove('active'));
   btn.classList.add('active');
-  ['panelMindmap','panelTable','panelPending','panelEvents','panelIdentity','panelHealth'].forEach(id => {
+  ['panelMindmap','panelTable','panelPending','panelEvents','panelIdentity','panelHealth','panelRefine'].forEach(id => {
     document.getElementById(id).style.display = 'none';
   });
-  const panelMap = { mindmap:'panelMindmap', table:'panelTable', pending:'panelPending', events:'panelEvents', identity:'panelIdentity', health:'panelHealth' };
+  const panelMap = { mindmap:'panelMindmap', table:'panelTable', pending:'panelPending', events:'panelEvents', identity:'panelIdentity', health:'panelHealth', refine:'panelRefine' };
   document.getElementById(panelMap[tab]).style.display = '';
   if (tab === 'mindmap') requestAnimationFrame(() => renderMindmap(allMemories, currentUser));
   if (tab === 'pending') loadPendingQueue();
   if (tab === 'identity') loadIdentities();
   if (tab === 'health') loadHealth();
+  if (tab === 'refine') loadRefineMemoryOptions();
 }
 
 // ── Pending queue ───────────────────────────────────────────────────────────
@@ -892,6 +962,117 @@ async function purgeCurrentUser() {
     toast(`已清除：${res.memories} 条记忆，${res.cache} 条缓存`, 'success');
     currentUser = null;
     await refreshAll();
+  }
+}
+
+// ── Refine panel ─────────────────────────────────────────────────────────────
+
+async function loadRefineMemoryOptions() {
+  if (!currentUser) return;
+  const data = await api('/memories?user=' + encodeURIComponent(currentUser));
+  const mems = data?.memories || [];
+
+  // 填充合并多选框
+  const mergeEl = document.getElementById('mergeMemSelect');
+  mergeEl.innerHTML = mems.map(m =>
+    `<option value="${m.id}">[#${m.id}${m.is_pinned ? ' 📌' : ''}] (${m.memory_type}) ${escHtml(m.memory.slice(0, 60))}</option>`
+  ).join('');
+
+  // 填充拆分单选框
+  const splitEl = document.getElementById('splitMemSelect');
+  splitEl.innerHTML = '<option value="">— 选择一条记忆 —</option>' + mems.map(m =>
+    `<option value="${m.id}">[#${m.id}${m.is_pinned ? ' 📌' : ''}] (${m.memory_type}) ${escHtml(m.memory.slice(0, 60))}</option>`
+  ).join('');
+}
+
+async function runRefine() {
+  if (!currentUser) { toast('请先选择用户', 'error'); return; }
+  const mode = document.getElementById('refineMode').value;
+  const limit = parseInt(document.getElementById('refineLimit').value) || 20;
+  const dry_run = document.getElementById('refineDryRun').checked;
+  const include_pinned = document.getElementById('refineIncludePinned').checked;
+  const extra = document.getElementById('refineExtra').value.trim();
+
+  const btn = document.querySelector('#panelRefine .btn-primary');
+  const oldText = btn.textContent;
+  btn.textContent = '⏳ 处理中…';
+  btn.disabled = true;
+
+  const res = await api('/memory/refine', {
+    method: 'POST',
+    body: JSON.stringify({ user: currentUser, mode, limit, dry_run, include_pinned, extra_instruction: extra }),
+  });
+
+  btn.textContent = oldText;
+  btn.disabled = false;
+
+  const resultEl = document.getElementById('refineResult');
+  if (res && res.ok !== undefined) {
+    const prefix = dry_run ? '📋 预览结果（未落库）' : '✅ 精馏完成';
+    resultEl.style.display = '';
+    resultEl.innerHTML = `<strong>${prefix}</strong>：更新 <b>${res.updates}</b> 条 · 新增 <b>${res.adds}</b> 条 · 删除 <b>${res.deletes}</b> 条` +
+      (res.note ? `<br><span style="color:var(--text2);font-size:12px">备注：${escHtml(res.note)}</span>` : '');
+    if (!dry_run) {
+      await loadUserData(currentUser);
+      loadRefineMemoryOptions();
+    }
+  } else {
+    resultEl.style.display = '';
+    resultEl.innerHTML = `<span style="color:var(--danger)">精馏失败：${escHtml(res?.error || 'unknown')}</span>`;
+  }
+}
+
+async function doMemMerge() {
+  if (!currentUser) { toast('请先选择用户', 'error'); return; }
+  const select = document.getElementById('mergeMemSelect');
+  const ids = Array.from(select.selectedOptions).map(o => parseInt(o.value));
+  if (ids.length < 2) { toast('请至少选择两条记忆', 'error'); return; }
+  const memory = document.getElementById('mergeMemText').value.trim();
+  if (!confirm(`确认合并 ${ids.length} 条记忆？保留第一条，删除其余。此操作不可撤销。`)) return;
+
+  const res = await api('/memory/merge', {
+    method: 'POST',
+    body: JSON.stringify({ user: currentUser, ids, memory }),
+  });
+  if (res && res.ok) {
+    toast(`合并完成：保留 #${res.keep_id}，删除 ${res.deleted} 条`, 'success');
+    document.getElementById('mergeMemText').value = '';
+    await loadUserData(currentUser);
+    loadRefineMemoryOptions();
+  } else {
+    toast('合并失败: ' + (res?.error || 'unknown'), 'error');
+  }
+}
+
+async function doMemSplit() {
+  if (!currentUser) { toast('请先选择用户', 'error'); return; }
+  const memId = parseInt(document.getElementById('splitMemSelect').value);
+  if (!memId) { toast('请选择要拆分的记忆', 'error'); return; }
+  const rawSegments = document.getElementById('splitMemSegments').value.trim();
+
+  let segments = null;
+  if (rawSegments) {
+    segments = rawSegments.split('|').map(s => s.trim()).filter(Boolean);
+    if (segments.length < 2) { toast('请至少输入两个片段，用 | 分隔', 'error'); return; }
+  }
+
+  const btn = document.querySelectorAll('#panelRefine .btn-primary')[2];
+  if (btn) { btn.textContent = '⏳ 处理中…'; btn.disabled = true; }
+
+  const body = { user: currentUser, id: memId };
+  if (segments) body.segments = segments;
+
+  const res = await api('/memory/split', { method: 'POST', body: JSON.stringify(body) });
+  if (btn) { btn.textContent = '✂️ 拆分'; btn.disabled = false; }
+
+  if (res && res.ok) {
+    toast(`拆分完成：原记忆 #${res.base_id} + 新增 ${res.added_ids.length} 条`, 'success');
+    document.getElementById('splitMemSegments').value = '';
+    document.getElementById('splitMemSelect').value = '';
+    await loadUserData(currentUser);
+    loadRefineMemoryOptions();
+  } else {
+    toast('拆分失败: ' + (res?.error || 'unknown'), 'error');
   }
 }
 </script>
