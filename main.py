@@ -78,7 +78,6 @@ class TMemoryPlugin(Star):
         self.enable_memory_injection = bool(
             self.config.get("enable_memory_injection", True)
         )
-        self.inject_memory_limit = int(self.config.get("inject_memory_limit", 5))
         self.manual_refine_default_mode = str(self.config.get("manual_refine_default_mode", "both")).strip().lower()
         if self.manual_refine_default_mode not in {"merge", "split", "both"}:
             self.manual_refine_default_mode = "both"
@@ -107,6 +106,37 @@ class TMemoryPlugin(Star):
                     "[tmemory] sqlite-vec not installed; vector search disabled. "
                     "Run: pip install sqlite-vec"
                 )
+
+        # ── Reranker（可选，调用 /v1/rerank 接口）────────────────────────────
+        self.enable_reranker = bool(self.config.get("enable_reranker", False))
+        self.rerank_base_url = str(self.config.get("rerank_base_url", "")).strip()
+        self.rerank_api_key = str(self.config.get("rerank_api_key", "")).strip()
+        self.rerank_model = str(self.config.get("rerank_model", "")).strip()
+        self.rerank_top_n = max(1, int(self.config.get("rerank_top_n", 5)))
+
+        # ── 蒸馏模型（独立于 chat provider，可留空复用 distill_provider_id）──
+        self.distill_model_id = str(self.config.get("distill_model_id", "")).strip()
+
+        # ── 用户/人格隔离 ─────────────────────────────────────────────────────
+        # memory_scope 可选值：
+        #   "user"    - 仅按用户隔离，跨会话/群聊共用同一份记忆（默认）
+        #   "session" - 按 unified_msg_origin 隔离，群聊每个会话独立
+        # private_memory_in_group: True 时允许群聊注入私聊记忆（默认 False，保护隐私）
+        self.memory_scope = str(self.config.get("memory_scope", "user")).strip().lower()
+        if self.memory_scope not in {"user", "session"}:
+            self.memory_scope = "user"
+        self.private_memory_in_group = bool(self.config.get("private_memory_in_group", False))
+
+        # ── 注入位置与召回量 ──────────────────────────────────────────────────
+        # inject_position: "tail"(追加末尾,默认) | "head"(插在最前) | "slot"(替换占位符)
+        # inject_slot_marker: "slot" 模式时 system_prompt 中的占位文字
+        # inject_max_chars: 注入块字符上限，0=不限
+        self.inject_position = str(self.config.get("inject_position", "tail")).strip().lower()
+        if self.inject_position not in {"tail", "head", "slot"}:
+            self.inject_position = "tail"
+        self.inject_slot_marker = str(self.config.get("inject_slot_marker", "{{tmemory}}")).strip()
+        self.inject_memory_limit = int(self.config.get("inject_memory_limit", 5))
+        self.inject_max_chars = int(self.config.get("inject_max_chars", 0))
 
         # ── 敏感信息脱敏 ──────────────────────────────────────────────────────
         self._sanitize_patterns = self._build_sanitize_patterns()
@@ -225,6 +255,8 @@ class TMemoryPlugin(Star):
             source_adapter=adapter,
             source_user_id=adapter_user,
             unified_msg_origin=umo,
+            scope=self._get_memory_scope(event),
+            persona_id=self._get_current_persona(event),
         )
 
     @filter.on_llm_response()
@@ -264,15 +296,26 @@ class TMemoryPlugin(Star):
         try:
             canonical_id, _, _ = self._resolve_current_identity(event)
             query = self._normalize_text(getattr(req, "prompt", "") or "")
+            scope = self._get_memory_scope(event)
+            persona_id = self._get_current_persona(event)
+            is_group = self._is_group_event(event)
+
             memory_block = await self._build_injection_block(
-                canonical_id, query, self.inject_memory_limit
+                canonical_id, query, self.inject_memory_limit,
+                scope=scope, persona_id=persona_id,
+                exclude_private=(is_group and not self.private_memory_in_group),
             )
             if not memory_block:
                 return
 
             existing = getattr(req, "system_prompt", "") or ""
-            sep = "\n\n" if existing else ""
-            req.system_prompt = existing + sep + memory_block
+            if self.inject_position == "slot" and self.inject_slot_marker in existing:
+                req.system_prompt = existing.replace(self.inject_slot_marker, memory_block, 1)
+            elif self.inject_position == "head":
+                req.system_prompt = memory_block + ("\n\n" if existing else "") + existing
+            else:
+                sep = "\n\n" if existing else ""
+                req.system_prompt = existing + sep + memory_block
         except Exception as e:
             logger.warning("[tmemory] on_llm_request inject failed: %s", e)
 
@@ -700,6 +743,8 @@ class TMemoryPlugin(Star):
                     )
                     if not mem_text:
                         continue
+                    row_scope = str(rows[0].get("scope", "user"))
+                    row_persona = str(rows[0].get("persona_id", ""))
                     new_id = self._insert_memory(
                         canonical_id=canonical_id,
                         adapter=str(rows[0]["source_adapter"]),
@@ -710,6 +755,8 @@ class TMemoryPlugin(Star):
                         importance=self._clamp01(item.get("importance", 0.6)),
                         confidence=self._clamp01(item.get("confidence", 0.7)),
                         source_channel="scheduled_distill",
+                        scope=row_scope,
+                        persona_id=row_persona,
                     )
                     if self._vec_available and new_id:
                         await self._upsert_vector(new_id, mem_text)
@@ -834,7 +881,12 @@ class TMemoryPlugin(Star):
         )
 
     async def _resolve_distill_provider_id(self, rows: List[Dict]) -> str:
-        """解析要用于蒸馏的 provider ID。优先使用配置，其次从消息 UMO 推断。"""
+        """解析要用于蒸馏的 provider ID。
+
+        优先级：distill_model_id > distill_provider_id > 消息来源推断
+        """
+        if self.distill_model_id:
+            return self.distill_model_id
         if self.distill_provider_id:
             return self.distill_provider_id
 
@@ -925,13 +977,20 @@ class TMemoryPlugin(Star):
     # =========================================================================
 
     async def _build_injection_block(
-        self, canonical_user_id: str, query: str, limit: int
+        self,
+        canonical_user_id: str,
+        query: str,
+        limit: int,
+        scope: str = "user",
+        persona_id: str = "",
+        exclude_private: bool = False,
     ) -> str:
-        """构建注入到 system_prompt 的记忆块。
-
-        格式简洁，专为 token 节省设计。返回空字符串表示无有效记忆。
-        """
-        rows = await self._retrieve_memories(canonical_user_id, query, limit)
+        """构建注入到 system_prompt 的记忆块。"""
+        rows = await self._retrieve_memories(
+            canonical_user_id, query, limit,
+            scope=scope, persona_id=persona_id,
+            exclude_private=exclude_private,
+        )
         if not rows:
             return ""
 
@@ -941,7 +1000,10 @@ class TMemoryPlugin(Star):
             mem = row["memory"]
             lines.append(f"- ({mtype}) {mem}")
 
-        return "\n".join(lines)
+        block = "\n".join(lines)
+        if self.inject_max_chars > 0 and len(block) > self.inject_max_chars:
+            block = block[: self.inject_max_chars] + "…"
+        return block
 
     async def build_memory_context(
         self, canonical_user_id: str, query: str, limit: int = 6
@@ -1033,7 +1095,7 @@ class TMemoryPlugin(Star):
                     updated_at TEXT NOT NULL,
                     is_active INTEGER NOT NULL DEFAULT 1,
                     is_pinned INTEGER NOT NULL DEFAULT 0,
-                    UNIQUE(canonical_user_id, memory_hash)
+                    UNIQUE(canonical_user_id, memory_hash, persona_id, scope)
                 )
                 """
             )
@@ -1049,7 +1111,9 @@ class TMemoryPlugin(Star):
                     unified_msg_origin TEXT NOT NULL DEFAULT '',
                     distilled INTEGER NOT NULL DEFAULT 0,
                     distilled_at TEXT NOT NULL DEFAULT '',
-                    created_at TEXT NOT NULL
+                    created_at TEXT NOT NULL,
+                    scope TEXT NOT NULL DEFAULT 'user',
+                    persona_id TEXT NOT NULL DEFAULT ''
                 )
                 """
             )
@@ -1101,6 +1165,8 @@ class TMemoryPlugin(Star):
                 "last_seen_at": "TEXT NOT NULL DEFAULT ''",
                 "is_active": "INTEGER NOT NULL DEFAULT 1",
                 "is_pinned": "INTEGER NOT NULL DEFAULT 0",
+                "persona_id": "TEXT NOT NULL DEFAULT ''",
+                "scope": "TEXT NOT NULL DEFAULT 'user'",
             },
         )
         self._ensure_columns(
@@ -1111,6 +1177,8 @@ class TMemoryPlugin(Star):
                 "unified_msg_origin": "TEXT NOT NULL DEFAULT ''",
                 "distilled": "INTEGER NOT NULL DEFAULT 0",
                 "distilled_at": "TEXT NOT NULL DEFAULT ''",
+                "scope": "TEXT NOT NULL DEFAULT 'user'",
+                "persona_id": "TEXT NOT NULL DEFAULT ''",
             },
         )
 
@@ -1421,6 +1489,40 @@ class TMemoryPlugin(Star):
         self._bind_identity(adapter, adapter_user, canonical)
         return canonical, adapter, adapter_user
 
+    def _get_memory_scope(self, event: AstrMessageEvent) -> str:
+        """根据 memory_scope 配置和消息类型确定本次的 scope 标签。"""
+        if self.memory_scope == "session":
+            try:
+                from astrbot.core.platform import MessageType  # type: ignore
+                if event.get_message_type() == MessageType.FRIEND_MESSAGE:
+                    return "private"
+                gid = event.get_group_id()
+                return f"group:{gid}" if gid else "private"
+            except Exception:
+                return "private"
+        return "user"
+
+    def _get_current_persona(self, event: AstrMessageEvent) -> str:
+        """获取当前事件对应的人格 ID，用于记忆隔离。"""
+        try:
+            conv = getattr(event, "_conversation", None) or getattr(event, "conversation", None)
+            if conv:
+                persona = getattr(conv, "persona_id", None) or getattr(conv, "persona", None)
+                if persona:
+                    return str(persona)
+        except Exception:
+            pass
+        return ""
+
+    def _is_group_event(self, event: AstrMessageEvent) -> bool:
+        """是否为群聊事件。"""
+        try:
+            from astrbot.core.platform import MessageType  # type: ignore
+            return event.get_message_type() != MessageType.FRIEND_MESSAGE
+        except Exception:
+            gid = event.get_group_id()
+            return bool(gid)
+
     def _bind_identity(self, adapter: str, adapter_user: str, canonical_id: str):
         now = self._now()
         with self._db() as conn:
@@ -1536,9 +1638,13 @@ class TMemoryPlugin(Star):
         importance: float,
         confidence: float,
         source_channel: str = "default",
+        persona_id: str = "",
+        scope: str = "user",
     ) -> int:
         normalized = self._normalize_text(memory)
-        mhash = hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+        mhash = hashlib.sha256(
+            f"{persona_id}:{scope}:{normalized}".encode("utf-8")
+        ).hexdigest()
         now = self._now()
         memory_type_safe = self._safe_memory_type(memory_type)
         with self._db() as conn:
@@ -1599,8 +1705,8 @@ class TMemoryPlugin(Star):
                 INSERT INTO memories(
                     canonical_user_id, source_adapter, source_user_id, source_channel, memory_type,
                     memory, memory_hash, score, importance, confidence, reinforce_count, is_active,
-                    last_seen_at, created_at, updated_at
-                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    last_seen_at, created_at, updated_at, persona_id, scope
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     canonical_id,
@@ -1618,6 +1724,8 @@ class TMemoryPlugin(Star):
                     now,
                     now,
                     now,
+                    persona_id,
+                    scope,
                 ),
             )
             new_id = int(cur.lastrowid or 0)
@@ -1695,12 +1803,20 @@ class TMemoryPlugin(Star):
         ]
 
     async def _retrieve_memories(
-        self, canonical_id: str, query: str, limit: int
+        self,
+        canonical_id: str,
+        query: str,
+        limit: int,
+        scope: str = "user",
+        persona_id: str = "",
+        exclude_private: bool = False,
     ) -> List[Dict[str, object]]:
         """从 memories 表中检索最相关的记忆，按综合评分排序。只返回 is_active=1 的有效记忆。
 
-        当向量检索可用时，对 query 生成 embedding 并做混合打分（关键词 + 向量语义）。
-        网络请求（embedding）在 DB 连接外完成，避免长时间持锁。
+        scope/persona_id 过滤：
+        - memory_scope="session" 时，scope 精确匹配 + 全局 user scope。
+        - persona_id 匹配当前人格 + 通用人格 (空字符串)。
+        - exclude_private=True 时，过滤掉 scope="private" 的私聊专属记忆。
         """
         query_words = set(self._tokenize(query))
         now_ts = int(time.time())
@@ -1710,17 +1826,27 @@ class TMemoryPlugin(Star):
         if self._vec_available and query:
             query_vec = await self._embed_text(query)
 
-        # 步骤 2：打开 DB 连接，读取记忆 + 向量检索（纯本地操作）
+        # 步骤 2：打开 DB 连接，构建过滤子句，读取记忆 + 向量检索
+        scope_cond = ""
+        scope_params: list = []
+        if self.memory_scope == "session":
+            scope_cond = "AND (scope=? OR scope='user')"
+            scope_params = [scope]
+        persona_cond = "AND (persona_id=? OR persona_id='')"
+        persona_params = [persona_id]
+        private_cond = "AND scope != 'private'" if exclude_private else ""
         with self._db() as conn:
             rows = conn.execute(
-                """
-                SELECT id, memory_type, memory, score, importance, confidence, reinforce_count, last_seen_at
+                f"""
+                SELECT id, memory_type, memory, score, importance, confidence, reinforce_count,
+                       last_seen_at, scope, persona_id
                 FROM memories
                 WHERE canonical_user_id=? AND is_active=1
+                {scope_cond} {persona_cond} {private_cond}
                 ORDER BY updated_at DESC
                 LIMIT 80
                 """,
-                (canonical_id,),
+                [canonical_id, *scope_params, *persona_params],
             ).fetchall()
 
             # ── 向量检索（纯本地 sqlite-vec 查询）───────────────────────────
@@ -1791,7 +1917,13 @@ class TMemoryPlugin(Star):
 
         scored.sort(key=lambda x: float(x["final_score"]), reverse=True)
         # 去重：高语义重叠的记忆只保留分数最高的那条
-        top_result = self._deduplicate_results(scored, limit)
+        deduped = self._deduplicate_results(scored, limit * 2)
+
+        # 可选 Reranker：对候选结果做精排
+        if self.enable_reranker and self.rerank_base_url and query and len(deduped) > 1:
+            top_result = await self._rerank_results(query, deduped, limit)
+        else:
+            top_result = deduped[:limit]
 
         # 对命中的 top 结果进行强化：reinforce_count += 1，批量更新减少 DB 开销
         if top_result:
@@ -2143,6 +2275,51 @@ class TMemoryPlugin(Star):
                 accepted_words.append(mem_words)
         return accepted
 
+    async def _rerank_results(
+        self, query: str, candidates: List[Dict[str, object]], top_n: int
+    ) -> List[Dict[str, object]]:
+        """调用 Reranker API 对候选记忆精排。
+
+        兼容 /v1/rerank 接口（Jina、Cohere、混元、本地 rerank 服务）。
+        Request: {"model":"...","query":"...","documents":["..."],"top_n":n}
+        Response: {"results":[{"index":i,"relevance_score":0.9},...]}
+        """
+        if not candidates:
+            return candidates[:top_n]
+        documents = [str(c["memory"]) for c in candidates]
+        payload: Dict[str, object] = {
+            "query": query,
+            "documents": documents,
+            "top_n": min(top_n, len(documents)),
+        }
+        if self.rerank_model:
+            payload["model"] = self.rerank_model
+        headers: Dict[str, str] = {}
+        if self.rerank_api_key:
+            headers["Authorization"] = f"Bearer {self.rerank_api_key}"
+        url = self.rerank_base_url.rstrip("/") + "/v1/rerank"
+        try:
+            session = await self._get_http_session()
+            async with session.post(url, json=payload, headers=headers) as resp:
+                if resp.status != 200:
+                    logger.debug("[tmemory] rerank API %s, fallback to score order", resp.status)
+                    return candidates[:top_n]
+                data = await resp.json()
+                results = data.get("results", [])
+                if not results:
+                    return candidates[:top_n]
+                reranked = []
+                for r in results:
+                    idx = int(r.get("index", -1))
+                    if 0 <= idx < len(candidates):
+                        item = dict(candidates[idx])
+                        item["rerank_score"] = float(r.get("relevance_score", 0.0))
+                        reranked.append(item)
+                return reranked[:top_n]
+        except Exception as e:
+            logger.debug("[tmemory] rerank failed, fallback: %s", e)
+            return candidates[:top_n]
+
     # =========================================================================
     # 对话缓存
     # =========================================================================
@@ -2155,14 +2332,16 @@ class TMemoryPlugin(Star):
         source_adapter: str,
         source_user_id: str,
         unified_msg_origin: str,
+        scope: str = "user",
+        persona_id: str = "",
     ):
         with self._db() as conn:
             conn.execute(
                 """
                 INSERT INTO conversation_cache(
                     canonical_user_id, role, content, source_adapter, source_user_id,
-                    unified_msg_origin, distilled, distilled_at, created_at
-                ) VALUES(?, ?, ?, ?, ?, ?, 0, '', ?)
+                    unified_msg_origin, distilled, distilled_at, created_at, scope, persona_id
+                ) VALUES(?, ?, ?, ?, ?, ?, 0, '', ?, ?, ?)
                 """,
                 (
                     canonical_id,
@@ -2172,6 +2351,8 @@ class TMemoryPlugin(Star):
                     source_user_id,
                     unified_msg_origin,
                     self._now(),
+                    scope,
+                    persona_id,
                 ),
             )
 
