@@ -79,6 +79,10 @@ class TMemoryPlugin(Star):
             self.config.get("enable_memory_injection", True)
         )
         self.inject_memory_limit = int(self.config.get("inject_memory_limit", 5))
+        self.manual_refine_default_mode = str(self.config.get("manual_refine_default_mode", "both")).strip().lower()
+        if self.manual_refine_default_mode not in {"merge", "split", "both"}:
+            self.manual_refine_default_mode = "both"
+        self.manual_refine_default_limit = max(1, min(200, int(self.config.get("manual_refine_default_limit", 20))))
 
         # ── 蒸馏暂停开关 ──────────────────────────────────────────────────────
         self.distill_pause = bool(self.config.get("distill_pause", False))
@@ -416,6 +420,190 @@ class TMemoryPlugin(Star):
         yield event.plain_result("开始重建向量索引，请稍候...")
         ok, fail = await self._rebuild_vector_index()
         yield event.plain_result(f"向量索引重建完成：成功 {ok} 条，跳过/失败 {fail} 条。")
+
+
+
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @filter.command("tm_refine")
+    async def tm_refine(self, event: AstrMessageEvent):
+        """手动精馏已产生记忆。
+
+        用法：
+        /tm_refine mode=both limit=20 dry_run=false include_pinned=false <附加要求>
+
+        参数：
+        - mode: merge | split | both
+        - limit: 处理记忆条数上限
+        - dry_run: true/false 仅预览不落库
+        - include_pinned: 是否允许处理常驻记忆
+        """
+        raw = (event.message_str or "").strip()
+        body = re.sub(r"^/tm_refine\s*", "", raw, flags=re.IGNORECASE).strip()
+
+        opts = {
+            "mode": self.manual_refine_default_mode,
+            "limit": str(self.manual_refine_default_limit),
+            "dry_run": "false",
+            "include_pinned": "false",
+        }
+        for m in re.finditer(
+            r"(mode|limit|dry_run|include_pinned)=([^\s]+)",
+            body,
+            flags=re.IGNORECASE,
+        ):
+            opts[m.group(1).lower()] = m.group(2)
+        extra = re.sub(
+            r"(mode|limit|dry_run|include_pinned)=([^\s]+)",
+            "",
+            body,
+            flags=re.IGNORECASE,
+        ).strip()
+
+        mode = str(opts["mode"]).lower()
+        if mode not in {"merge", "split", "both"}:
+            yield event.plain_result("mode 仅支持 merge|split|both")
+            return
+
+        try:
+            limit = max(1, min(200, int(opts["limit"])))
+        except Exception:
+            limit = 20
+        dry_run = str(opts["dry_run"]).lower() in {"1", "true", "yes", "y", "on"}
+        include_pinned = str(opts["include_pinned"]).lower() in {
+            "1",
+            "true",
+            "yes",
+            "y",
+            "on",
+        }
+
+        canonical_id, _, _ = self._resolve_current_identity(event)
+        result = await self._manual_refine_memories(
+            event=event,
+            canonical_id=canonical_id,
+            mode=mode,
+            limit=limit,
+            dry_run=dry_run,
+            include_pinned=include_pinned,
+            extra_instruction=extra,
+        )
+
+        yield event.plain_result(
+            "\n".join(
+                [
+                    f"manual_refine done (dry_run={dry_run})",
+                    f"user={canonical_id}",
+                    f"mode={mode}, limit={limit}, include_pinned={include_pinned}",
+                    f"updates={result['updates']}, adds={result['adds']}, deletes={result['deletes']}",
+                    f"note={result.get('note', '')}",
+                ]
+            )
+        )
+
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @filter.command("tm_mem_merge")
+    async def tm_mem_merge(self, event: AstrMessageEvent):
+        """手动合并多条记忆。
+
+        用法：
+        /tm_mem_merge 12,18,33 用户偏好吃火锅但关注体重管理
+        """
+        raw = (event.message_str or "").strip()
+        body = re.sub(r"^/tm_mem_merge\s*", "", raw, flags=re.IGNORECASE).strip()
+        if not body:
+            yield event.plain_result("用法: /tm_mem_merge <id1,id2,...> <合并后的记忆文本>")
+            return
+
+        parts = body.split(None, 1)
+        ids_part = parts[0]
+        merged_text = parts[1].strip() if len(parts) > 1 else ""
+        ids = [int(x) for x in re.split(r"[,，]", ids_part) if x.strip().isdigit()]
+        if len(ids) < 2:
+            yield event.plain_result("请至少提供两个记忆ID，例如 /tm_mem_merge 12,18 新记忆内容")
+            return
+
+        canonical_id, _, _ = self._resolve_current_identity(event)
+        rs = self._fetch_memories_by_ids(canonical_id, ids)
+        if len(rs) < 2:
+            yield event.plain_result("这些ID中可用记忆不足两条（可能不属于当前用户）")
+            return
+
+        if not merged_text:
+            merged_text = self._auto_merge_memory_text([str(r["memory"]) for r in rs])
+
+        keep_id = int(rs[0]["id"])
+        self._update_memory_text(keep_id, merged_text)
+        if self._vec_available:
+            await self._upsert_vector(keep_id, merged_text)
+
+        for r in rs[1:]:
+            self._delete_memory(int(r["id"]))
+
+        yield event.plain_result(f"合并完成：保留 #{keep_id}，删除 {len(rs)-1} 条")
+
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @filter.command("tm_mem_split")
+    async def tm_mem_split(self, event: AstrMessageEvent):
+        """手动拆分一条记忆。
+
+        用法：
+        /tm_mem_split 12 片段A|片段B|片段C
+        /tm_mem_split 12   # 不给片段时自动调用 LLM 拆分
+        """
+        raw = (event.message_str or "").strip()
+        body = re.sub(r"^/tm_mem_split\s*", "", raw, flags=re.IGNORECASE).strip()
+        if not body:
+            yield event.plain_result("用法: /tm_mem_split <id> [片段1|片段2|...]")
+            return
+
+        parts = body.split(None, 1)
+        if not parts[0].isdigit():
+            yield event.plain_result("第一个参数必须是记忆ID")
+            return
+        mem_id = int(parts[0])
+        custom = parts[1].strip() if len(parts) > 1 else ""
+
+        canonical_id, _, _ = self._resolve_current_identity(event)
+        row = self._fetch_memory_by_id(canonical_id, mem_id)
+        if not row:
+            yield event.plain_result(f"未找到记忆 {mem_id}")
+            return
+
+        if custom:
+            segments = [
+                self._normalize_text(x)
+                for x in custom.split("|")
+                if self._normalize_text(x)
+            ]
+        else:
+            segments = await self._llm_split_memory(event, str(row["memory"]))
+
+        if len(segments) < 2:
+            yield event.plain_result("拆分结果不足两段，未执行写入")
+            return
+
+        self._update_memory_text(mem_id, segments[0])
+        if self._vec_available:
+            await self._upsert_vector(mem_id, segments[0])
+
+        added = 0
+        for seg in segments[1:]:
+            new_id = self._insert_memory(
+                canonical_id=canonical_id,
+                adapter=str(row["source_adapter"]),
+                adapter_user=str(row["source_user_id"]),
+                memory=seg,
+                score=float(row["score"]),
+                memory_type=str(row["memory_type"]),
+                importance=float(row["importance"]),
+                confidence=float(row["confidence"]),
+                source_channel="manual_split",
+            )
+            if self._vec_available and new_id:
+                await self._upsert_vector(new_id, seg)
+            added += 1
+
+        yield event.plain_result(f"拆分完成：原记忆#{mem_id} + 新增 {added} 条")
 
     # =========================================================================
     # 定时蒸馏 Worker
@@ -1551,6 +1739,315 @@ class TMemoryPlugin(Star):
                 )
 
         return top_result
+
+
+
+    async def _manual_refine_memories(
+        self,
+        event: AstrMessageEvent,
+        canonical_id: str,
+        mode: str,
+        limit: int,
+        dry_run: bool,
+        include_pinned: bool,
+        extra_instruction: str,
+    ) -> Dict[str, object]:
+        rows = self._list_memories_for_refine(
+            canonical_id, limit=limit, include_pinned=include_pinned
+        )
+        if not rows:
+            return {"updates": 0, "adds": 0, "deletes": 0, "note": "no memories"}
+
+        operations = await self._llm_refine_operations(
+            event, rows, mode, extra_instruction
+        )
+        updates = operations.get("updates", []) if isinstance(operations, dict) else []
+        adds = operations.get("adds", []) if isinstance(operations, dict) else []
+        deletes = operations.get("deletes", []) if isinstance(operations, dict) else []
+        note = str(operations.get("note", "")) if isinstance(operations, dict) else ""
+
+        pinned_ids = {int(r["id"]) for r in rows if int(r["is_pinned"]) == 1}
+        if not include_pinned:
+            updates = [u for u in updates if int(u.get("id", 0)) not in pinned_ids]
+            deletes = [d for d in deletes if int(d) not in pinned_ids]
+
+        if dry_run:
+            return {
+                "updates": len(updates),
+                "adds": len(adds),
+                "deletes": len(deletes),
+                "note": f"dry_run preview. {note}",
+            }
+
+        applied_updates = applied_adds = applied_deletes = 0
+
+        for upd in updates:
+            try:
+                mem_id = int(upd.get("id", 0))
+                if not mem_id:
+                    continue
+                memory = self._sanitize_text(
+                    self._normalize_text(str(upd.get("memory", "")))
+                )
+                if not memory:
+                    continue
+                self._update_memory_full(
+                    mem_id,
+                    memory=memory,
+                    memory_type=self._safe_memory_type(upd.get("memory_type", "fact")),
+                    score=self._clamp01(upd.get("score", 0.7)),
+                    importance=self._clamp01(upd.get("importance", 0.6)),
+                    confidence=self._clamp01(upd.get("confidence", 0.7)),
+                )
+                if self._vec_available:
+                    await self._upsert_vector(mem_id, memory)
+                applied_updates += 1
+            except Exception as e:
+                logger.debug("[tmemory] apply update failed: %s", e)
+
+        for add in adds:
+            try:
+                memory = self._sanitize_text(
+                    self._normalize_text(str(add.get("memory", "")))
+                )
+                if not memory:
+                    continue
+                new_id = self._insert_memory(
+                    canonical_id=canonical_id,
+                    adapter="manual_refine",
+                    adapter_user=canonical_id,
+                    memory=memory,
+                    score=self._clamp01(add.get("score", 0.7)),
+                    memory_type=self._safe_memory_type(add.get("memory_type", "fact")),
+                    importance=self._clamp01(add.get("importance", 0.6)),
+                    confidence=self._clamp01(add.get("confidence", 0.7)),
+                    source_channel="manual_refine",
+                )
+                if self._vec_available and new_id:
+                    await self._upsert_vector(new_id, memory)
+                applied_adds += 1
+            except Exception as e:
+                logger.debug("[tmemory] apply add failed: %s", e)
+
+        for d in deletes:
+            try:
+                mem_id = int(d)
+                if self._delete_memory(mem_id):
+                    applied_deletes += 1
+            except Exception as e:
+                logger.debug("[tmemory] apply delete failed: %s", e)
+
+        return {
+            "updates": applied_updates,
+            "adds": applied_adds,
+            "deletes": applied_deletes,
+            "note": note,
+        }
+
+    async def _llm_refine_operations(
+        self,
+        event: AstrMessageEvent,
+        rows: List[Dict[str, object]],
+        mode: str,
+        extra_instruction: str,
+    ) -> Dict[str, object]:
+        """让 LLM 生成对已有记忆的手动精馏操作（更新/新增/删除）。"""
+        prompt = (
+            "你是记忆编辑器。请基于现有记忆做精炼优化。只输出 JSON，不要解释。\n"
+            "目标：去重、合并重复、拆分过长、删除无意义条目。\n"
+            f"模式: {mode}\n"
+            f"附加要求: {extra_instruction or '无'}\n\n"
+            "输出格式：\n"
+            "{\n"
+            '  "updates": [{"id": 1, "memory": "...", "memory_type": "...", "importance": 0.6, "confidence": 0.8, "score": 0.7}],\n'
+            '  "adds": [{"memory": "...", "memory_type": "...", "importance": 0.6, "confidence": 0.8, "score": 0.7}],\n'
+            '  "deletes": [3,4],\n'
+            '  "note": "可选说明"\n'
+            "}\n\n"
+            "规则：\n"
+            "1) updates 只允许引用输入里存在的 id。\n"
+            "2) memory 必须以‘用户’为主语，避免废话。\n"
+            "3) 删除明显重复/低价值/噪声记忆。\n"
+            "4) mode=merge 时优先减少条目；mode=split 时优先拆分复合记忆；both 两者都可。\n"
+            "5) 不要引入输入中不存在的新事实。\n\n"
+            f"输入记忆：{json.dumps(rows, ensure_ascii=False)}"
+        )
+
+        provider_id = ""
+        try:
+            provider_id = await self.context.get_current_chat_provider_id(
+                umo=self._safe_get_unified_msg_origin(event)
+            )
+        except Exception:
+            provider_id = self.distill_provider_id
+
+        if not provider_id:
+            return {"updates": [], "adds": [], "deletes": [], "note": "no provider"}
+
+        try:
+            resp = await self.context.llm_generate(
+                chat_provider_id=str(provider_id), prompt=prompt
+            )
+            txt = self._strip_think_tags(
+                self._normalize_text(getattr(resp, "completion_text", "") or "")
+            )
+            obj = self._parse_json_object(txt)
+            if isinstance(obj, dict):
+                return obj
+        except Exception as e:
+            logger.warning("[tmemory] _llm_refine_operations failed: %s", e)
+        return {"updates": [], "adds": [], "deletes": [], "note": "llm failed"}
+
+    async def _llm_split_memory(self, event: AstrMessageEvent, memory_text: str) -> List[str]:
+        """使用 LLM 将一条复合记忆拆分为多条。"""
+        prompt = (
+            "将以下一条用户记忆拆分为 2~5 条更原子化的记忆。\n"
+            "只输出 JSON：{\"segments\":[\"用户...\",\"用户...\"]}\n"
+            "每条必须以‘用户’开头，避免废话。\n"
+            f"原记忆: {memory_text}"
+        )
+
+        provider_id = ""
+        try:
+            provider_id = await self.context.get_current_chat_provider_id(
+                umo=self._safe_get_unified_msg_origin(event)
+            )
+        except Exception:
+            provider_id = self.distill_provider_id
+
+        if not provider_id:
+            return [
+                x.strip()
+                for x in re.split(r"[；;，,]", memory_text)
+                if len(x.strip()) >= 6
+            ]
+
+        try:
+            resp = await self.context.llm_generate(
+                chat_provider_id=str(provider_id), prompt=prompt
+            )
+            txt = self._strip_think_tags(
+                self._normalize_text(getattr(resp, "completion_text", "") or "")
+            )
+            obj = self._parse_json_object(txt)
+            if isinstance(obj, dict) and isinstance(obj.get("segments"), list):
+                segs = [
+                    self._normalize_text(str(s))
+                    for s in obj["segments"]
+                    if self._normalize_text(str(s))
+                ]
+                if len(segs) >= 2:
+                    return segs[:5]
+        except Exception as e:
+            logger.debug("[tmemory] _llm_split_memory failed: %s", e)
+
+        return [
+            x.strip() for x in re.split(r"[；;，,]", memory_text) if len(x.strip()) >= 6
+        ]
+
+    def _parse_json_object(self, text: str) -> Optional[Dict[str, object]]:
+        """从文本中提取 JSON 对象。"""
+        if not text:
+            return None
+        try:
+            data = json.loads(text)
+            return data if isinstance(data, dict) else None
+        except json.JSONDecodeError:
+            start = text.find("{")
+            end = text.rfind("}")
+            if start != -1 and end != -1 and end > start:
+                try:
+                    data = json.loads(text[start : end + 1])
+                    return data if isinstance(data, dict) else None
+                except Exception:
+                    return None
+        return None
+
+    def _list_memories_for_refine(
+        self, canonical_id: str, limit: int, include_pinned: bool
+    ) -> List[Dict[str, object]]:
+        with self._db() as conn:
+            sql = (
+                "SELECT id, memory, memory_type, score, importance, confidence, reinforce_count, is_pinned "
+                "FROM memories WHERE canonical_user_id=? AND is_active=1 "
+                + ("" if include_pinned else "AND is_pinned=0 ")
+                + "ORDER BY importance DESC, score DESC, updated_at DESC LIMIT ?"
+            )
+            rows = conn.execute(sql, (canonical_id, limit)).fetchall()
+        return [dict(r) for r in rows]
+
+    def _fetch_memory_by_id(
+        self, canonical_id: str, memory_id: int
+    ) -> Optional[Dict[str, object]]:
+        with self._db() as conn:
+            row = conn.execute(
+                "SELECT id, canonical_user_id, source_adapter, source_user_id, memory, memory_type, score, importance, confidence "
+                "FROM memories WHERE id=? AND canonical_user_id=?",
+                (memory_id, canonical_id),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def _fetch_memories_by_ids(
+        self, canonical_id: str, ids: List[int]
+    ) -> List[Dict[str, object]]:
+        if not ids:
+            return []
+        placeholders = ",".join(["?"] * len(ids))
+        with self._db() as conn:
+            rows = conn.execute(
+                f"SELECT id, memory, memory_type, score, importance, confidence, source_adapter, source_user_id "
+                f"FROM memories WHERE canonical_user_id=? AND id IN ({placeholders}) ORDER BY id",
+                [canonical_id, *ids],
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def _update_memory_text(self, memory_id: int, memory: str) -> None:
+        now = self._now()
+        mhash = hashlib.sha256(self._normalize_text(memory).encode("utf-8")).hexdigest()
+        with self._db() as conn:
+            conn.execute(
+                "UPDATE memories SET memory=?, memory_hash=?, updated_at=? WHERE id=?",
+                (memory, mhash, now, memory_id),
+            )
+
+    def _update_memory_full(
+        self,
+        memory_id: int,
+        memory: str,
+        memory_type: str,
+        score: float,
+        importance: float,
+        confidence: float,
+    ) -> None:
+        now = self._now()
+        mhash = hashlib.sha256(self._normalize_text(memory).encode("utf-8")).hexdigest()
+        with self._db() as conn:
+            conn.execute(
+                """
+                UPDATE memories
+                SET memory=?, memory_hash=?, memory_type=?, score=?, importance=?, confidence=?, updated_at=?
+                WHERE id=?
+                """,
+                (memory, mhash, memory_type, score, importance, confidence, now, memory_id),
+            )
+
+    def _auto_merge_memory_text(self, memories: List[str]) -> str:
+        """无 LLM 时的简单合并策略：去重后拼接。"""
+        uniq: List[str] = []
+        seen = set()
+        for m in memories:
+            n = self._normalize_text(m)
+            if n and n not in seen:
+                seen.add(n)
+                uniq.append(n)
+        if not uniq:
+            return ""
+        if len(uniq) == 1:
+            return uniq[0]
+        merged = "；".join(uniq)
+        if not merged.startswith("用户"):
+            merged = f"用户{merged}"
+        return merged[:300]
 
     # =========================================================================
     # 对话缓存

@@ -161,6 +161,9 @@ class TMemoryWebServer:
         app.router.add_post("/api/user/export", self._handle_export_user)
         app.router.add_post("/api/user/purge", self._handle_purge_user)
         app.router.add_post("/api/memory/pin", self._handle_pin_memory)
+        app.router.add_post("/api/memory/refine", self._handle_memory_refine)
+        app.router.add_post("/api/memory/merge", self._handle_memory_merge)
+        app.router.add_post("/api/memory/split", self._handle_memory_split)
 
     # ── 中间件：IP 白名单 + JWT 鉴权 ─────────────────────────────────────
 
@@ -555,3 +558,103 @@ class TMemoryWebServer:
             return web.json_response({"error": "id is required"}, status=400)
         ok = self.plugin._set_pinned(mem_id, pinned)
         return web.json_response({"ok": ok, "pinned": pinned})
+
+
+    async def _handle_memory_refine(self, request: web.Request):
+        data = await request.json()
+        user = str(data.get("user", "")).strip()
+        if not user:
+            return web.json_response({"error": "user is required"}, status=400)
+
+        mode = str(data.get("mode", self.plugin.manual_refine_default_mode)).lower()
+        limit = max(1, min(200, int(data.get("limit", self.plugin.manual_refine_default_limit))))
+        dry_run = bool(data.get("dry_run", False))
+        include_pinned = bool(data.get("include_pinned", False))
+        extra = str(data.get("extra_instruction", "")).strip()
+
+        # 构造一个最小 event-like 对象以复用 provider 解析逻辑
+        class _Evt:
+            unified_msg_origin = str(data.get("unified_msg_origin", ""))
+
+        result = await self.plugin._manual_refine_memories(
+            event=_Evt(),
+            canonical_id=user,
+            mode=mode,
+            limit=limit,
+            dry_run=dry_run,
+            include_pinned=include_pinned,
+            extra_instruction=extra,
+        )
+        return web.json_response({"ok": True, **result})
+
+    async def _handle_memory_merge(self, request: web.Request):
+        data = await request.json()
+        user = str(data.get("user", "")).strip()
+        ids = data.get("ids", [])
+        merged_text = str(data.get("memory", "")).strip()
+        if not user or not isinstance(ids, list) or len(ids) < 2:
+            return web.json_response({"error": "user and ids(>=2) are required"}, status=400)
+
+        safe_ids = [int(i) for i in ids if str(i).isdigit()]
+        rows = self.plugin._fetch_memories_by_ids(user, safe_ids)
+        if len(rows) < 2:
+            return web.json_response({"error": "not enough valid memory ids"}, status=400)
+
+        if not merged_text:
+            merged_text = self.plugin._auto_merge_memory_text([str(r["memory"]) for r in rows])
+
+        keep_id = int(rows[0]["id"])
+        self.plugin._update_memory_text(keep_id, merged_text)
+        if self.plugin._vec_available:
+            await self.plugin._upsert_vector(keep_id, merged_text)
+        deleted = 0
+        for r in rows[1:]:
+            if self.plugin._delete_memory(int(r["id"])):
+                deleted += 1
+
+        return web.json_response({"ok": True, "keep_id": keep_id, "deleted": deleted})
+
+    async def _handle_memory_split(self, request: web.Request):
+        data = await request.json()
+        user = str(data.get("user", "")).strip()
+        memory_id = int(data.get("id", 0))
+        segments = data.get("segments", None)
+        if not user or not memory_id:
+            return web.json_response({"error": "user and id are required"}, status=400)
+
+        row = self.plugin._fetch_memory_by_id(user, memory_id)
+        if not row:
+            return web.json_response({"error": "memory not found"}, status=404)
+
+        if isinstance(segments, list):
+            segs = [self.plugin._normalize_text(str(s)) for s in segments if self.plugin._normalize_text(str(s))]
+        else:
+            class _Evt:
+                unified_msg_origin = str(data.get("unified_msg_origin", ""))
+            segs = await self.plugin._llm_split_memory(_Evt(), str(row["memory"]))
+
+        if len(segs) < 2:
+            return web.json_response({"error": "segments < 2"}, status=400)
+
+        self.plugin._update_memory_text(memory_id, segs[0])
+        if self.plugin._vec_available:
+            await self.plugin._upsert_vector(memory_id, segs[0])
+
+        added = []
+        for seg in segs[1:]:
+            new_id = self.plugin._insert_memory(
+                canonical_id=user,
+                adapter=str(row["source_adapter"]),
+                adapter_user=str(row["source_user_id"]),
+                memory=seg,
+                score=float(row["score"]),
+                memory_type=str(row["memory_type"]),
+                importance=float(row["importance"]),
+                confidence=float(row["confidence"]),
+                source_channel="manual_split",
+            )
+            if self.plugin._vec_available and new_id:
+                await self.plugin._upsert_vector(new_id, seg)
+            added.append(new_id)
+
+        return web.json_response({"ok": True, "base_id": memory_id, "added_ids": added})
