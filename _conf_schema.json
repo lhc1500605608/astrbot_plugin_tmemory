@@ -188,5 +188,73 @@
     "description": "向量最低相似度阈值",
     "hint": "低于此阈值的向量结果不参与混合打分，减少语义噪声。建议 0.1~0.3。",
     "default": 0.15
+  },
+  "distill_model_id": {
+    "type": "string",
+    "description": "蒸馏专用模型 ID",
+    "hint": "蒸馏使用的 provider ID，优先级高于 distill_provider_id。留空则复用 distill_provider_id 或自动推断。",
+    "default": "",
+    "_special": "select_provider"
+  },
+  "enable_reranker": {
+    "type": "bool",
+    "description": "启用 Reranker 精排",
+    "hint": "开启后在向量召回结果上调用 Reranker API 做精排，效果更好但会增加延迟。需配置 rerank_base_url。",
+    "default": false
+  },
+  "rerank_base_url": {
+    "type": "string",
+    "description": "Reranker API 地址",
+    "hint": "兼容 /v1/rerank 接口的服务地址，如 Jina、Cohere、本地 rerank 服务。",
+    "default": ""
+  },
+  "rerank_api_key": {
+    "type": "string",
+    "description": "Reranker API Key",
+    "hint": "调用 Reranker API 所需的 Key。",
+    "default": "",
+    "obvious_hint": true
+  },
+  "rerank_model": {
+    "type": "string",
+    "description": "Reranker 模型名",
+    "hint": "留空时不传 model 字段（部分服务不需要）。",
+    "default": ""
+  },
+  "rerank_top_n": {
+    "type": "int",
+    "description": "Reranker 返回条数",
+    "hint": "Reranker 最终返回的精排结果数量，应 <= inject_memory_limit。",
+    "default": 5
+  },
+  "memory_scope": {
+    "type": "string",
+    "description": "记忆隔离范围",
+    "hint": "user=所有会话共用记忆（默认）；session=按会话隔离（群聊每个群独立）。",
+    "default": "user"
+  },
+  "private_memory_in_group": {
+    "type": "bool",
+    "description": "群聊中注入私聊记忆",
+    "hint": "默认关闭。开启后群聊中也会注入该用户的私聊专属记忆，可能泄露隐私。",
+    "default": false
+  },
+  "inject_position": {
+    "type": "string",
+    "description": "记忆注入位置",
+    "hint": "tail=追加到 system_prompt 末尾（默认）；head=插在最前；slot=替换 system_prompt 中的占位符（见 inject_slot_marker）。",
+    "default": "tail"
+  },
+  "inject_slot_marker": {
+    "type": "string",
+    "description": "注入占位符",
+    "hint": "inject_position=slot 时，system_prompt 中会被替换为记忆块的占位符文本。",
+    "default": "{{tmemory}}"
+  },
+  "inject_max_chars": {
+    "type": "int",
+    "description": "注入块最大字符数",
+    "hint": "记忆块超出此长度时截断。0=不限。建议 500~2000。",
+    "default": 0
   }
 }
