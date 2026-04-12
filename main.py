@@ -37,16 +37,29 @@ class TMemoryPlugin(Star):
         self.capture_assistant_reply = bool(
             self.config.get("capture_assistant_reply", True)
         )
-        # 跳过采集的内容前缀列表，匹配的消息不会被写入 conversation_cache。
-        # 默认内置 tschedule 的提醒前缀，防止计划任务提醒被当作对话素材蒸馏。
-        _raw_skip = self.config.get("capture_skip_prefixes", "")
+        # ── 采集过滤器（三层）────────────────────────────────────────────────
+        # 层 1: 跨插件协议标记（最高优先级）
+        #   插件在消息里嵌入 \x00[astrbot:no-memory]\x00，tmemory 识别后跳过。
+        self._NO_MEMORY_MARKER = "\x00[astrbot:no-memory]\x00"
+
+        # 层 2: 文本前缀过滤（配置化）
+        _raw_prefixes = self.config.get("capture_skip_prefixes", "")
         _user_prefixes = [
-            p.strip() for p in str(_raw_skip).split(",") if p.strip()
-        ] if _raw_skip else []
+            p.strip() for p in str(_raw_prefixes).split(",") if p.strip()
+        ] if _raw_prefixes else []
         self.capture_skip_prefixes: List[str] = [
-            "提醒 #",   # tschedule 提醒格式：提醒 #1：xxx
+            "提醒 #",   # tschedule 兼容旧版（无 marker 时）
             *_user_prefixes,
         ]
+
+        # 层 3: 正则过滤（配置化，高级场景）
+        _raw_regex = self.config.get("capture_skip_regex", "")
+        self._capture_skip_re: Optional[re.Pattern] = None
+        if _raw_regex:
+            try:
+                self._capture_skip_re = re.compile(_raw_regex)
+            except re.error as _e:
+                logger.warning("[tmemory] invalid capture_skip_regex: %s", _e)
 
         # ── 蒸馏调度 ──────────────────────────────────────────────────────────
         # distill_interval_sec: 两次蒸馏之间的最小间隔（秒），默认 17280s（约 4.8 小时，每天约 5 次）。
@@ -160,8 +173,8 @@ class TMemoryPlugin(Star):
         if text.startswith("/"):
             return
 
-        # 跳过匹配前缀的消息（如 tschedule 提醒），避免被当作用户对话素材。
-        if any(text.startswith(p) for p in self.capture_skip_prefixes):
+        # 三层过滤：协议标记 → 前缀 → 正则
+        if self._should_skip_capture(text):
             return
 
         canonical_id, adapter, adapter_user = self._resolve_current_identity(event)
@@ -185,8 +198,8 @@ class TMemoryPlugin(Star):
         if not text:
             return
 
-        # 跳过匹配前缀的回复（如计划任务触发的回复），不作为蒸馏素材。
-        if any(text.startswith(p) for p in self.capture_skip_prefixes):
+        # 三层过滤：协议标记 → 前缀 → 正则
+        if self._should_skip_capture(text):
             return
 
         canonical_id, adapter, adapter_user = self._resolve_current_identity(event)
@@ -1733,6 +1746,31 @@ class TMemoryPlugin(Star):
         for pattern, replacement in self._sanitize_patterns:
             text = pattern.sub(replacement, text)
         return text
+
+    def _should_skip_capture(self, text: str) -> bool:
+        """三层过滤器：判断消息是否应跳过采集。
+
+        层 1 - 协议标记（最高优先级）：
+            兼容 ASTRBOT_NO_MEMORY 跨插件协议，任何插件均可在消息里
+            嵌入 \x00[astrbot:no-memory]\x00 标记来请求跳过采集。
+
+        层 2 - 文本前缀：
+            匹配 capture_skip_prefixes 配置中的前缀列表，内置兼容
+            tschedule 旧版格式（无 marker 时）。
+
+        层 3 - 正则表达式：
+            匹配 capture_skip_regex 配置中的正则，适用于复杂过滤场景。
+        """
+        # 层 1：协议标记（不可见字符，不依赖文本内容）
+        if self._NO_MEMORY_MARKER in text:
+            return True
+        # 层 2：前缀匹配
+        if any(text.startswith(p) for p in self.capture_skip_prefixes):
+            return True
+        # 层 3：正则匹配
+        if self._capture_skip_re and self._capture_skip_re.search(text):
+            return True
+        return False
 
     # =========================================================================
     # 工具方法
