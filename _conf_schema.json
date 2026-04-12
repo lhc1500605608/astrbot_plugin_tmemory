@@ -150,7 +150,8 @@
     "type": "string",
     "description": "Embedding API key",
     "hint": "调用 Embedding API 所需的 API key。",
-    "default": ""
+    "default": "",
+    "obvious_hint": true
   },
   "embed_model": {
     "type": "string",
@@ -181,5 +182,11 @@
     "description": "手动精馏默认处理条数",
     "hint": "tm_refine 未显式传 limit 时使用，建议 10~50。",
     "default": 20
+  },
+  "min_vector_sim": {
+    "type": "float",
+    "description": "向量最低相似度阈值",
+    "hint": "低于此阈值的向量结果不参与混合打分，减少语义噪声。建议 0.1~0.3。",
+    "default": 0.15
   }
 }
