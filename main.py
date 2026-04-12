@@ -109,6 +109,8 @@ class TMemoryPlugin(Star):
         # ── 内部状态 ──────────────────────────────────────────────────────────
         self._distill_task: Optional[asyncio.Task] = None
         self._worker_running = False
+        self._merge_needs_vector_rebuild = False
+        self._http_session = None  # aiohttp.ClientSession 单例，在首次使用时创建
 
         # ── WebUI 独立服务器 ──────────────────────────────────────────────────
         TMemoryWebServer = self._load_web_server_class()
@@ -171,6 +173,10 @@ class TMemoryPlugin(Star):
                 await self._distill_task
             except asyncio.CancelledError:
                 pass
+        # 关闭 HTTP session
+        if self._http_session and not self._http_session.closed:
+            await self._http_session.close()
+            self._http_session = None
         # 关闭 WebUI 服务器
         await self._web_server.stop()
         logger.info("[tmemory] terminated")
@@ -430,6 +436,16 @@ class TMemoryPlugin(Star):
                         )
                 except Exception as e:
                     logger.warning("[tmemory] distill worker error: %s", e)
+
+            # 如有用户合并待处理，在下一轮 sleep 前补全向量索引
+            if self._merge_needs_vector_rebuild and self._vec_available:
+                try:
+                    ok, fail = await self._rebuild_vector_index()
+                    if ok > 0:
+                        logger.info("[tmemory] post-merge vector rebuild: ok=%s fail=%s", ok, fail)
+                except Exception as _e:
+                    logger.debug("[tmemory] post-merge vector rebuild error: %s", _e)
+                self._merge_needs_vector_rebuild = False
 
             await asyncio.sleep(max(3600, self.distill_interval_sec))
 
@@ -893,6 +909,18 @@ class TMemoryPlugin(Star):
                 )
                 """
             )
+            # ── 核心索引（幂等 CREATE IF NOT EXISTS）──────────────────────────
+            for idx_sql in [
+                "CREATE INDEX IF NOT EXISTS idx_mem_user_active ON memories(canonical_user_id, is_active, updated_at DESC)",
+                "CREATE INDEX IF NOT EXISTS idx_mem_user_hash ON memories(canonical_user_id, memory_hash)",
+                "CREATE INDEX IF NOT EXISTS idx_cache_user_distilled ON conversation_cache(canonical_user_id, distilled, id)",
+                "CREATE INDEX IF NOT EXISTS idx_events_user ON memory_events(canonical_user_id, created_at DESC)",
+                "CREATE INDEX IF NOT EXISTS idx_bindings_user ON identity_bindings(canonical_user_id)",
+            ]:
+                try:
+                    conn.execute(idx_sql)
+                except Exception:
+                    pass  # 虚拟表等场景下部分索引可能不支持
 
     def _ensure_columns(self, table_name: str, wanted: Dict[str, str]):
         with self._db() as conn:
@@ -910,41 +938,50 @@ class TMemoryPlugin(Star):
         conn.execute("PRAGMA synchronous=NORMAL")
         conn.execute("PRAGMA busy_timeout=5000")
         if self._vec_available:
-            conn.enable_load_extension(True)
-            self._sqlite_vec.load(conn)
-            conn.enable_load_extension(False)
+            try:
+                conn.enable_load_extension(True)
+                self._sqlite_vec.load(conn)
+                conn.enable_load_extension(False)
+            except Exception:
+                pass  # 扩展已加载或不可用
         return conn
 
     # =========================================================================
     # 向量检索辅助方法
     # =========================================================================
 
+    async def _get_http_session(self):
+        """获取或创建复用的 aiohttp.ClientSession。"""
+        if self._http_session is None or self._http_session.closed:
+            import aiohttp  # type: ignore[import-not-found]
+            timeout = aiohttp.ClientTimeout(total=15)
+            self._http_session = aiohttp.ClientSession(timeout=timeout)
+        return self._http_session
+
     async def _embed_text(self, text: str) -> Optional[List[float]]:
         """调用 OpenAI-compatible /v1/embeddings 生成向量。失败返回 None。"""
         if not self._vec_available or not self.embed_base_url:
             return None
         try:
-            import aiohttp  # type: ignore[import-not-found]
             url = self.embed_base_url.rstrip("/") + "/v1/embeddings"
             payload = {"model": self.embed_model, "input": text[:2000]}
-            headers = {}
+            headers: Dict[str, str] = {}
             if self.embed_api_key:
                 headers["Authorization"] = f"Bearer {self.embed_api_key}"
-            timeout = aiohttp.ClientTimeout(total=10)
-            async with aiohttp.ClientSession(timeout=timeout) as session:
-                async with session.post(url, json=payload, headers=headers) as resp:
-                    if resp.status != 200:
-                        logger.debug("[tmemory] embed API status=%s", resp.status)
-                        return None
-                    data = await resp.json()
-                    vec = data["data"][0]["embedding"]
-                    if len(vec) != self.embed_dim:
-                        logger.warning(
-                            "[tmemory] embed dim mismatch: got %d, expected %d",
-                            len(vec), self.embed_dim,
-                        )
-                        return None
-                    return vec
+            session = await self._get_http_session()
+            async with session.post(url, json=payload, headers=headers) as resp:
+                if resp.status != 200:
+                    logger.debug("[tmemory] embed API status=%s", resp.status)
+                    return None
+                data = await resp.json()
+                vec = data["data"][0]["embedding"]
+                if len(vec) != self.embed_dim:
+                    logger.warning(
+                        "[tmemory] embed dim mismatch: got %d, expected %d",
+                        len(vec), self.embed_dim,
+                    )
+                    return None
+                return vec
         except Exception as e:
             logger.debug("[tmemory] _embed_text failed: %s", e)
             return None
@@ -1141,7 +1178,8 @@ class TMemoryPlugin(Star):
             rows = conn.execute(
                 """
                 SELECT source_adapter, source_user_id, source_channel, memory_type, memory, memory_hash,
-                       score, importance, confidence, reinforce_count, last_seen_at, is_active
+                       score, importance, confidence, reinforce_count, last_seen_at, is_active,
+                       COALESCE(is_pinned, 0) AS is_pinned
                 FROM memories WHERE canonical_user_id=?
                 """,
                 (from_id,),
@@ -1153,8 +1191,8 @@ class TMemoryPlugin(Star):
                         INSERT INTO memories(
                             canonical_user_id, source_adapter, source_user_id, source_channel,
                             memory_type, memory, memory_hash, score, importance, confidence,
-                            reinforce_count, last_seen_at, created_at, updated_at, is_active
-                        ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            reinforce_count, last_seen_at, created_at, updated_at, is_active, is_pinned
+                        ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
                         (
                             to_id,
@@ -1172,6 +1210,7 @@ class TMemoryPlugin(Star):
                             now,
                             now,
                             row["is_active"],
+                            row["is_pinned"],
                         ),
                     )
                     moved += 1
@@ -1209,6 +1248,9 @@ class TMemoryPlugin(Star):
             event_type="merge",
             payload={"from_id": from_id, "to_id": to_id, "moved_count": moved},
         )
+        # 合并后清理旧用户的孤儿向量并标记需要 rebuild
+        self._delete_vectors_for_user(from_id)
+        self._merge_needs_vector_rebuild = True
         return moved
 
     # =========================================================================
@@ -1390,10 +1432,17 @@ class TMemoryPlugin(Star):
         """从 memories 表中检索最相关的记忆，按综合评分排序。只返回 is_active=1 的有效记忆。
 
         当向量检索可用时，对 query 生成 embedding 并做混合打分（关键词 + 向量语义）。
+        网络请求（embedding）在 DB 连接外完成，避免长时间持锁。
         """
         query_words = set(self._tokenize(query))
         now_ts = int(time.time())
 
+        # 步骤 1：先在 DB 外完成 embedding 网络请求，避免持锁等网络
+        query_vec: Optional[List[float]] = None
+        if self._vec_available and query:
+            query_vec = await self._embed_text(query)
+
+        # 步骤 2：打开 DB 连接，读取记忆 + 向量检索（纯本地操作）
         with self._db() as conn:
             rows = conn.execute(
                 """
@@ -1406,28 +1455,26 @@ class TMemoryPlugin(Star):
                 (canonical_id,),
             ).fetchall()
 
-            # ── 向量检索（可选）─────────────────────────────────────────────
+            # ── 向量检索（纯本地 sqlite-vec 查询）───────────────────────────
             vec_scores: Dict[int, float] = {}
-            if self._vec_available and rows:
-                query_vec = await self._embed_text(query)
-                if query_vec:
-                    try:
-                        blob = self._sqlite_vec.serialize_float32(query_vec)
-                        vec_rows = conn.execute(
-                            """
-                            SELECT memory_id, distance FROM memory_vectors
-                            WHERE embedding MATCH ?
-                            AND k = 30
-                            ORDER BY distance
-                            """,
-                            [blob],
-                        ).fetchall()
-                        for vr in vec_rows:
-                            # L2 距离转相似度：距离越小越相似
-                            sim = 1.0 / (1.0 + float(vr["distance"]))
-                            vec_scores[int(vr["memory_id"])] = sim
-                    except Exception as _ve:
-                        logger.debug("[tmemory] vector query failed: %s", _ve)
+            if query_vec and rows:
+                try:
+                    blob = self._sqlite_vec.serialize_float32(query_vec)
+                    vec_rows = conn.execute(
+                        """
+                        SELECT memory_id, distance FROM memory_vectors
+                        WHERE embedding MATCH ?
+                        AND k = 30
+                        ORDER BY distance
+                        """,
+                        [blob],
+                    ).fetchall()
+                    for vr in vec_rows:
+                        # L2 距离转相似度：距离越小越相似
+                        sim = 1.0 / (1.0 + float(vr["distance"]))
+                        vec_scores[int(vr["memory_id"])] = sim
+                except Exception as _ve:
+                    logger.debug("[tmemory] vector query failed: %s", _ve)
 
         kw_weight = 1.0 - self.vector_weight if vec_scores else 1.0
 
