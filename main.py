@@ -19,7 +19,7 @@ from astrbot.api.star import Context, Star, register
     "tmemory",
     "shangtang",
     "AstrBot 用户长期记忆插件（自动采集 + 定时LLM蒸馏 + 跨适配器合并）",
-    "0.3.0",
+    "0.4.0",
 )
 class TMemoryPlugin(Star):
     def __init__(self, context: Context, config=None):
@@ -82,6 +82,26 @@ class TMemoryPlugin(Star):
 
         # ── 蒸馏暂停开关 ──────────────────────────────────────────────────────
         self.distill_pause = bool(self.config.get("distill_pause", False))
+
+        # ── 向量检索（sqlite-vec，软依赖）────────────────────────────────────
+        self.enable_vector_search = bool(self.config.get("enable_vector_search", False))
+        self.embed_base_url = str(self.config.get("embed_provider_base_url", "")).strip()
+        self.embed_api_key = str(self.config.get("embed_provider_api_key", "")).strip()
+        self.embed_model = str(self.config.get("embed_model", "text-embedding-3-small")).strip()
+        self.embed_dim = max(64, int(self.config.get("embed_dim", 1536)))
+        self.vector_weight = max(0.0, min(1.0, float(self.config.get("vector_weight", 0.4))))
+        self._sqlite_vec = None
+        self._vec_available = False
+        if self.enable_vector_search:
+            try:
+                import sqlite_vec  # type: ignore[import-not-found]
+                self._sqlite_vec = sqlite_vec
+                self._vec_available = True
+            except ImportError:
+                logger.warning(
+                    "[tmemory] sqlite-vec not installed; vector search disabled. "
+                    "Run: pip install sqlite-vec"
+                )
 
         # ── 敏感信息脱敏 ──────────────────────────────────────────────────────
         self._sanitize_patterns = self._build_sanitize_patterns()
@@ -225,7 +245,7 @@ class TMemoryPlugin(Star):
         try:
             canonical_id, _, _ = self._resolve_current_identity(event)
             query = self._normalize_text(getattr(req, "prompt", "") or "")
-            memory_block = self._build_injection_block(
+            memory_block = await self._build_injection_block(
                 canonical_id, query, self.inject_memory_limit
             )
             if not memory_block:
@@ -297,7 +317,7 @@ class TMemoryPlugin(Star):
             return
 
         canonical_id, _, _ = self._resolve_current_identity(event)
-        context_block = self.build_memory_context(canonical_id, query, limit=6)
+        context_block = await self.build_memory_context(canonical_id, query, limit=6)
         yield event.plain_result(context_block)
 
     @filter.permission_type(filter.PermissionType.ADMIN)
@@ -367,7 +387,29 @@ class TMemoryPlugin(Star):
             f"pending_cached_rows: {stats['pending_cached_rows']}",
             f"total_events: {stats['total_events']}",
         ]
+        if self._vec_available:
+            lines.append(f"vector_index_rows: {stats.get('vector_index_rows', 0)}")
+        elif self.enable_vector_search:
+            lines.append("vector_search: enabled but sqlite-vec not installed")
         yield event.plain_result("\n".join(lines))
+
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @filter.command("tm_vec_rebuild")
+    async def tm_vec_rebuild(self, event: AstrMessageEvent):
+        """为已有记忆重建向量索引：/tm_vec_rebuild"""
+        if not self._vec_available:
+            yield event.plain_result(
+                "向量检索未启用或 sqlite-vec 未安装。\n"
+                "请先安装：pip install sqlite-vec，并在配置中开启 enable_vector_search。"
+            )
+            return
+        if not self.embed_base_url:
+            yield event.plain_result("未配置 embed_provider_base_url，无法生成向量。")
+            return
+
+        yield event.plain_result("开始重建向量索引，请稍候...")
+        ok, fail = await self._rebuild_vector_index()
+        yield event.plain_result(f"向量索引重建完成：成功 {ok} 条，跳过/失败 {fail} 条。")
 
     # =========================================================================
     # 定时蒸馏 Worker
@@ -424,7 +466,7 @@ class TMemoryPlugin(Star):
                     )
                     if not mem_text:
                         continue
-                    self._insert_memory(
+                    new_id = self._insert_memory(
                         canonical_id=canonical_id,
                         adapter=str(rows[0]["source_adapter"]),
                         adapter_user=str(rows[0]["source_user_id"]),
@@ -435,6 +477,8 @@ class TMemoryPlugin(Star):
                         confidence=self._clamp01(item.get("confidence", 0.7)),
                         source_channel="scheduled_distill",
                     )
+                    if self._vec_available and new_id:
+                        await self._upsert_vector(new_id, mem_text)
                     total_memories += 1
 
                 self._mark_rows_distilled([int(r["id"]) for r in rows])
@@ -628,14 +672,14 @@ class TMemoryPlugin(Star):
     # 记忆召回与上下文构建
     # =========================================================================
 
-    def _build_injection_block(
+    async def _build_injection_block(
         self, canonical_user_id: str, query: str, limit: int
     ) -> str:
         """构建注入到 system_prompt 的记忆块。
 
         格式简洁，专为 token 节省设计。返回空字符串表示无有效记忆。
         """
-        rows = self._retrieve_memories(canonical_user_id, query, limit)
+        rows = await self._retrieve_memories(canonical_user_id, query, limit)
         if not rows:
             return ""
 
@@ -647,11 +691,11 @@ class TMemoryPlugin(Star):
 
         return "\n".join(lines)
 
-    def build_memory_context(
+    async def build_memory_context(
         self, canonical_user_id: str, query: str, limit: int = 6
     ) -> str:
         """构建完整的调试用记忆上下文块（供 /tm_context 指令使用）。"""
-        rows = self._retrieve_memories(canonical_user_id, query, limit)
+        rows = await self._retrieve_memories(canonical_user_id, query, limit)
         recent = self._fetch_recent_conversation(canonical_user_id, limit=6)
 
         recent_lines = []
@@ -783,6 +827,15 @@ class TMemoryPlugin(Star):
                 )
                 """
             )
+            # ── 向量表（仅当 sqlite-vec 可用时创建）──────────────────────────
+            if self._vec_available:
+                try:
+                    conn.execute(
+                        f"CREATE VIRTUAL TABLE IF NOT EXISTS memory_vectors "
+                        f"USING vec0(memory_id INTEGER PRIMARY KEY, embedding float[{self.embed_dim}])"
+                    )
+                except Exception as _ve:
+                    logger.warning("[tmemory] failed to create memory_vectors: %s", _ve)
 
     def _migrate_schema(self):
         self._ensure_columns(
@@ -856,7 +909,115 @@ class TMemoryPlugin(Star):
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA synchronous=NORMAL")
         conn.execute("PRAGMA busy_timeout=5000")
+        if self._vec_available:
+            conn.enable_load_extension(True)
+            self._sqlite_vec.load(conn)
+            conn.enable_load_extension(False)
         return conn
+
+    # =========================================================================
+    # 向量检索辅助方法
+    # =========================================================================
+
+    async def _embed_text(self, text: str) -> Optional[List[float]]:
+        """调用 OpenAI-compatible /v1/embeddings 生成向量。失败返回 None。"""
+        if not self._vec_available or not self.embed_base_url:
+            return None
+        try:
+            import aiohttp  # type: ignore[import-not-found]
+            url = self.embed_base_url.rstrip("/") + "/v1/embeddings"
+            payload = {"model": self.embed_model, "input": text[:2000]}
+            headers = {}
+            if self.embed_api_key:
+                headers["Authorization"] = f"Bearer {self.embed_api_key}"
+            timeout = aiohttp.ClientTimeout(total=10)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.post(url, json=payload, headers=headers) as resp:
+                    if resp.status != 200:
+                        logger.debug("[tmemory] embed API status=%s", resp.status)
+                        return None
+                    data = await resp.json()
+                    vec = data["data"][0]["embedding"]
+                    if len(vec) != self.embed_dim:
+                        logger.warning(
+                            "[tmemory] embed dim mismatch: got %d, expected %d",
+                            len(vec), self.embed_dim,
+                        )
+                        return None
+                    return vec
+        except Exception as e:
+            logger.debug("[tmemory] _embed_text failed: %s", e)
+            return None
+
+    async def _upsert_vector(self, memory_id: int, text: str) -> None:
+        """为一条记忆生成并写入向量。失败静默跳过。"""
+        if not self._vec_available:
+            return
+        vec = await self._embed_text(text)
+        if vec is None:
+            return
+        try:
+            blob = self._sqlite_vec.serialize_float32(vec)
+            with self._db() as conn:
+                conn.execute(
+                    "INSERT OR REPLACE INTO memory_vectors(memory_id, embedding) VALUES(?, ?)",
+                    (memory_id, blob),
+                )
+        except Exception as e:
+            logger.debug("[tmemory] _upsert_vector failed for id=%s: %s", memory_id, e)
+
+    def _delete_vector(self, memory_id: int, conn=None) -> None:
+        """删除单条记忆的向量行。"""
+        if not self._vec_available:
+            return
+        try:
+            if conn is not None:
+                conn.execute("DELETE FROM memory_vectors WHERE memory_id = ?", (memory_id,))
+            else:
+                with self._db() as _conn:
+                    _conn.execute("DELETE FROM memory_vectors WHERE memory_id = ?", (memory_id,))
+        except Exception as e:
+            logger.debug("[tmemory] _delete_vector failed: %s", e)
+
+    def _delete_vectors_for_user(self, canonical_id: str, conn=None) -> None:
+        """删除某用户所有记忆的向量行。"""
+        if not self._vec_available:
+            return
+        try:
+            sql = (
+                "DELETE FROM memory_vectors WHERE memory_id IN "
+                "(SELECT id FROM memories WHERE canonical_user_id = ?)"
+            )
+            if conn is not None:
+                conn.execute(sql, (canonical_id,))
+            else:
+                with self._db() as _conn:
+                    _conn.execute(sql, (canonical_id,))
+        except Exception as e:
+            logger.debug("[tmemory] _delete_vectors_for_user failed: %s", e)
+
+    async def _rebuild_vector_index(self) -> Tuple[int, int]:
+        """为所有 is_active=1 的记忆补全向量索引（跳过已有向量的）。"""
+        with self._db() as conn:
+            rows = conn.execute(
+                """
+                SELECT m.id, m.memory FROM memories m
+                LEFT JOIN memory_vectors v ON m.id = v.memory_id
+                WHERE m.is_active = 1 AND v.memory_id IS NULL
+                ORDER BY m.id ASC
+                """
+            ).fetchall()
+            pending = [(int(r["id"]), str(r["memory"])) for r in rows]
+
+        ok = fail = 0
+        for mem_id, mem_text in pending:
+            try:
+                await self._upsert_vector(mem_id, mem_text)
+                ok += 1
+            except Exception as e:
+                logger.debug("[tmemory] rebuild vector failed id=%s: %s", mem_id, e)
+                fail += 1
+        return ok, fail
 
     def _log_memory_event(
         self,
@@ -1190,6 +1351,7 @@ class TMemoryPlugin(Star):
                     payload={"memory_id": memory_id},
                     conn=conn,
                 )
+                self._delete_vector(memory_id, conn=conn)
             return deleted
 
     def _list_memories(
@@ -1222,10 +1384,13 @@ class TMemoryPlugin(Star):
             for r in rows
         ]
 
-    def _retrieve_memories(
+    async def _retrieve_memories(
         self, canonical_id: str, query: str, limit: int
     ) -> List[Dict[str, object]]:
-        """从 memories 表中检索最相关的记忆，按综合评分排序。只返回 is_active=1 的有效记忆。"""
+        """从 memories 表中检索最相关的记忆，按综合评分排序。只返回 is_active=1 的有效记忆。
+
+        当向量检索可用时，对 query 生成 embedding 并做混合打分（关键词 + 向量语义）。
+        """
         query_words = set(self._tokenize(query))
         now_ts = int(time.time())
 
@@ -1240,6 +1405,31 @@ class TMemoryPlugin(Star):
                 """,
                 (canonical_id,),
             ).fetchall()
+
+            # ── 向量检索（可选）─────────────────────────────────────────────
+            vec_scores: Dict[int, float] = {}
+            if self._vec_available and rows:
+                query_vec = await self._embed_text(query)
+                if query_vec:
+                    try:
+                        blob = self._sqlite_vec.serialize_float32(query_vec)
+                        vec_rows = conn.execute(
+                            """
+                            SELECT memory_id, distance FROM memory_vectors
+                            WHERE embedding MATCH ?
+                            AND k = 30
+                            ORDER BY distance
+                            """,
+                            [blob],
+                        ).fetchall()
+                        for vr in vec_rows:
+                            # L2 距离转相似度：距离越小越相似
+                            sim = 1.0 / (1.0 + float(vr["distance"]))
+                            vec_scores[int(vr["memory_id"])] = sim
+                    except Exception as _ve:
+                        logger.debug("[tmemory] vector query failed: %s", _ve)
+
+        kw_weight = 1.0 - self.vector_weight if vec_scores else 1.0
 
         scored = []
         for row in rows:
@@ -1259,7 +1449,7 @@ class TMemoryPlugin(Star):
             except Exception:
                 pass
 
-            final_score = (
+            keyword_score = (
                 0.35 * float(row["score"])
                 + 0.25 * float(row["importance"])
                 + 0.20 * float(row["confidence"])
@@ -1267,6 +1457,9 @@ class TMemoryPlugin(Star):
                 + 0.05 * min(1.0, float(row["reinforce_count"]) / 10.0)
                 + recency_bonus
             )
+
+            vector_sim = vec_scores.get(int(row["id"]), 0.0)
+            final_score = kw_weight * keyword_score + self.vector_weight * vector_sim
 
             scored.append(
                 {
@@ -1718,6 +1911,7 @@ class TMemoryPlugin(Star):
 
     def _purge_user_data(self, canonical_id: str) -> Dict[str, int]:
         with self._db() as conn:
+            self._delete_vectors_for_user(canonical_id, conn=conn)
             m = conn.execute("DELETE FROM memories WHERE canonical_user_id = ?", (canonical_id,)).rowcount
             c = conn.execute("DELETE FROM conversation_cache WHERE canonical_user_id = ?", (canonical_id,)).rowcount
             conn.execute("DELETE FROM memory_events WHERE canonical_user_id = ?", (canonical_id,))
@@ -1845,6 +2039,14 @@ class TMemoryPlugin(Star):
             total_events = conn.execute(
                 "SELECT COUNT(*) FROM memory_events"
             ).fetchone()[0]
+            vector_index_rows = 0
+            if self._vec_available:
+                try:
+                    vector_index_rows = conn.execute(
+                        "SELECT COUNT(*) FROM memory_vectors"
+                    ).fetchone()[0]
+                except Exception:
+                    pass
 
         return {
             "total_users": int(total_users),
@@ -1852,4 +2054,5 @@ class TMemoryPlugin(Star):
             "total_deactivated_memories": int(deactivated_memories),
             "pending_cached_rows": int(pending_cached),
             "total_events": int(total_events),
+            "vector_index_rows": int(vector_index_rows),
         }

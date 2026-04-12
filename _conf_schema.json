@@ -133,5 +133,41 @@
     "description": "跳过采集的正则表达式",
     "hint": "高级过滤。填写 Python 正则表达式，匹配到的消息（用户/助手双侧）不会被写入对话缓存。留空不启用。示例：^\\[系统\\]|^SYSTEM:",
     "default": ""
+  },
+  "enable_vector_search": {
+    "type": "bool",
+    "description": "启用向量检索（实验性）",
+    "hint": "开启后将使用 sqlite-vec 做语义向量检索，需额外配置 Embedding API。未安装 sqlite-vec 时自动降级为关键词检索。",
+    "default": false
+  },
+  "embed_provider_base_url": {
+    "type": "string",
+    "description": "Embedding API base_url",
+    "hint": "OpenAI 兼容的 Embedding API 地址，例如 https://api.openai.com 或本地 Ollama 地址。留空时向量检索不可用。",
+    "default": ""
+  },
+  "embed_provider_api_key": {
+    "type": "string",
+    "description": "Embedding API key",
+    "hint": "调用 Embedding API 所需的 API key。",
+    "default": ""
+  },
+  "embed_model": {
+    "type": "string",
+    "description": "Embedding 模型名",
+    "hint": "生成向量的模型名，需与 base_url 对应。常用值：text-embedding-3-small（OpenAI）、nomic-embed-text（Ollama）。",
+    "default": "text-embedding-3-small"
+  },
+  "embed_dim": {
+    "type": "int",
+    "description": "向量维度",
+    "hint": "必须与所选 Embedding 模型的输出维度一致。text-embedding-3-small=1536，ada-002=1536，nomic-embed-text=768。",
+    "default": 1536
+  },
+  "vector_weight": {
+    "type": "float",
+    "description": "向量相似度权重",
+    "hint": "混合检索中向量相似度的权重（0~1），剩余权重分给关键词/重要性。建议 0.3~0.5。",
+    "default": 0.4
   }
 }
