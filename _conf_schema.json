@@ -125,7 +125,13 @@
   "capture_skip_prefixes": {
     "type": "string",
     "description": "跳过采集的内容前缀",
-    "hint": "逗号分隔的前缀列表，以这些前缀开头的消息不会被写入对话缓存。内置了 tschedule 的提醒前缀（'提醒 #'）。如有其他插件需要过滤，在此追加。",
+    "hint": "逗号分隔的前缀列表，以这些前缀开头的消息不会被采集。内置了 tschedule 兼容前缀（'提醒 #'），无需手动添加。支持新版 tschedule 的 no-memory 协议标记，优先级最高（自动生效）。",
+    "default": ""
+  },
+  "capture_skip_regex": {
+    "type": "string",
+    "description": "跳过采集的正则表达式",
+    "hint": "高级过滤。填写 Python 正则表达式，匹配到的消息（用户/助手双侧）不会被写入对话缓存。留空不启用。示例：^\\[系统\\]|^SYSTEM:",
     "default": ""
   }
 }
