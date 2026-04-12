@@ -94,6 +94,7 @@ class TMemoryPlugin(Star):
         self.embed_model = str(self.config.get("embed_model", "text-embedding-3-small")).strip()
         self.embed_dim = max(64, int(self.config.get("embed_dim", 1536)))
         self.vector_weight = max(0.0, min(1.0, float(self.config.get("vector_weight", 0.4))))
+        self.min_vector_sim = max(0.0, min(1.0, float(self.config.get("min_vector_sim", 0.15))))
         self._sqlite_vec = None
         self._vec_available = False
         if self.enable_vector_search:
@@ -115,6 +116,14 @@ class TMemoryPlugin(Star):
         self._worker_running = False
         self._merge_needs_vector_rebuild = False
         self._http_session = None  # aiohttp.ClientSession 单例，在首次使用时创建
+
+        # ── 向量可观测指标 ──────────────────────────────────────────────────
+        self._embed_ok_count = 0
+        self._embed_fail_count = 0
+        self._embed_last_error = ""
+        self._vec_query_count = 0
+        self._vec_hit_count = 0
+        self._embed_semaphore = asyncio.Semaphore(4)  # 并发 embedding 上限
 
         # ── WebUI 独立服务器 ──────────────────────────────────────────────────
         TMemoryWebServer = self._load_web_server_class()
@@ -399,6 +408,15 @@ class TMemoryPlugin(Star):
         ]
         if self._vec_available:
             lines.append(f"vector_index_rows: {stats.get('vector_index_rows', 0)}")
+            lines.append(f"embed_ok/fail: {self._embed_ok_count}/{self._embed_fail_count}")
+            hit_rate = (
+                f"{self._vec_hit_count}/{self._vec_query_count}"
+                f" ({self._vec_hit_count * 100 // max(1, self._vec_query_count)}%)"
+                if self._vec_query_count > 0 else "N/A"
+            )
+            lines.append(f"vector_hit_rate: {hit_rate}")
+            if self._embed_last_error:
+                lines.append(f"embed_last_error: {self._embed_last_error[:80]}")
         elif self.enable_vector_search:
             lines.append("vector_search: enabled but sqlite-vec not installed")
         yield event.plain_result("\n".join(lines))
@@ -406,7 +424,7 @@ class TMemoryPlugin(Star):
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("tm_vec_rebuild")
     async def tm_vec_rebuild(self, event: AstrMessageEvent):
-        """为已有记忆重建向量索引：/tm_vec_rebuild"""
+        """重建向量索引：/tm_vec_rebuild 或 /tm_vec_rebuild force=true"""
         if not self._vec_available:
             yield event.plain_result(
                 "向量检索未启用或 sqlite-vec 未安装。\n"
@@ -417,7 +435,19 @@ class TMemoryPlugin(Star):
             yield event.plain_result("未配置 embed_provider_base_url，无法生成向量。")
             return
 
-        yield event.plain_result("开始重建向量索引，请稍候...")
+        raw = (event.message_str or "").strip()
+        force = "force=true" in raw.lower() or "force" in raw.lower()
+
+        if force:
+            yield event.plain_result("全量重建模式：清空现有向量后重建，请稍候...")
+            with self._db() as conn:
+                try:
+                    conn.execute("DELETE FROM memory_vectors")
+                except Exception:
+                    pass
+        else:
+            yield event.plain_result("增量补全模式：只补缺失向量，请稍候...")
+
         ok, fail = await self._rebuild_vector_index()
         yield event.plain_result(f"向量索引重建完成：成功 {ok} 条，跳过/失败 {fail} 条。")
 
@@ -1165,32 +1195,64 @@ class TMemoryPlugin(Star):
         return self._http_session
 
     async def _embed_text(self, text: str) -> Optional[List[float]]:
-        """调用 OpenAI-compatible /v1/embeddings 生成向量。失败返回 None。"""
+        """调用 OpenAI-compatible /v1/embeddings 生成向量。
+
+        包含：并发限流（semaphore）、429/5xx 重试（最多 2 次）、可观测计数。
+        """
         if not self._vec_available or not self.embed_base_url:
             return None
-        try:
-            url = self.embed_base_url.rstrip("/") + "/v1/embeddings"
-            payload = {"model": self.embed_model, "input": text[:2000]}
-            headers: Dict[str, str] = {}
-            if self.embed_api_key:
-                headers["Authorization"] = f"Bearer {self.embed_api_key}"
-            session = await self._get_http_session()
-            async with session.post(url, json=payload, headers=headers) as resp:
-                if resp.status != 200:
-                    logger.debug("[tmemory] embed API status=%s", resp.status)
+
+        url = self.embed_base_url.rstrip("/") + "/v1/embeddings"
+        payload = {"model": self.embed_model, "input": text[:2000]}
+        headers: Dict[str, str] = {}
+        if self.embed_api_key:
+            headers["Authorization"] = f"Bearer {self.embed_api_key}"
+
+        max_retries = 2
+        async with self._embed_semaphore:
+            for attempt in range(1, max_retries + 1):
+                try:
+                    session = await self._get_http_session()
+                    async with session.post(url, json=payload, headers=headers) as resp:
+                        if resp.status == 429 or resp.status >= 500:
+                            # 可重试的错误
+                            if attempt < max_retries:
+                                wait = min(2.0 * attempt, 5.0)
+                                logger.debug(
+                                    "[tmemory] embed API %d, retry %d after %.1fs",
+                                    resp.status, attempt, wait,
+                                )
+                                await asyncio.sleep(wait)
+                                continue
+                            self._embed_fail_count += 1
+                            self._embed_last_error = f"HTTP {resp.status}"
+                            return None
+                        if resp.status != 200:
+                            self._embed_fail_count += 1
+                            self._embed_last_error = f"HTTP {resp.status}"
+                            logger.debug("[tmemory] embed API status=%s", resp.status)
+                            return None
+                        data = await resp.json()
+                        vec = data["data"][0]["embedding"]
+                        if len(vec) != self.embed_dim:
+                            logger.warning(
+                                "[tmemory] embed dim mismatch: got %d, expected %d",
+                                len(vec), self.embed_dim,
+                            )
+                            self._embed_fail_count += 1
+                            self._embed_last_error = f"dim mismatch {len(vec)} vs {self.embed_dim}"
+                            return None
+                        self._embed_ok_count += 1
+                        return vec
+                except Exception as e:
+                    if attempt < max_retries:
+                        await asyncio.sleep(1.0 * attempt)
+                        continue
+                    self._embed_fail_count += 1
+                    self._embed_last_error = str(e)[:200]
+                    logger.debug("[tmemory] _embed_text failed: %s", e)
                     return None
-                data = await resp.json()
-                vec = data["data"][0]["embedding"]
-                if len(vec) != self.embed_dim:
-                    logger.warning(
-                        "[tmemory] embed dim mismatch: got %d, expected %d",
-                        len(vec), self.embed_dim,
-                    )
-                    return None
-                return vec
-        except Exception as e:
-            logger.debug("[tmemory] _embed_text failed: %s", e)
-            return None
+        return None
 
     async def _upsert_vector(self, memory_id: int, text: str) -> None:
         """为一条记忆生成并写入向量。失败静默跳过。"""
@@ -1678,7 +1740,11 @@ class TMemoryPlugin(Star):
                     for vr in vec_rows:
                         # L2 距离转相似度：距离越小越相似
                         sim = 1.0 / (1.0 + float(vr["distance"]))
-                        vec_scores[int(vr["memory_id"])] = sim
+                        if sim >= self.min_vector_sim:
+                            vec_scores[int(vr["memory_id"])] = sim
+                    self._vec_query_count += 1
+                    if vec_scores:
+                        self._vec_hit_count += 1
                 except Exception as _ve:
                     logger.debug("[tmemory] vector query failed: %s", _ve)
 
@@ -1724,7 +1790,8 @@ class TMemoryPlugin(Star):
             )
 
         scored.sort(key=lambda x: float(x["final_score"]), reverse=True)
-        top_result = scored[:limit]
+        # 去重：高语义重叠的记忆只保留分数最高的那条
+        top_result = self._deduplicate_results(scored, limit)
 
         # 对命中的 top 结果进行强化：reinforce_count += 1，批量更新减少 DB 开销
         if top_result:
@@ -2048,6 +2115,33 @@ class TMemoryPlugin(Star):
         if not merged.startswith("用户"):
             merged = f"用户{merged}"
         return merged[:300]
+
+    def _deduplicate_results(
+        self, scored: List[Dict[str, object]], limit: int
+    ) -> List[Dict[str, object]]:
+        """对排序后的结果做轻量去重：已有高分相似记忆时跳过低分重复项。"""
+        if not scored:
+            return []
+        accepted: List[Dict[str, object]] = []
+        accepted_words: List[set] = []
+        for item in scored:
+            if len(accepted) >= limit:
+                break
+            mem_words = set(self._tokenize(str(item["memory"])))
+            # 与已接受的记忆比较词重叠度
+            is_dup = False
+            for aw in accepted_words:
+                if not mem_words or not aw:
+                    continue
+                overlap = len(mem_words.intersection(aw))
+                ratio = overlap / min(len(mem_words), len(aw))
+                if ratio > 0.7:  # 70% 以上关键词重叠视为重复
+                    is_dup = True
+                    break
+            if not is_dup:
+                accepted.append(item)
+                accepted_words.append(mem_words)
+        return accepted
 
     # =========================================================================
     # 对话缓存
