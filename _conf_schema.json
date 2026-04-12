@@ -169,5 +169,17 @@
     "description": "向量相似度权重",
     "hint": "混合检索中向量相似度的权重（0~1），剩余权重分给关键词/重要性。建议 0.3~0.5。",
     "default": 0.4
+  },
+  "manual_refine_default_mode": {
+    "type": "string",
+    "description": "手动精馏默认模式",
+    "hint": "tm_refine 未显式传 mode 时使用：merge|split|both。",
+    "default": "both"
+  },
+  "manual_refine_default_limit": {
+    "type": "int",
+    "description": "手动精馏默认处理条数",
+    "hint": "tm_refine 未显式传 limit 时使用，建议 10~50。",
+    "default": 20
   }
 }
