@@ -242,8 +242,8 @@
   "inject_position": {
     "type": "string",
     "description": "记忆注入位置",
-    "hint": "tail=追加到 system_prompt 末尾（默认）；head=插在最前；slot=替换 system_prompt 中的占位符（见 inject_slot_marker）。",
-    "default": "tail"
+    "hint": "system_prompt（默认）：追加到 system_prompt 末尾；user_message_before：作为用户消息前缀；user_message_after：作为用户消息后缀；slot：替换 system_prompt 中的占位符（见 inject_slot_marker）。",
+    "default": "system_prompt"
   },
   "inject_slot_marker": {
     "type": "string",
@@ -256,5 +256,24 @@
     "description": "注入块最大字符数",
     "hint": "记忆块超出此长度时截断。0=不限。建议 500~2000。",
     "default": 0
+  },
+  "refine_quality_interval_days": {
+    "type": "int",
+    "description": "提馆间隔天数",
+    "hint": "每隔多少天对全量已蒸馏记忆进行质量重评（0=不启用自动提馆）。建议 3~7。",
+    "default": 0
+  },
+  "refine_quality_model_id": {
+    "type": "string",
+    "description": "提馆 LLM 模型",
+    "hint": "用于提馆的 LLM provider ID，留空则复用 distill_model_id。可使用廉价模型。",
+    "default": "",
+    "_special": "select_provider"
+  },
+  "refine_quality_min_score": {
+    "type": "float",
+    "description": "提馆最低综合分",
+    "hint": "规则层：综合分（0.3×score + 0.4×importance + 0.3×confidence）低于此值的记忆直接失活。0=不启用规则层。",
+    "default": 0.0
   }
 }
