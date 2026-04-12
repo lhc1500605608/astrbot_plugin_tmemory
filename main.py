@@ -37,6 +37,16 @@ class TMemoryPlugin(Star):
         self.capture_assistant_reply = bool(
             self.config.get("capture_assistant_reply", True)
         )
+        # 跳过采集的内容前缀列表，匹配的消息不会被写入 conversation_cache。
+        # 默认内置 tschedule 的提醒前缀，防止计划任务提醒被当作对话素材蒸馏。
+        _raw_skip = self.config.get("capture_skip_prefixes", "")
+        _user_prefixes = [
+            p.strip() for p in str(_raw_skip).split(",") if p.strip()
+        ] if _raw_skip else []
+        self.capture_skip_prefixes: List[str] = [
+            "提醒 #",   # tschedule 提醒格式：提醒 #1：xxx
+            *_user_prefixes,
+        ]
 
         # ── 蒸馏调度 ──────────────────────────────────────────────────────────
         # distill_interval_sec: 两次蒸馏之间的最小间隔（秒），默认 17280s（约 4.8 小时，每天约 5 次）。
@@ -150,6 +160,10 @@ class TMemoryPlugin(Star):
         if text.startswith("/"):
             return
 
+        # 跳过匹配前缀的消息（如 tschedule 提醒），避免被当作用户对话素材。
+        if any(text.startswith(p) for p in self.capture_skip_prefixes):
+            return
+
         canonical_id, adapter, adapter_user = self._resolve_current_identity(event)
         umo = self._safe_get_unified_msg_origin(event)
         self._insert_conversation(
@@ -169,6 +183,10 @@ class TMemoryPlugin(Star):
 
         text = self._normalize_text(getattr(resp, "completion_text", "") or "")
         if not text:
+            return
+
+        # 跳过匹配前缀的回复（如计划任务触发的回复），不作为蒸馏素材。
+        if any(text.startswith(p) for p in self.capture_skip_prefixes):
             return
 
         canonical_id, adapter, adapter_user = self._resolve_current_identity(event)

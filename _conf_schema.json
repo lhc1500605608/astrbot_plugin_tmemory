@@ -121,5 +121,11 @@
     "description": "暂停自动蒸馏",
     "hint": "开启后停止后台自动蒸馏（手动蒸馏不受影响），用于成本控制或调试。",
     "default": false
+  },
+  "capture_skip_prefixes": {
+    "type": "string",
+    "description": "跳过采集的内容前缀",
+    "hint": "逗号分隔的前缀列表，以这些前缀开头的消息不会被写入对话缓存。内置了 tschedule 的提醒前缀（'提醒 #'）。如有其他插件需要过滤，在此追加。",
+    "default": ""
   }
 }
