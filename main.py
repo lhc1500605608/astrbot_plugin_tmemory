@@ -558,6 +558,8 @@ class TMemoryPlugin(Star):
             completion_text = self._normalize_text(
                 getattr(llm_resp, "completion_text", "") or ""
             )
+            # 剥离思维链后再解析（兼容 Gemma / Claude extended thinking 等）
+            completion_text = self._strip_think_tags(completion_text)
             parsed = self._parse_llm_json_memories(completion_text)
             if parsed:
                 return parsed
@@ -641,14 +643,30 @@ class TMemoryPlugin(Star):
                 pass
             return ""
 
+    # 匹配 thinking 模型的推理块（Gemma / Claude extended thinking 等）
+    _THINK_RE = re.compile(r"<think(?:ing)?>.*?</think(?:ing)?>", re.DOTALL | re.IGNORECASE)
+
+    def _strip_think_tags(self, text: str) -> str:
+        """剥离 <think>/<thinking>/<thought> 思维链块，只保留最终 JSON 输出。"""
+        # 匹配 <think> / <thinking> / <thought> 等变体
+        stripped = re.sub(
+            r"<th(?:ink(?:ing)?|ought)>.*?</th(?:ink(?:ing)?|ought)>",
+            "", text, flags=re.DOTALL | re.IGNORECASE
+        ).strip()
+        return stripped if stripped else text
+
     def _parse_llm_json_memories(self, raw_text: str) -> List[Dict[str, object]]:
         if not raw_text:
             return []
+
+        # 先剥离思维链（Gemma / Claude extended thinking 等模型会输出 <thought>/<think>）
+        raw_text = self._strip_think_tags(raw_text)
 
         data = None
         try:
             data = json.loads(raw_text)
         except json.JSONDecodeError:
+            # 从文本中提取第一个完整 JSON 对象
             start = raw_text.find("{")
             end = raw_text.rfind("}")
             if start != -1 and end != -1 and end > start:
@@ -2020,13 +2038,41 @@ class TMemoryPlugin(Star):
     def _now(self) -> str:
         return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
 
+    # 对话行前缀正则（user: / assistant: 等）
+    _TRANSCRIPT_PREFIX_RE = re.compile(r"^(user|assistant|summary)\s*:\s*", re.IGNORECASE | re.MULTILINE)
+    # 蒸馏关键词提取时过滤的噪声词
+    _NOISE_WORDS: frozenset = frozenset({
+        # 单字语气词
+        "嗯", "哦", "啊", "哈", "呢", "吧", "啦", "呀", "哇", "唉",
+        # 常见口头禅 / 感叹词
+        "哈哈", "嗯嗯", "哦哦", "哈哈哈", "呵呵", "嘿嘿", "嗯呐",
+        "好好", "好的", "好吧", "好嘞", "嗯哦", "啊啊",
+        # 英文口头禅
+        "ok", "okay", "lol", "hhh", "haha",
+        # 对话角色前缀词（被 _TRANSCRIPT_PREFIX_RE 剥离后仍可能残留）
+        "user", "assistant", "summary",
+    })
+    # 同时过滤含纯感叹/颜文字的短片段
+    _JUNK_WORD_RE = re.compile(r"^[\U0001F000-\U0001FFFF\u2600-\u27BF😀-🙏🌀-🗿]*$")
+
     def _distill_text(self, text: str) -> str:
-        """规则蒸馏：提取关键词 + 截断，作为 LLM 蒸馏的 fallback。"""
-        normalized = self._normalize_text(text)
+        """规则蒸馏：过滤对话噪声后提取关键词，作为 LLM 蒸馏的 fallback。"""
+        # 剥离 user:/assistant: 前缀，只保留内容
+        cleaned = self._TRANSCRIPT_PREFIX_RE.sub("", text)
+        normalized = self._normalize_text(cleaned)
         if not normalized:
             return "空白输入"
 
-        words = [w for w in re.split(r"[^\w\u4e00-\u9fff]+", normalized) if len(w) >= 2]
+        # 过滤噪声词后统计高频实义词
+        words = [
+            w for w in re.split(r"[^\w\u4e00-\u9fff]+", normalized)
+            if len(w) >= 2
+            and w.lower() not in self._NOISE_WORDS
+            and not self._JUNK_WORD_RE.match(w)
+        ]
+        if not words:
+            return "空白输入"
+
         top = [w for w, _ in Counter(words).most_common(5)]
         prefix = f"关键词: {'/'.join(top)}; " if top else ""
         short = normalized[: self.memory_max_chars]
