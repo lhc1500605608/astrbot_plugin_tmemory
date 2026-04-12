@@ -86,6 +86,15 @@ class TMemoryPlugin(Star):
         # ── 蒸馏暂停开关 ──────────────────────────────────────────────────────
         self.distill_pause = bool(self.config.get("distill_pause", False))
 
+        # ── 提馆（Quality Refinement）────────────────────────────────────────
+        # 对已蒸馏的 memories 进行二次质量重评，淘汰低分/低置信/低重要的记忆。
+        # refine_quality_interval_days: 每隔多少天执行一次提馆（0=不启用）
+        # refine_quality_model_id: 用于提馆的 LLM provider id（留空复用 distill_model_id）
+        # refine_quality_min_score: 综合分低于此值的记忆被失活（0=不限）
+        self.refine_quality_interval_days = max(0, int(self.config.get("refine_quality_interval_days", 0)))
+        self.refine_quality_model_id = str(self.config.get("refine_quality_model_id", "")).strip()
+        self.refine_quality_min_score = max(0.0, min(1.0, float(self.config.get("refine_quality_min_score", 0.0))))
+
         # ── 向量检索（sqlite-vec，软依赖）────────────────────────────────────
         self.enable_vector_search = bool(self.config.get("enable_vector_search", False))
         self.embed_base_url = str(self.config.get("embed_provider_base_url", "")).strip()
@@ -128,12 +137,16 @@ class TMemoryPlugin(Star):
         self.private_memory_in_group = bool(self.config.get("private_memory_in_group", False))
 
         # ── 注入位置与召回量 ──────────────────────────────────────────────────
-        # inject_position: "tail"(追加末尾,默认) | "head"(插在最前) | "slot"(替换占位符)
+        # inject_position 可选值：
+        #   "system_prompt"        - 注入到 system_prompt（追加末尾，默认）
+        #   "user_message_before"  - 作为用户消息的前缀（memory block + \n\n + user msg）
+        #   "user_message_after"   - 作为用户消息的后缀（user msg + \n\n + memory block）
+        #   "slot"                 - 替换 system_prompt 中的占位符
         # inject_slot_marker: "slot" 模式时 system_prompt 中的占位文字
         # inject_max_chars: 注入块字符上限，0=不限
-        self.inject_position = str(self.config.get("inject_position", "tail")).strip().lower()
-        if self.inject_position not in {"tail", "head", "slot"}:
-            self.inject_position = "tail"
+        self.inject_position = str(self.config.get("inject_position", "system_prompt")).strip().lower()
+        if self.inject_position not in {"system_prompt", "user_message_before", "user_message_after", "slot"}:
+            self.inject_position = "system_prompt"
         self.inject_slot_marker = str(self.config.get("inject_slot_marker", "{{tmemory}}")).strip()
         self.inject_memory_limit = int(self.config.get("inject_memory_limit", 5))
         self.inject_max_chars = int(self.config.get("inject_max_chars", 0))
@@ -146,6 +159,7 @@ class TMemoryPlugin(Star):
         self._worker_running = False
         self._merge_needs_vector_rebuild = False
         self._http_session = None  # aiohttp.ClientSession 单例，在首次使用时创建
+        self._last_quality_refine_ts = 0.0  # 上次提馆时间戳
 
         # ── 向量可观测指标 ──────────────────────────────────────────────────
         self._embed_ok_count = 0
@@ -297,7 +311,7 @@ class TMemoryPlugin(Star):
             canonical_id, _, _ = self._resolve_current_identity(event)
             query = self._normalize_text(getattr(req, "prompt", "") or "")
             scope = self._get_memory_scope(event)
-            persona_id = self._get_current_persona(event)
+            persona_id = await self._get_current_persona_async(event)
             is_group = self._is_group_event(event)
 
             memory_block = await self._build_injection_block(
@@ -308,14 +322,25 @@ class TMemoryPlugin(Star):
             if not memory_block:
                 return
 
-            existing = getattr(req, "system_prompt", "") or ""
-            if self.inject_position == "slot" and self.inject_slot_marker in existing:
-                req.system_prompt = existing.replace(self.inject_slot_marker, memory_block, 1)
-            elif self.inject_position == "head":
-                req.system_prompt = memory_block + ("\n\n" if existing else "") + existing
-            else:
-                sep = "\n\n" if existing else ""
-                req.system_prompt = existing + sep + memory_block
+            # 注入位置控制
+            if self.inject_position == "slot":
+                existing = getattr(req, "system_prompt", "") or ""
+                if self.inject_slot_marker in existing:
+                    req.system_prompt = existing.replace(self.inject_slot_marker, memory_block, 1)
+                else:
+                    # 占位符不存在时降级到 system_prompt 追加
+                    req.system_prompt = existing + ("\n\n" if existing else "") + memory_block
+            elif self.inject_position == "user_message_before":
+                # 作为用户消息前缀：在 req.prompt 前面拼接
+                original_prompt = getattr(req, "prompt", "") or ""
+                req.prompt = memory_block + "\n\n" + original_prompt if original_prompt else memory_block
+            elif self.inject_position == "user_message_after":
+                # 作为用户消息后缀：在 req.prompt 后面拼接
+                original_prompt = getattr(req, "prompt", "") or ""
+                req.prompt = original_prompt + ("\n\n" if original_prompt else "") + memory_block
+            else:  # system_prompt（默认，追加到末尾）
+                existing = getattr(req, "system_prompt", "") or ""
+                req.system_prompt = existing + ("\n\n" if existing else "") + memory_block
         except Exception as e:
             logger.warning("[tmemory] on_llm_request inject failed: %s", e)
 
@@ -463,6 +488,16 @@ class TMemoryPlugin(Star):
         elif self.enable_vector_search:
             lines.append("vector_search: enabled but sqlite-vec not installed")
         yield event.plain_result("\n".join(lines))
+
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @filter.command("tm_quality_refine")
+    async def tm_quality_refine(self, event: AstrMessageEvent):
+        """手动触发一次记忆质量提馆：/tm_quality_refine"""
+        yield event.plain_result("开始质量提馆，请稍候…")
+        pruned, kept = await self._run_quality_refinement()
+        yield event.plain_result(
+            f"质量提馆完成：失活低质量记忆 {pruned} 条，保留 {kept} 条。"
+        )
 
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("tm_vec_rebuild")
@@ -707,6 +742,21 @@ class TMemoryPlugin(Star):
                 except Exception as _e:
                     logger.debug("[tmemory] post-merge vector rebuild error: %s", _e)
                 self._merge_needs_vector_rebuild = False
+
+            # 提馆调度：每隔 refine_quality_interval_days 天对全部记忆做质量重评
+            if self.refine_quality_interval_days > 0:
+                now_ts = time.time()
+                interval_sec = self.refine_quality_interval_days * 86400
+                if now_ts - self._last_quality_refine_ts >= interval_sec:
+                    try:
+                        pruned, kept = await self._run_quality_refinement()
+                        logger.info(
+                            "[tmemory] quality refinement done: pruned=%s kept=%s",
+                            pruned, kept,
+                        )
+                        self._last_quality_refine_ts = now_ts
+                    except Exception as _qe:
+                        logger.warning("[tmemory] quality refinement error: %s", _qe)
 
             await asyncio.sleep(max(3600, self.distill_interval_sec))
 
@@ -1502,12 +1552,29 @@ class TMemoryPlugin(Star):
                 return "private"
         return "user"
 
-    def _get_current_persona(self, event: AstrMessageEvent) -> str:
-        """获取当前事件对应的人格 ID，用于记忆隔离。"""
+    async def _get_current_persona_async(self, event: AstrMessageEvent) -> str:
+        """使用 AstrBot conversation_manager 异步获取当前人格 ID。"""
         try:
-            conv = getattr(event, "_conversation", None) or getattr(event, "conversation", None)
+            umo = self._safe_get_unified_msg_origin(event)
+            conv_mgr = getattr(self.context, "conversation_manager", None)
+            if conv_mgr and umo:
+                cid = await conv_mgr.get_curr_conversation_id(umo)
+                if cid:
+                    conv = await conv_mgr.get_conversation(umo, cid)
+                    if conv and getattr(conv, "persona_id", None):
+                        return str(conv.persona_id)
+        except Exception:
+            pass
+        return self._get_current_persona(event)
+
+    def _get_current_persona(self, event: AstrMessageEvent) -> str:
+        """同步获取人格 ID（fallback）。优先从 event extras 获取，否则返回空。"""
+        try:
+            # AstrBot 在某些版本中将 conversation 挂到 event extras
+            extras = getattr(event, "_extras", {}) or {}
+            conv = extras.get("conversation") or getattr(event, "conversation", None)
             if conv:
-                persona = getattr(conv, "persona_id", None) or getattr(conv, "persona", None)
+                persona = getattr(conv, "persona_id", None)
                 if persona:
                     return str(persona)
         except Exception:
@@ -2537,6 +2604,105 @@ class TMemoryPlugin(Star):
     # =========================================================================
     # 蒸馏历史与健康监测
     # =========================================================================
+
+    async def _run_quality_refinement(self) -> tuple[int, int]:
+        """对全量已蒸馏记忆进行质量重评。
+
+        使用 LLM 对每批记忆做综合评估，标注不值得保留的记忆为失活（is_active=0）。
+        同时执行规则层兜底：低于 refine_quality_min_score 的记忆直接失活。
+        """
+        # ── 规则层：直接失活低综合分记忆 ──────────────────────────────────
+        pruned_rule = 0
+        if self.refine_quality_min_score > 0:
+            with self._db() as conn:
+                rows = conn.execute(
+                    "SELECT id, score, importance, confidence FROM memories WHERE is_active=1 AND is_pinned=0"
+                ).fetchall()
+                for row in rows:
+                    quality = (
+                        0.3 * float(row["score"])
+                        + 0.4 * float(row["importance"])
+                        + 0.3 * float(row["confidence"])
+                    )
+                    if quality < self.refine_quality_min_score:
+                        conn.execute("UPDATE memories SET is_active=0 WHERE id=?", (int(row["id"]),))
+                        pruned_rule += 1
+
+        # ── LLM 层：批量质量重评 ──────────────────────────────────────────
+        pruned_llm = 0
+        kept = 0
+        provider_id = self.refine_quality_model_id or self.distill_model_id or self.distill_provider_id
+        if not provider_id:
+            # 无可用 provider，只执行规则层
+            with self._db() as conn:
+                kept = conn.execute("SELECT COUNT(*) FROM memories WHERE is_active=1").fetchone()[0]
+            return pruned_rule, int(kept)
+
+        # 按用户批量处理
+        with self._db() as conn:
+            user_rows = conn.execute(
+                "SELECT DISTINCT canonical_user_id FROM memories WHERE is_active=1 AND is_pinned=0"
+            ).fetchall()
+
+        for user_row in user_rows:
+            uid = str(user_row["canonical_user_id"])
+            try:
+                with self._db() as conn:
+                    mems = conn.execute(
+                        "SELECT id, memory, memory_type, score, importance, confidence, reinforce_count "
+                        "FROM memories WHERE canonical_user_id=? AND is_active=1 AND is_pinned=0 "
+                        "ORDER BY importance ASC LIMIT 50",
+                        (uid,),
+                    ).fetchall()
+                    mem_list = [dict(r) for r in mems]
+
+                if not mem_list:
+                    continue
+
+                ids_to_deactivate = await self._llm_quality_judge(provider_id, mem_list)
+                if ids_to_deactivate:
+                    with self._db() as conn:
+                        for mid in ids_to_deactivate:
+                            conn.execute("UPDATE memories SET is_active=0 WHERE id=?", (mid,))
+                    pruned_llm += len(ids_to_deactivate)
+            except Exception as e:
+                logger.debug("[tmemory] quality_refinement user=%s error: %s", uid, e)
+
+        with self._db() as conn:
+            kept = int(conn.execute("SELECT COUNT(*) FROM memories WHERE is_active=1").fetchone()[0])
+
+        return pruned_rule + pruned_llm, kept
+
+    async def _llm_quality_judge(
+        self, provider_id: str, memories: List[Dict]
+    ) -> List[int]:
+        """让 LLM 评判一批记忆的质量，返回应该失活的记忆 ID 列表。"""
+        prompt = (
+            "你是记忆质量审核员。请对以下用户记忆进行质量评估，识别出不值得长期保留的记忆。\n"
+            "不值得保留的记忆特征：\n"
+            "- 内容模糊、无实质信息（如'用户说了一些话'）\\n"
+            "- 一次性事件，不反映用户稳定特征\n"
+            "- 与其他记忆严重重复\n"
+            "- 置信度极低（< 0.3）\n"
+            "- 重要性极低且从未被强化召回\n\n"
+            '只输出 JSON，格式：{"deactivate": [id1, id2, ...]}\n'
+            '如果全部值得保留，返回：{"deactivate": []}\n\n'
+            f"待审核记忆：\n{json.dumps(memories, ensure_ascii=False)}"
+        )
+        try:
+            resp = await self.context.llm_generate(
+                chat_provider_id=provider_id,
+                prompt=prompt,
+            )
+            txt = self._strip_think_tags(
+                self._normalize_text(getattr(resp, "completion_text", "") or "")
+            )
+            obj = self._parse_json_object(txt)
+            if obj and isinstance(obj.get("deactivate"), list):
+                return [int(x) for x in obj["deactivate"] if str(x).isdigit()]
+        except Exception as e:
+            logger.debug("[tmemory] _llm_quality_judge failed: %s", e)
+        return []
 
     def _record_distill_history(
         self,
