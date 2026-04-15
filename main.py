@@ -1,13 +1,14 @@
 import asyncio
 import hashlib
 import importlib.util
+import inspect
 import json
 import os
 import re
 import sqlite3
 import time
 from collections import Counter
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, filter
@@ -44,11 +45,13 @@ class TMemoryPlugin(Star):
 
         # 层 2: 文本前缀过滤（配置化）
         _raw_prefixes = self.config.get("capture_skip_prefixes", "")
-        _user_prefixes = [
-            p.strip() for p in str(_raw_prefixes).split(",") if p.strip()
-        ] if _raw_prefixes else []
+        _user_prefixes = (
+            [p.strip() for p in str(_raw_prefixes).split(",") if p.strip()]
+            if _raw_prefixes
+            else []
+        )
         self.capture_skip_prefixes: List[str] = [
-            "提醒 #",   # tschedule 兼容旧版（无 marker 时）
+            "提醒 #",  # tschedule 兼容旧版（无 marker 时）
             *_user_prefixes,
         ]
 
@@ -65,10 +68,18 @@ class TMemoryPlugin(Star):
         # distill_interval_sec: 两次蒸馏之间的最小间隔（秒），默认 17280s（约 4.8 小时，每天约 5 次）。
         # 只有积累了 distill_min_batch_count 条未蒸馏消息的用户才会被蒸馏，
         # 从而避免实时蒸馏造成的 token 浪费。
-        self.distill_interval_sec = max(4 * 3600, int(self.config.get("distill_interval_sec", 17280)))
-        self.distill_min_batch_count = max(8, int(self.config.get("distill_min_batch_count", 20)))
-        self.distill_batch_limit = max(20, int(self.config.get("distill_batch_limit", 80)))
-        # 指定用于蒸馏的 provider ID；留空时自动从消息上下文推断。
+        self.distill_interval_sec = max(
+            4 * 3600, int(self.config.get("distill_interval_sec", 17280))
+        )
+        self.distill_min_batch_count = max(
+            8, int(self.config.get("distill_min_batch_count", 20))
+        )
+        self.distill_batch_limit = max(
+            20, int(self.config.get("distill_batch_limit", 80))
+        )
+        # 蒸馏模型选择优先级：distill_model_id > distill_provider_id > 消息上下文推断。
+        self.distill_model_id = str(self.config.get("distill_model_id", "")).strip()
+        # distill_provider_id 为兼容旧配置保留，作为 distill_model_id 的后备项。
         self.distill_provider_id = str(
             self.config.get("distill_provider_id", "")
         ).strip()
@@ -78,36 +89,99 @@ class TMemoryPlugin(Star):
         self.enable_memory_injection = bool(
             self.config.get("enable_memory_injection", True)
         )
-        self.manual_refine_default_mode = str(self.config.get("manual_refine_default_mode", "both")).strip().lower()
-        if self.manual_refine_default_mode not in {"merge", "split", "both"}:
-            self.manual_refine_default_mode = "both"
-        self.manual_refine_default_limit = max(1, min(200, int(self.config.get("manual_refine_default_limit", 20))))
+        self.manual_purify_default_mode = (
+            str(
+                self.config.get(
+                    "manual_purify_default_mode",
+                    self.config.get("manual_refine_default_mode", "both"),
+                )
+            )
+            .strip()
+            .lower()
+        )
+        if self.manual_purify_default_mode not in {"merge", "split", "both"}:
+            self.manual_purify_default_mode = "both"
+        self.manual_purify_default_limit = max(
+            1,
+            min(
+                200,
+                int(
+                    self.config.get(
+                        "manual_purify_default_limit",
+                        self.config.get("manual_refine_default_limit", 20),
+                    )
+                ),
+            ),
+        )
+        # 兼容旧属性名
+        self.manual_refine_default_mode = self.manual_purify_default_mode
+        self.manual_refine_default_limit = self.manual_purify_default_limit
 
         # ── 蒸馏暂停开关 ──────────────────────────────────────────────────────
         self.distill_pause = bool(self.config.get("distill_pause", False))
 
-        # ── 提馆（Quality Refinement）────────────────────────────────────────
-        # 对已蒸馏的 memories 进行二次质量重评，淘汰低分/低置信/低重要的记忆。
-        # refine_quality_interval_days: 每隔多少天执行一次提馆（0=不启用）
-        # refine_quality_model_id: 用于提馆的 LLM provider id（留空复用 distill_model_id）
-        # refine_quality_min_score: 综合分低于此值的记忆被失活（0=不限）
-        self.refine_quality_interval_days = max(0, int(self.config.get("refine_quality_interval_days", 0)))
-        self.refine_quality_model_id = str(self.config.get("refine_quality_model_id", "")).strip()
-        self.refine_quality_min_score = max(0.0, min(1.0, float(self.config.get("refine_quality_min_score", 0.0))))
+        # ── 提纯（Purification）───────────────────────────────────────────────
+        # 对已蒸馏的 memories 做优化/重评，淘汰低分/低置信/低重要的记忆。
+        # purify_interval_days: 每隔多少天执行一次提纯（0=不启用）
+        # purify_model_id: 用于提纯的 LLM provider/model id
+        #                 （留空回退到 distill_model_id，再回退 distill_provider_id）
+        # purify_min_score: 综合分低于此值的记忆被失活（0=不限）
+        self.purify_interval_days = max(
+            0,
+            int(
+                self.config.get(
+                    "purify_interval_days",
+                    self.config.get("refine_quality_interval_days", 0),
+                )
+            ),
+        )
+        self.purify_model_id = str(
+            self.config.get(
+                "purify_model_id",
+                self.config.get("refine_quality_model_id", ""),
+            )
+        ).strip()
+        self.purify_min_score = max(
+            0.0,
+            min(
+                1.0,
+                float(
+                    self.config.get(
+                        "purify_min_score",
+                        self.config.get("refine_quality_min_score", 0.0),
+                    )
+                ),
+            ),
+        )
+        # 兼容旧属性名
+        self.refine_quality_interval_days = self.purify_interval_days
+        self.refine_quality_model_id = self.purify_model_id
+        self.refine_quality_min_score = self.purify_min_score
 
         # ── 向量检索（sqlite-vec，软依赖）────────────────────────────────────
         self.enable_vector_search = bool(self.config.get("enable_vector_search", False))
-        self.embed_base_url = str(self.config.get("embed_provider_base_url", "")).strip()
-        self.embed_api_key = str(self.config.get("embed_provider_api_key", "")).strip()
-        self.embed_model = str(self.config.get("embed_model", "text-embedding-3-small")).strip()
+        self.embed_provider_id = str(self.config.get("embed_provider_id", "")).strip()
+        self.embed_model_id = str(
+            self.config.get(
+                "embed_model_id",
+                self.config.get("embed_model", ""),
+            )
+        ).strip()
+        # 兼容旧属性名
+        self.embed_model = self.embed_model_id
         self.embed_dim = max(64, int(self.config.get("embed_dim", 1536)))
-        self.vector_weight = max(0.0, min(1.0, float(self.config.get("vector_weight", 0.4))))
-        self.min_vector_sim = max(0.0, min(1.0, float(self.config.get("min_vector_sim", 0.15))))
+        self.vector_weight = max(
+            0.0, min(1.0, float(self.config.get("vector_weight", 0.4)))
+        )
+        self.min_vector_sim = max(
+            0.0, min(1.0, float(self.config.get("min_vector_sim", 0.15)))
+        )
         self._sqlite_vec = None
         self._vec_available = False
         if self.enable_vector_search:
             try:
                 import sqlite_vec  # type: ignore[import-not-found]
+
                 self._sqlite_vec = sqlite_vec
                 self._vec_available = True
             except ImportError:
@@ -116,15 +190,15 @@ class TMemoryPlugin(Star):
                     "Run: pip install sqlite-vec"
                 )
 
-        # ── Reranker（可选，调用 /v1/rerank 接口）────────────────────────────
+        # ── Reranker（可选，内置 provider 反射调用）──────────────────────────
         self.enable_reranker = bool(self.config.get("enable_reranker", False))
-        self.rerank_base_url = str(self.config.get("rerank_base_url", "")).strip()
-        self.rerank_api_key = str(self.config.get("rerank_api_key", "")).strip()
-        self.rerank_model = str(self.config.get("rerank_model", "")).strip()
+        self.rerank_provider_id = str(self.config.get("rerank_provider_id", "")).strip()
+        self.rerank_model_id = str(
+            self.config.get("rerank_model_id", self.config.get("rerank_model", ""))
+        ).strip()
+        # 兼容旧属性名
+        self.rerank_model = self.rerank_model_id
         self.rerank_top_n = max(1, int(self.config.get("rerank_top_n", 5)))
-
-        # ── 蒸馏模型（独立于 chat provider，可留空复用 distill_provider_id）──
-        self.distill_model_id = str(self.config.get("distill_model_id", "")).strip()
 
         # ── 用户/人格隔离 ─────────────────────────────────────────────────────
         # memory_scope 可选值：
@@ -134,7 +208,9 @@ class TMemoryPlugin(Star):
         self.memory_scope = str(self.config.get("memory_scope", "user")).strip().lower()
         if self.memory_scope not in {"user", "session"}:
             self.memory_scope = "user"
-        self.private_memory_in_group = bool(self.config.get("private_memory_in_group", False))
+        self.private_memory_in_group = bool(
+            self.config.get("private_memory_in_group", False)
+        )
 
         # ── 注入位置与召回量 ──────────────────────────────────────────────────
         # inject_position 可选值：
@@ -144,10 +220,19 @@ class TMemoryPlugin(Star):
         #   "slot"                 - 替换 system_prompt 中的占位符
         # inject_slot_marker: "slot" 模式时 system_prompt 中的占位文字
         # inject_max_chars: 注入块字符上限，0=不限
-        self.inject_position = str(self.config.get("inject_position", "system_prompt")).strip().lower()
-        if self.inject_position not in {"system_prompt", "user_message_before", "user_message_after", "slot"}:
+        self.inject_position = (
+            str(self.config.get("inject_position", "system_prompt")).strip().lower()
+        )
+        if self.inject_position not in {
+            "system_prompt",
+            "user_message_before",
+            "user_message_after",
+            "slot",
+        }:
             self.inject_position = "system_prompt"
-        self.inject_slot_marker = str(self.config.get("inject_slot_marker", "{{tmemory}}")).strip()
+        self.inject_slot_marker = str(
+            self.config.get("inject_slot_marker", "{{tmemory}}")
+        ).strip()
         self.inject_memory_limit = int(self.config.get("inject_memory_limit", 5))
         self.inject_max_chars = int(self.config.get("inject_max_chars", 0))
 
@@ -158,8 +243,7 @@ class TMemoryPlugin(Star):
         self._distill_task: Optional[asyncio.Task] = None
         self._worker_running = False
         self._merge_needs_vector_rebuild = False
-        self._http_session = None  # aiohttp.ClientSession 单例，在首次使用时创建
-        self._last_quality_refine_ts = 0.0  # 上次提馆时间戳
+        self._last_purify_ts = 0.0  # 上次提纯时间戳
 
         # ── 向量可观测指标 ──────────────────────────────────────────────────
         self._embed_ok_count = 0
@@ -230,10 +314,6 @@ class TMemoryPlugin(Star):
                 await self._distill_task
             except asyncio.CancelledError:
                 pass
-        # 关闭 HTTP session
-        if self._http_session and not self._http_session.closed:
-            await self._http_session.close()
-            self._http_session = None
         # 关闭 WebUI 服务器
         await self._web_server.stop()
         logger.info("[tmemory] terminated")
@@ -315,8 +395,11 @@ class TMemoryPlugin(Star):
             is_group = self._is_group_event(event)
 
             memory_block = await self._build_injection_block(
-                canonical_id, query, self.inject_memory_limit,
-                scope=scope, persona_id=persona_id,
+                canonical_id,
+                query,
+                self.inject_memory_limit,
+                scope=scope,
+                persona_id=persona_id,
                 exclude_private=(is_group and not self.private_memory_in_group),
             )
             if not memory_block:
@@ -326,21 +409,33 @@ class TMemoryPlugin(Star):
             if self.inject_position == "slot":
                 existing = getattr(req, "system_prompt", "") or ""
                 if self.inject_slot_marker in existing:
-                    req.system_prompt = existing.replace(self.inject_slot_marker, memory_block, 1)
+                    req.system_prompt = existing.replace(
+                        self.inject_slot_marker, memory_block, 1
+                    )
                 else:
                     # 占位符不存在时降级到 system_prompt 追加
-                    req.system_prompt = existing + ("\n\n" if existing else "") + memory_block
+                    req.system_prompt = (
+                        existing + ("\n\n" if existing else "") + memory_block
+                    )
             elif self.inject_position == "user_message_before":
                 # 作为用户消息前缀：在 req.prompt 前面拼接
                 original_prompt = getattr(req, "prompt", "") or ""
-                req.prompt = memory_block + "\n\n" + original_prompt if original_prompt else memory_block
+                req.prompt = (
+                    memory_block + "\n\n" + original_prompt
+                    if original_prompt
+                    else memory_block
+                )
             elif self.inject_position == "user_message_after":
                 # 作为用户消息后缀：在 req.prompt 后面拼接
                 original_prompt = getattr(req, "prompt", "") or ""
-                req.prompt = original_prompt + ("\n\n" if original_prompt else "") + memory_block
+                req.prompt = (
+                    original_prompt + ("\n\n" if original_prompt else "") + memory_block
+                )
             else:  # system_prompt（默认，追加到末尾）
                 existing = getattr(req, "system_prompt", "") or ""
-                req.system_prompt = existing + ("\n\n" if existing else "") + memory_block
+                req.system_prompt = (
+                    existing + ("\n\n" if existing else "") + memory_block
+                )
         except Exception as e:
             logger.warning("[tmemory] on_llm_request inject failed: %s", e)
 
@@ -351,10 +446,12 @@ class TMemoryPlugin(Star):
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("tm_distill_now")
     async def tm_distill_now(self, event: AstrMessageEvent):
-        """手动触发一次批量精馏：/tm_distill_now"""
-        processed_users, total_memories = await self._run_distill_cycle(force=True, trigger="manual_cmd")
+        """手动触发一次批量蒸馏：/tm_distill_now"""
+        processed_users, total_memories = await self._run_distill_cycle(
+            force=True, trigger="manual_cmd"
+        )
         yield event.plain_result(
-            f"批量精馏完成：处理用户 {processed_users} 个，新增/更新记忆 {total_memories} 条。"
+            f"批量蒸馏完成：处理用户 {processed_users} 个，新增/更新记忆 {total_memories} 条。"
         )
 
     @filter.permission_type(filter.PermissionType.ADMIN)
@@ -476,11 +573,14 @@ class TMemoryPlugin(Star):
         ]
         if self._vec_available:
             lines.append(f"vector_index_rows: {stats.get('vector_index_rows', 0)}")
-            lines.append(f"embed_ok/fail: {self._embed_ok_count}/{self._embed_fail_count}")
+            lines.append(
+                f"embed_ok/fail: {self._embed_ok_count}/{self._embed_fail_count}"
+            )
             hit_rate = (
                 f"{self._vec_hit_count}/{self._vec_query_count}"
                 f" ({self._vec_hit_count * 100 // max(1, self._vec_query_count)}%)"
-                if self._vec_query_count > 0 else "N/A"
+                if self._vec_query_count > 0
+                else "N/A"
             )
             lines.append(f"vector_hit_rate: {hit_rate}")
             if self._embed_last_error:
@@ -490,14 +590,21 @@ class TMemoryPlugin(Star):
         yield event.plain_result("\n".join(lines))
 
     @filter.permission_type(filter.PermissionType.ADMIN)
+    @filter.command("tm_purify")
+    async def tm_purify(self, event: AstrMessageEvent):
+        """手动触发一次记忆提纯：/tm_purify"""
+        yield event.plain_result("开始记忆提纯，请稍候…")
+        pruned, kept = await self._run_memory_purify()
+        yield event.plain_result(
+            f"记忆提纯完成：失活低质量记忆 {pruned} 条，保留 {kept} 条。"
+        )
+
+    @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("tm_quality_refine")
     async def tm_quality_refine(self, event: AstrMessageEvent):
-        """手动触发一次记忆质量提馆：/tm_quality_refine"""
-        yield event.plain_result("开始质量提馆，请稍候…")
-        pruned, kept = await self._run_quality_refinement()
-        yield event.plain_result(
-            f"质量提馆完成：失活低质量记忆 {pruned} 条，保留 {kept} 条。"
-        )
+        """兼容旧命令：/tm_quality_refine（等价 /tm_purify）"""
+        async for msg in self.tm_purify(event):
+            yield msg
 
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("tm_vec_rebuild")
@@ -509,8 +616,8 @@ class TMemoryPlugin(Star):
                 "请先安装：pip install sqlite-vec，并在配置中开启 enable_vector_search。"
             )
             return
-        if not self.embed_base_url:
-            yield event.plain_result("未配置 embed_provider_base_url，无法生成向量。")
+        if not self.embed_provider_id:
+            yield event.plain_result("未配置 embed_provider_id，无法生成向量。")
             return
 
         raw = (event.message_str or "").strip()
@@ -527,14 +634,14 @@ class TMemoryPlugin(Star):
             yield event.plain_result("增量补全模式：只补缺失向量，请稍候...")
 
         ok, fail = await self._rebuild_vector_index()
-        yield event.plain_result(f"向量索引重建完成：成功 {ok} 条，跳过/失败 {fail} 条。")
-
-
+        yield event.plain_result(
+            f"向量索引重建完成：成功 {ok} 条，跳过/失败 {fail} 条。"
+        )
 
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("tm_refine")
     async def tm_refine(self, event: AstrMessageEvent):
-        """手动精馏已产生记忆。
+        """手动提纯已产生记忆。
 
         用法：
         /tm_refine mode=both limit=20 dry_run=false include_pinned=false <附加要求>
@@ -549,8 +656,8 @@ class TMemoryPlugin(Star):
         body = re.sub(r"^/tm_refine\s*", "", raw, flags=re.IGNORECASE).strip()
 
         opts = {
-            "mode": self.manual_refine_default_mode,
-            "limit": str(self.manual_refine_default_limit),
+            "mode": self.manual_purify_default_mode,
+            "limit": str(self.manual_purify_default_limit),
             "dry_run": "false",
             "include_pinned": "false",
         }
@@ -586,7 +693,7 @@ class TMemoryPlugin(Star):
         }
 
         canonical_id, _, _ = self._resolve_current_identity(event)
-        result = await self._manual_refine_memories(
+        result = await self._manual_purify_memories(
             event=event,
             canonical_id=canonical_id,
             mode=mode,
@@ -599,7 +706,7 @@ class TMemoryPlugin(Star):
         yield event.plain_result(
             "\n".join(
                 [
-                    f"manual_refine done (dry_run={dry_run})",
+                    f"manual_purify done (dry_run={dry_run})",
                     f"user={canonical_id}",
                     f"mode={mode}, limit={limit}, include_pinned={include_pinned}",
                     f"updates={result['updates']}, adds={result['adds']}, deletes={result['deletes']}",
@@ -619,7 +726,9 @@ class TMemoryPlugin(Star):
         raw = (event.message_str or "").strip()
         body = re.sub(r"^/tm_mem_merge\s*", "", raw, flags=re.IGNORECASE).strip()
         if not body:
-            yield event.plain_result("用法: /tm_mem_merge <id1,id2,...> <合并后的记忆文本>")
+            yield event.plain_result(
+                "用法: /tm_mem_merge <id1,id2,...> <合并后的记忆文本>"
+            )
             return
 
         parts = body.split(None, 1)
@@ -627,7 +736,9 @@ class TMemoryPlugin(Star):
         merged_text = parts[1].strip() if len(parts) > 1 else ""
         ids = [int(x) for x in re.split(r"[,，]", ids_part) if x.strip().isdigit()]
         if len(ids) < 2:
-            yield event.plain_result("请至少提供两个记忆ID，例如 /tm_mem_merge 12,18 新记忆内容")
+            yield event.plain_result(
+                "请至少提供两个记忆ID，例如 /tm_mem_merge 12,18 新记忆内容"
+            )
             return
 
         canonical_id, _, _ = self._resolve_current_identity(event)
@@ -647,7 +758,7 @@ class TMemoryPlugin(Star):
         for r in rs[1:]:
             self._delete_memory(int(r["id"]))
 
-        yield event.plain_result(f"合并完成：保留 #{keep_id}，删除 {len(rs)-1} 条")
+        yield event.plain_result(f"合并完成：保留 #{keep_id}，删除 {len(rs) - 1} 条")
 
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("tm_mem_split")
@@ -723,7 +834,9 @@ class TMemoryPlugin(Star):
         while self._worker_running:
             if not self.distill_pause:
                 try:
-                    users, memories = await self._run_distill_cycle(force=False, trigger="auto")
+                    users, memories = await self._run_distill_cycle(
+                        force=False, trigger="auto"
+                    )
                     if users > 0:
                         logger.info(
                             "[tmemory] distill cycle done: users=%s memories=%s",
@@ -738,25 +851,30 @@ class TMemoryPlugin(Star):
                 try:
                     ok, fail = await self._rebuild_vector_index()
                     if ok > 0:
-                        logger.info("[tmemory] post-merge vector rebuild: ok=%s fail=%s", ok, fail)
+                        logger.info(
+                            "[tmemory] post-merge vector rebuild: ok=%s fail=%s",
+                            ok,
+                            fail,
+                        )
                 except Exception as _e:
                     logger.debug("[tmemory] post-merge vector rebuild error: %s", _e)
                 self._merge_needs_vector_rebuild = False
 
-            # 提馆调度：每隔 refine_quality_interval_days 天对全部记忆做质量重评
-            if self.refine_quality_interval_days > 0:
+            # 提纯调度：每隔 purify_interval_days 天对全部记忆做质量重评
+            if self.purify_interval_days > 0:
                 now_ts = time.time()
-                interval_sec = self.refine_quality_interval_days * 86400
-                if now_ts - self._last_quality_refine_ts >= interval_sec:
+                interval_sec = self.purify_interval_days * 86400
+                if now_ts - self._last_purify_ts >= interval_sec:
                     try:
-                        pruned, kept = await self._run_quality_refinement()
+                        pruned, kept = await self._run_memory_purify()
                         logger.info(
-                            "[tmemory] quality refinement done: pruned=%s kept=%s",
-                            pruned, kept,
+                            "[tmemory] memory purify done: pruned=%s kept=%s",
+                            pruned,
+                            kept,
                         )
-                        self._last_quality_refine_ts = now_ts
+                        self._last_purify_ts = now_ts
                     except Exception as _qe:
-                        logger.warning("[tmemory] quality refinement error: %s", _qe)
+                        logger.warning("[tmemory] memory purify error: %s", _qe)
 
             await asyncio.sleep(max(3600, self.distill_interval_sec))
 
@@ -818,7 +936,9 @@ class TMemoryPlugin(Star):
             except Exception as e:
                 failed_users += 1
                 errors.append(f"{canonical_id}: {type(e).__name__}: {e}")
-                logger.warning("[tmemory] distill failed for user %s: %s", canonical_id, e)
+                logger.warning(
+                    "[tmemory] distill failed for user %s: %s", canonical_id, e
+                )
 
         # 记录蒸馏历史
         duration = round(time.time() - t0, 2)
@@ -919,7 +1039,7 @@ class TMemoryPlugin(Star):
             "3. memory 字段必须是一个完整的陈述句，主语是'用户'。\n"
             '   正确示例："用户偏好使用 Python 编程"\n'
             '   错误示例："Python""喜欢编程""他说了一些话"\n'
-            "4. 如果对话中没有任何值得长期记住的信息，返回空数组 {\"memories\": []}。\n"
+            '4. 如果对话中没有任何值得长期记住的信息，返回空数组 {"memories": []}。\n'
             "5. confidence 表示你对该记忆准确性的把握，低于 0.6 的不要输出。\n"
             "6. importance 表示该信息对未来对话的价值，低于 0.4 的不要输出。\n"
             "7. 最多返回 5 条，宁缺毋滥。\n\n"
@@ -964,14 +1084,18 @@ class TMemoryPlugin(Star):
             return ""
 
     # 匹配 thinking 模型的推理块（Gemma / Claude extended thinking 等）
-    _THINK_RE = re.compile(r"<think(?:ing)?>.*?</think(?:ing)?>", re.DOTALL | re.IGNORECASE)
+    _THINK_RE = re.compile(
+        r"<think(?:ing)?>.*?</think(?:ing)?>", re.DOTALL | re.IGNORECASE
+    )
 
     def _strip_think_tags(self, text: str) -> str:
         """剥离 <think>/<thinking>/<thought> 思维链块，只保留最终 JSON 输出。"""
         # 匹配 <think> / <thinking> / <thought> 等变体
         stripped = re.sub(
             r"<th(?:ink(?:ing)?|ought)>.*?</th(?:ink(?:ing)?|ought)>",
-            "", text, flags=re.DOTALL | re.IGNORECASE
+            "",
+            text,
+            flags=re.DOTALL | re.IGNORECASE,
         ).strip()
         return stripped if stripped else text
 
@@ -1037,8 +1161,11 @@ class TMemoryPlugin(Star):
     ) -> str:
         """构建注入到 system_prompt 的记忆块。"""
         rows = await self._retrieve_memories(
-            canonical_user_id, query, limit,
-            scope=scope, persona_id=persona_id,
+            canonical_user_id,
+            query,
+            limit,
+            scope=scope,
+            persona_id=persona_id,
             exclude_private=exclude_private,
         )
         if not rows:
@@ -1145,6 +1272,8 @@ class TMemoryPlugin(Star):
                     updated_at TEXT NOT NULL,
                     is_active INTEGER NOT NULL DEFAULT 1,
                     is_pinned INTEGER NOT NULL DEFAULT 0,
+                    persona_id TEXT NOT NULL DEFAULT '',
+                    scope TEXT NOT NULL DEFAULT 'user',
                     UNIQUE(canonical_user_id, memory_hash, persona_id, scope)
                 )
                 """
@@ -1308,6 +1437,7 @@ class TMemoryPlugin(Star):
         """获取或创建复用的 aiohttp.ClientSession。"""
         if self._http_session is None or self._http_session.closed:
             import aiohttp  # type: ignore[import-not-found]
+
             timeout = aiohttp.ClientTimeout(total=15)
             self._http_session = aiohttp.ClientSession(timeout=timeout)
         return self._http_session
@@ -1338,7 +1468,9 @@ class TMemoryPlugin(Star):
                                 wait = min(2.0 * attempt, 5.0)
                                 logger.debug(
                                     "[tmemory] embed API %d, retry %d after %.1fs",
-                                    resp.status, attempt, wait,
+                                    resp.status,
+                                    attempt,
+                                    wait,
                                 )
                                 await asyncio.sleep(wait)
                                 continue
@@ -1355,10 +1487,13 @@ class TMemoryPlugin(Star):
                         if len(vec) != self.embed_dim:
                             logger.warning(
                                 "[tmemory] embed dim mismatch: got %d, expected %d",
-                                len(vec), self.embed_dim,
+                                len(vec),
+                                self.embed_dim,
                             )
                             self._embed_fail_count += 1
-                            self._embed_last_error = f"dim mismatch {len(vec)} vs {self.embed_dim}"
+                            self._embed_last_error = (
+                                f"dim mismatch {len(vec)} vs {self.embed_dim}"
+                            )
                             return None
                         self._embed_ok_count += 1
                         return vec
@@ -1372,13 +1507,13 @@ class TMemoryPlugin(Star):
                     return None
         return None
 
-    async def _upsert_vector(self, memory_id: int, text: str) -> None:
-        """为一条记忆生成并写入向量。失败静默跳过。"""
+    async def _upsert_vector(self, memory_id: int, text: str) -> bool:
+        """为一条记忆生成并写入向量。成功返回 True，失败返回 False。"""
         if not self._vec_available:
-            return
+            return False
         vec = await self._embed_text(text)
         if vec is None:
-            return
+            return False
         try:
             blob = self._sqlite_vec.serialize_float32(vec)
             with self._db() as conn:
@@ -1386,8 +1521,10 @@ class TMemoryPlugin(Star):
                     "INSERT OR REPLACE INTO memory_vectors(memory_id, embedding) VALUES(?, ?)",
                     (memory_id, blob),
                 )
+            return True
         except Exception as e:
             logger.debug("[tmemory] _upsert_vector failed for id=%s: %s", memory_id, e)
+            return False
 
     def _delete_vector(self, memory_id: int, conn=None) -> None:
         """删除单条记忆的向量行。"""
@@ -1395,10 +1532,14 @@ class TMemoryPlugin(Star):
             return
         try:
             if conn is not None:
-                conn.execute("DELETE FROM memory_vectors WHERE memory_id = ?", (memory_id,))
+                conn.execute(
+                    "DELETE FROM memory_vectors WHERE memory_id = ?", (memory_id,)
+                )
             else:
                 with self._db() as _conn:
-                    _conn.execute("DELETE FROM memory_vectors WHERE memory_id = ?", (memory_id,))
+                    _conn.execute(
+                        "DELETE FROM memory_vectors WHERE memory_id = ?", (memory_id,)
+                    )
         except Exception as e:
             logger.debug("[tmemory] _delete_vector failed: %s", e)
 
@@ -1435,8 +1576,10 @@ class TMemoryPlugin(Star):
         ok = fail = 0
         for mem_id, mem_text in pending:
             try:
-                await self._upsert_vector(mem_id, mem_text)
-                ok += 1
+                if await self._upsert_vector(mem_id, mem_text):
+                    ok += 1
+                else:
+                    fail += 1
             except Exception as e:
                 logger.debug("[tmemory] rebuild vector failed id=%s: %s", mem_id, e)
                 fail += 1
@@ -1544,6 +1687,7 @@ class TMemoryPlugin(Star):
         if self.memory_scope == "session":
             try:
                 from astrbot.core.platform import MessageType  # type: ignore
+
                 if event.get_message_type() == MessageType.FRIEND_MESSAGE:
                     return "private"
                 gid = event.get_group_id()
@@ -1585,6 +1729,7 @@ class TMemoryPlugin(Star):
         """是否为群聊事件。"""
         try:
             from astrbot.core.platform import MessageType  # type: ignore
+
             return event.get_message_type() != MessageType.FRIEND_MESSAGE
         except Exception:
             gid = event.get_group_id()
@@ -2006,9 +2151,7 @@ class TMemoryPlugin(Star):
 
         return top_result
 
-
-
-    async def _manual_refine_memories(
+    async def _manual_purify_memories(
         self,
         event: AstrMessageEvent,
         canonical_id: str,
@@ -2018,13 +2161,13 @@ class TMemoryPlugin(Star):
         include_pinned: bool,
         extra_instruction: str,
     ) -> Dict[str, object]:
-        rows = self._list_memories_for_refine(
+        rows = self._list_memories_for_purify(
             canonical_id, limit=limit, include_pinned=include_pinned
         )
         if not rows:
             return {"updates": 0, "adds": 0, "deletes": 0, "note": "no memories"}
 
-        operations = await self._llm_refine_operations(
+        operations = await self._llm_purify_operations(
             event, rows, mode, extra_instruction
         )
         updates = operations.get("updates", []) if isinstance(operations, dict) else []
@@ -2080,14 +2223,14 @@ class TMemoryPlugin(Star):
                     continue
                 new_id = self._insert_memory(
                     canonical_id=canonical_id,
-                    adapter="manual_refine",
+                    adapter="manual_purify",
                     adapter_user=canonical_id,
                     memory=memory,
                     score=self._clamp01(add.get("score", 0.7)),
                     memory_type=self._safe_memory_type(add.get("memory_type", "fact")),
                     importance=self._clamp01(add.get("importance", 0.6)),
                     confidence=self._clamp01(add.get("confidence", 0.7)),
-                    source_channel="manual_refine",
+                    source_channel="manual_purify",
                 )
                 if self._vec_available and new_id:
                     await self._upsert_vector(new_id, memory)
@@ -2110,14 +2253,14 @@ class TMemoryPlugin(Star):
             "note": note,
         }
 
-    async def _llm_refine_operations(
+    async def _llm_purify_operations(
         self,
         event: AstrMessageEvent,
         rows: List[Dict[str, object]],
         mode: str,
         extra_instruction: str,
     ) -> Dict[str, object]:
-        """让 LLM 生成对已有记忆的手动精馏操作（更新/新增/删除）。"""
+        """让 LLM 生成对已有记忆的手动提纯操作（更新/新增/删除）。"""
         prompt = (
             "你是记忆编辑器。请基于现有记忆做精炼优化。只输出 JSON，不要解释。\n"
             "目标：去重、合并重复、拆分过长、删除无意义条目。\n"
@@ -2161,14 +2304,37 @@ class TMemoryPlugin(Star):
             if isinstance(obj, dict):
                 return obj
         except Exception as e:
-            logger.warning("[tmemory] _llm_refine_operations failed: %s", e)
+            logger.warning("[tmemory] _llm_purify_operations failed: %s", e)
         return {"updates": [], "adds": [], "deletes": [], "note": "llm failed"}
 
-    async def _llm_split_memory(self, event: AstrMessageEvent, memory_text: str) -> List[str]:
+    async def _manual_refine_memories(
+        self,
+        event: AstrMessageEvent,
+        canonical_id: str,
+        mode: str,
+        limit: int,
+        dry_run: bool,
+        include_pinned: bool,
+        extra_instruction: str,
+    ) -> Dict[str, object]:
+        """兼容旧方法名，等价 _manual_purify_memories。"""
+        return await self._manual_purify_memories(
+            event=event,
+            canonical_id=canonical_id,
+            mode=mode,
+            limit=limit,
+            dry_run=dry_run,
+            include_pinned=include_pinned,
+            extra_instruction=extra_instruction,
+        )
+
+    async def _llm_split_memory(
+        self, event: AstrMessageEvent, memory_text: str
+    ) -> List[str]:
         """使用 LLM 将一条复合记忆拆分为多条。"""
         prompt = (
             "将以下一条用户记忆拆分为 2~5 条更原子化的记忆。\n"
-            "只输出 JSON：{\"segments\":[\"用户...\",\"用户...\"]}\n"
+            '只输出 JSON：{"segments":["用户...","用户..."]}\n'
             "每条必须以‘用户’开头，避免废话。\n"
             f"原记忆: {memory_text}"
         )
@@ -2229,7 +2395,7 @@ class TMemoryPlugin(Star):
                     return None
         return None
 
-    def _list_memories_for_refine(
+    def _list_memories_for_purify(
         self, canonical_id: str, limit: int, include_pinned: bool
     ) -> List[Dict[str, object]]:
         with self._db() as conn:
@@ -2294,7 +2460,16 @@ class TMemoryPlugin(Star):
                 SET memory=?, memory_hash=?, memory_type=?, score=?, importance=?, confidence=?, updated_at=?
                 WHERE id=?
                 """,
-                (memory, mhash, memory_type, score, importance, confidence, now, memory_id),
+                (
+                    memory,
+                    mhash,
+                    memory_type,
+                    score,
+                    importance,
+                    confidence,
+                    now,
+                    memory_id,
+                ),
             )
 
     def _auto_merge_memory_text(self, memories: List[str]) -> str:
@@ -2369,7 +2544,9 @@ class TMemoryPlugin(Star):
             session = await self._get_http_session()
             async with session.post(url, json=payload, headers=headers) as resp:
                 if resp.status != 200:
-                    logger.debug("[tmemory] rerank API %s, fallback to score order", resp.status)
+                    logger.debug(
+                        "[tmemory] rerank API %s, fallback to score order", resp.status
+                    )
                     return candidates[:top_n]
                 data = await resp.json()
                 results = data.get("results", [])
@@ -2442,7 +2619,11 @@ class TMemoryPlugin(Star):
     def _pending_distill_users(
         self, limit: int, min_batch_count: Optional[int] = None
     ) -> List[str]:
-        min_required = self.distill_min_batch_count if min_batch_count is None else max(1, int(min_batch_count))
+        min_required = (
+            self.distill_min_batch_count
+            if min_batch_count is None
+            else max(1, int(min_batch_count))
+        )
         with self._db() as conn:
             rows = conn.execute(
                 """
@@ -2463,7 +2644,7 @@ class TMemoryPlugin(Star):
         with self._db() as conn:
             rows = conn.execute(
                 """
-                SELECT id, canonical_user_id, role, content, source_adapter, source_user_id, unified_msg_origin
+                SELECT id, canonical_user_id, role, content, source_adapter, source_user_id, unified_msg_origin, scope, persona_id
                 FROM conversation_cache
                 WHERE canonical_user_id=? AND distilled=0
                 ORDER BY id ASC
@@ -2560,7 +2741,9 @@ class TMemoryPlugin(Star):
             yield event.plain_result("用法: /tm_pin <记忆ID>")
             return
         ok = self._set_pinned(int(arg), True)
-        yield event.plain_result(f"记忆 {arg} 已设为常驻" if ok else f"未找到记忆 {arg}")
+        yield event.plain_result(
+            f"记忆 {arg} 已设为常驻" if ok else f"未找到记忆 {arg}"
+        )
 
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("tm_unpin")
@@ -2572,7 +2755,9 @@ class TMemoryPlugin(Star):
             yield event.plain_result("用法: /tm_unpin <记忆ID>")
             return
         ok = self._set_pinned(int(arg), False)
-        yield event.plain_result(f"记忆 {arg} 已取消常驻" if ok else f"未找到记忆 {arg}")
+        yield event.plain_result(
+            f"记忆 {arg} 已取消常驻" if ok else f"未找到记忆 {arg}"
+        )
 
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("tm_export")
@@ -2605,15 +2790,15 @@ class TMemoryPlugin(Star):
     # 蒸馏历史与健康监测
     # =========================================================================
 
-    async def _run_quality_refinement(self) -> tuple[int, int]:
-        """对全量已蒸馏记忆进行质量重评。
+    async def _run_memory_purify(self) -> tuple[int, int]:
+        """对全量已蒸馏记忆进行提纯。
 
         使用 LLM 对每批记忆做综合评估，标注不值得保留的记忆为失活（is_active=0）。
-        同时执行规则层兜底：低于 refine_quality_min_score 的记忆直接失活。
+        同时执行规则层兜底：低于 purify_min_score 的记忆直接失活。
         """
         # ── 规则层：直接失活低综合分记忆 ──────────────────────────────────
         pruned_rule = 0
-        if self.refine_quality_min_score > 0:
+        if self.purify_min_score > 0:
             with self._db() as conn:
                 rows = conn.execute(
                     "SELECT id, score, importance, confidence FROM memories WHERE is_active=1 AND is_pinned=0"
@@ -2624,18 +2809,26 @@ class TMemoryPlugin(Star):
                         + 0.4 * float(row["importance"])
                         + 0.3 * float(row["confidence"])
                     )
-                    if quality < self.refine_quality_min_score:
-                        conn.execute("UPDATE memories SET is_active=0 WHERE id=?", (int(row["id"]),))
+                    if quality < self.purify_min_score:
+                        conn.execute(
+                            "UPDATE memories SET is_active=0 WHERE id=?",
+                            (int(row["id"]),),
+                        )
                         pruned_rule += 1
 
         # ── LLM 层：批量质量重评 ──────────────────────────────────────────
         pruned_llm = 0
         kept = 0
-        provider_id = self.refine_quality_model_id or self.distill_model_id or self.distill_provider_id
+        # 提纯模型回退顺序：purify_model_id > distill_model_id > distill_provider_id。
+        provider_id = (
+            self.purify_model_id or self.distill_model_id or self.distill_provider_id
+        )
         if not provider_id:
             # 无可用 provider，只执行规则层
             with self._db() as conn:
-                kept = conn.execute("SELECT COUNT(*) FROM memories WHERE is_active=1").fetchone()[0]
+                kept = conn.execute(
+                    "SELECT COUNT(*) FROM memories WHERE is_active=1"
+                ).fetchone()[0]
             return pruned_rule, int(kept)
 
         # 按用户批量处理
@@ -2659,21 +2852,27 @@ class TMemoryPlugin(Star):
                 if not mem_list:
                     continue
 
-                ids_to_deactivate = await self._llm_quality_judge(provider_id, mem_list)
+                ids_to_deactivate = await self._llm_purify_judge(provider_id, mem_list)
                 if ids_to_deactivate:
                     with self._db() as conn:
                         for mid in ids_to_deactivate:
-                            conn.execute("UPDATE memories SET is_active=0 WHERE id=?", (mid,))
+                            conn.execute(
+                                "UPDATE memories SET is_active=0 WHERE id=?", (mid,)
+                            )
                     pruned_llm += len(ids_to_deactivate)
             except Exception as e:
-                logger.debug("[tmemory] quality_refinement user=%s error: %s", uid, e)
+                logger.debug("[tmemory] memory_purify user=%s error: %s", uid, e)
 
         with self._db() as conn:
-            kept = int(conn.execute("SELECT COUNT(*) FROM memories WHERE is_active=1").fetchone()[0])
+            kept = int(
+                conn.execute(
+                    "SELECT COUNT(*) FROM memories WHERE is_active=1"
+                ).fetchone()[0]
+            )
 
         return pruned_rule + pruned_llm, kept
 
-    async def _llm_quality_judge(
+    async def _llm_purify_judge(
         self, provider_id: str, memories: List[Dict]
     ) -> List[int]:
         """让 LLM 评判一批记忆的质量，返回应该失活的记忆 ID 列表。"""
@@ -2701,8 +2900,12 @@ class TMemoryPlugin(Star):
             if obj and isinstance(obj.get("deactivate"), list):
                 return [int(x) for x in obj["deactivate"] if str(x).isdigit()]
         except Exception as e:
-            logger.debug("[tmemory] _llm_quality_judge failed: %s", e)
+            logger.debug("[tmemory] _llm_purify_judge failed: %s", e)
         return []
+
+    async def _run_quality_refinement(self) -> tuple[int, int]:
+        """兼容旧方法名，等价 _run_memory_purify。"""
+        return await self._run_memory_purify()
 
     def _record_distill_history(
         self,
@@ -2747,17 +2950,27 @@ class TMemoryPlugin(Star):
 
     # ── 废话/低质量关键词 ──
     _JUNK_PATTERNS = [
-        re.compile(r"^(你好|您好|嗨|hi|hello|hey|哈哈|嗯|哦|好的|ok|okay|谢谢|再见|拜拜)", re.IGNORECASE),
+        re.compile(
+            r"^(你好|您好|嗨|hi|hello|hey|哈哈|嗯|哦|好的|ok|okay|谢谢|再见|拜拜)",
+            re.IGNORECASE,
+        ),
         re.compile(r"^(用户说|用户问|用户发送|assistant|AI|助手)", re.IGNORECASE),
         re.compile(r"^.{0,5}$"),  # 太短
     ]
     _UNSAFE_PATTERNS = [
-        re.compile(r"(password|passwd|密码|secret|token|api.?key|bearer)", re.IGNORECASE),
+        re.compile(
+            r"(password|passwd|密码|secret|token|api.?key|bearer)", re.IGNORECASE
+        ),
         re.compile(r"(杀|死|炸|毒|枪|赌博|色情|porn)", re.IGNORECASE),
-        re.compile(r"(ignore.*(previous|above)|忽略.*(之前|以上)|system.?prompt|越狱|jailbreak)", re.IGNORECASE),
+        re.compile(
+            r"(ignore.*(previous|above)|忽略.*(之前|以上)|system.?prompt|越狱|jailbreak)",
+            re.IGNORECASE,
+        ),
     ]
 
-    def _validate_distill_output(self, items: List[Dict[str, object]]) -> List[Dict[str, object]]:
+    def _validate_distill_output(
+        self, items: List[Dict[str, object]]
+    ) -> List[Dict[str, object]]:
         """校验 LLM 蒸馏输出：安全审计 + 废话过滤 + 低置信度剪枝。"""
         valid = []
         for item in items:
@@ -2795,12 +3008,20 @@ class TMemoryPlugin(Star):
 
             # ── 低置信度剪枝：confidence < 0.4 直接丢弃 ──
             if float(item.get("confidence", 0)) < 0.4:
-                logger.debug("[tmemory] low confidence pruned: %.2f %s", item["confidence"], mem[:60])
+                logger.debug(
+                    "[tmemory] low confidence pruned: %.2f %s",
+                    item["confidence"],
+                    mem[:60],
+                )
                 continue
 
             # ── 低重要度剪枝：importance < 0.3 直接丢弃 ──
             if float(item.get("importance", 0)) < 0.3:
-                logger.debug("[tmemory] low importance pruned: %.2f %s", item["importance"], mem[:60])
+                logger.debug(
+                    "[tmemory] low importance pruned: %.2f %s",
+                    item["importance"],
+                    mem[:60],
+                )
                 continue
 
             valid.append(item)
@@ -2834,7 +3055,7 @@ class TMemoryPlugin(Star):
     def _decay_stale_memories(self):
         """将长期未命中的记忆标记为 stale（is_active=2），超久的归档（is_active=3）。"""
         now_ts = int(time.time())
-        stale_threshold = 30 * 86400   # 30 天未命中 → stale
+        stale_threshold = 30 * 86400  # 30 天未命中 → stale
         archive_threshold = 90 * 86400  # 90 天未命中 → archived
 
         with self._db() as conn:
@@ -2843,14 +3064,24 @@ class TMemoryPlugin(Star):
             ).fetchall()
             for row in rows:
                 try:
-                    last_ts = int(time.mktime(time.strptime(str(row["last_seen_at"]), "%Y-%m-%d %H:%M:%S")))
+                    last_ts = int(
+                        time.mktime(
+                            time.strptime(str(row["last_seen_at"]), "%Y-%m-%d %H:%M:%S")
+                        )
+                    )
                 except Exception:
                     continue
                 age = now_ts - last_ts
                 if age > archive_threshold:
-                    conn.execute("UPDATE memories SET is_active = 3 WHERE id = ?", (int(row["id"]),))
+                    conn.execute(
+                        "UPDATE memories SET is_active = 3 WHERE id = ?",
+                        (int(row["id"]),),
+                    )
                 elif age > stale_threshold:
-                    conn.execute("UPDATE memories SET is_active = 2 WHERE id = ?", (int(row["id"]),))
+                    conn.execute(
+                        "UPDATE memories SET is_active = 2 WHERE id = ?",
+                        (int(row["id"]),),
+                    )
 
         # 自动剪枝：删除低质量记忆
         self._auto_prune_low_quality()
@@ -2871,7 +3102,11 @@ class TMemoryPlugin(Star):
             pruned = 0
             for row in rows:
                 try:
-                    created_ts = int(time.mktime(time.strptime(str(row["created_at"]), "%Y-%m-%d %H:%M:%S")))
+                    created_ts = int(
+                        time.mktime(
+                            time.strptime(str(row["created_at"]), "%Y-%m-%d %H:%M:%S")
+                        )
+                    )
                 except Exception:
                     continue
                 age = now_ts - created_ts
@@ -2886,7 +3121,10 @@ class TMemoryPlugin(Star):
                 # 综合质量分低于阈值且从未被强化召回的记忆
                 quality = 0.3 * score + 0.4 * importance + 0.3 * confidence
                 if quality < 0.35 and reinforce <= 1:
-                    conn.execute("UPDATE memories SET is_active = 0 WHERE id = ?", (int(row["id"]),))
+                    conn.execute(
+                        "UPDATE memories SET is_active = 0 WHERE id = ?",
+                        (int(row["id"]),),
+                    )
                     pruned += 1
 
             if pruned > 0:
@@ -2900,7 +3138,8 @@ class TMemoryPlugin(Star):
         memories = self._list_memories(canonical_id, limit=500)
         with self._db() as conn:
             bindings = [
-                dict(r) for r in conn.execute(
+                dict(r)
+                for r in conn.execute(
                     "SELECT adapter, adapter_user_id FROM identity_bindings WHERE canonical_user_id = ?",
                     (canonical_id,),
                 ).fetchall()
@@ -2915,9 +3154,16 @@ class TMemoryPlugin(Star):
     def _purge_user_data(self, canonical_id: str) -> Dict[str, int]:
         with self._db() as conn:
             self._delete_vectors_for_user(canonical_id, conn=conn)
-            m = conn.execute("DELETE FROM memories WHERE canonical_user_id = ?", (canonical_id,)).rowcount
-            c = conn.execute("DELETE FROM conversation_cache WHERE canonical_user_id = ?", (canonical_id,)).rowcount
-            conn.execute("DELETE FROM memory_events WHERE canonical_user_id = ?", (canonical_id,))
+            m = conn.execute(
+                "DELETE FROM memories WHERE canonical_user_id = ?", (canonical_id,)
+            ).rowcount
+            c = conn.execute(
+                "DELETE FROM conversation_cache WHERE canonical_user_id = ?",
+                (canonical_id,),
+            ).rowcount
+            conn.execute(
+                "DELETE FROM memory_events WHERE canonical_user_id = ?", (canonical_id,)
+            )
         self._log_memory_event(
             canonical_user_id=canonical_id,
             event_type="purge",
@@ -2977,19 +3223,49 @@ class TMemoryPlugin(Star):
         return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
 
     # 对话行前缀正则（user: / assistant: 等）
-    _TRANSCRIPT_PREFIX_RE = re.compile(r"^(user|assistant|summary)\s*:\s*", re.IGNORECASE | re.MULTILINE)
+    _TRANSCRIPT_PREFIX_RE = re.compile(
+        r"^(user|assistant|summary)\s*:\s*", re.IGNORECASE | re.MULTILINE
+    )
     # 蒸馏关键词提取时过滤的噪声词
-    _NOISE_WORDS: frozenset = frozenset({
-        # 单字语气词
-        "嗯", "哦", "啊", "哈", "呢", "吧", "啦", "呀", "哇", "唉",
-        # 常见口头禅 / 感叹词
-        "哈哈", "嗯嗯", "哦哦", "哈哈哈", "呵呵", "嘿嘿", "嗯呐",
-        "好好", "好的", "好吧", "好嘞", "嗯哦", "啊啊",
-        # 英文口头禅
-        "ok", "okay", "lol", "hhh", "haha",
-        # 对话角色前缀词（被 _TRANSCRIPT_PREFIX_RE 剥离后仍可能残留）
-        "user", "assistant", "summary",
-    })
+    _NOISE_WORDS: frozenset = frozenset(
+        {
+            # 单字语气词
+            "嗯",
+            "哦",
+            "啊",
+            "哈",
+            "呢",
+            "吧",
+            "啦",
+            "呀",
+            "哇",
+            "唉",
+            # 常见口头禅 / 感叹词
+            "哈哈",
+            "嗯嗯",
+            "哦哦",
+            "哈哈哈",
+            "呵呵",
+            "嘿嘿",
+            "嗯呐",
+            "好好",
+            "好的",
+            "好吧",
+            "好嘞",
+            "嗯哦",
+            "啊啊",
+            # 英文口头禅
+            "ok",
+            "okay",
+            "lol",
+            "hhh",
+            "haha",
+            # 对话角色前缀词（被 _TRANSCRIPT_PREFIX_RE 剥离后仍可能残留）
+            "user",
+            "assistant",
+            "summary",
+        }
+    )
     # 同时过滤含纯感叹/颜文字的短片段
     _JUNK_WORD_RE = re.compile(r"^[\U0001F000-\U0001FFFF\u2600-\u27BF😀-🙏🌀-🗿]*$")
 
@@ -3003,7 +3279,8 @@ class TMemoryPlugin(Star):
 
         # 过滤噪声词后统计高频实义词
         words = [
-            w for w in re.split(r"[^\w\u4e00-\u9fff]+", normalized)
+            w
+            for w in re.split(r"[^\w\u4e00-\u9fff]+", normalized)
             if len(w) >= 2
             and w.lower() not in self._NOISE_WORDS
             and not self._JUNK_WORD_RE.match(w)
