@@ -41,13 +41,6 @@
     "hint": "每次蒸馏最多处理多少条缓存消息。提高该值可减少蒸馏轮次。",
     "default": 80
   },
-  "distill_provider_id": {
-    "type": "string",
-    "description": "蒸馏模型提供商（兼容旧配置）",
-    "hint": "兼容性后备项：仅在 distill_model_id 为空时生效；若两者都为空则按消息来源自动推断当前 chat provider。",
-    "default": "",
-    "_special": "select_provider"
-  },
   "cache_max_rows": {
     "type": "int",
     "description": "缓存保留行数",
@@ -134,99 +127,6 @@
     "hint": "高级过滤。填写 Python 正则表达式，匹配到的消息（用户/助手双侧）不会被写入对话缓存。留空不启用。示例：^\\[系统\\]|^SYSTEM:",
     "default": ""
   },
-  "enable_vector_search": {
-    "type": "bool",
-    "description": "启用向量检索（实验性）",
-    "hint": "开启后使用 sqlite-vec + Embedding 做语义召回；关闭时仅使用关键词/规则检索。未安装 sqlite-vec 时会自动降级。",
-    "default": false
-  },
-  "embed_provider_base_url": {
-    "type": "string",
-    "description": "Embedding API base_url",
-    "hint": "OpenAI 兼容的 Embedding API 根地址（不含 /v1/embeddings），例如 https://api.openai.com 或本地 Ollama 地址。留空时向量检索不可用。",
-    "default": ""
-  },
-  "embed_provider_api_key": {
-    "type": "string",
-    "description": "Embedding API key",
-    "hint": "调用 Embedding API 所需的 API key。",
-    "default": "",
-    "obvious_hint": true
-  },
-  "embed_model": {
-    "type": "string",
-    "description": "Embedding 模型名",
-    "hint": "生成向量的模型名，需与 base_url 对应。常用值：text-embedding-3-small（OpenAI）、nomic-embed-text（Ollama）。",
-    "default": "text-embedding-3-small"
-  },
-  "embed_dim": {
-    "type": "int",
-    "description": "向量维度",
-    "hint": "必须与所选 Embedding 模型的输出维度一致。text-embedding-3-small=1536，ada-002=1536，nomic-embed-text=768。",
-    "default": 1536
-  },
-  "vector_weight": {
-    "type": "float",
-    "description": "向量相似度权重",
-    "hint": "混合召回打分中向量相似度的权重（0~1）；值越高越偏语义匹配，值越低越偏关键词/历史强度。建议 0.3~0.5。",
-    "default": 0.4
-  },
-  "manual_refine_default_mode": {
-    "type": "string",
-    "description": "手动精馏默认模式",
-    "hint": "tm_refine 未显式传 mode 时使用：merge|split|both。",
-    "default": "both"
-  },
-  "manual_refine_default_limit": {
-    "type": "int",
-    "description": "手动精馏默认处理条数",
-    "hint": "tm_refine 未显式传 limit 时使用，建议 10~50。",
-    "default": 20
-  },
-  "min_vector_sim": {
-    "type": "float",
-    "description": "向量最低相似度阈值",
-    "hint": "向量候选的最低相似度门槛；低于该值的向量结果会被过滤，不参与后续混合排序。建议 0.1~0.3。",
-    "default": 0.15
-  },
-  "distill_model_id": {
-    "type": "string",
-    "description": "蒸馏专用模型 ID（首选）",
-    "hint": "蒸馏主模型（推荐优先配置）。优先级最高：distill_model_id > distill_provider_id > 消息来源推断。",
-    "default": "",
-    "_special": "select_provider"
-  },
-  "enable_reranker": {
-    "type": "bool",
-    "description": "启用 Reranker 精排",
-    "hint": "开启后对候选记忆调用 Reranker 做二次排序（在召回之后生效），通常提升相关性但会增加请求延迟。",
-    "default": false
-  },
-  "rerank_base_url": {
-    "type": "string",
-    "description": "Reranker API 地址",
-    "hint": "兼容 /v1/rerank 的服务根地址（不含 /v1/rerank 路径），如 Jina、Cohere 或本地 rerank 服务。",
-    "default": ""
-  },
-  "rerank_api_key": {
-    "type": "string",
-    "description": "Reranker API Key",
-    "hint": "调用 Reranker API 所需的 Key。",
-    "default": "",
-    "obvious_hint": true
-  },
-  "rerank_model": {
-    "type": "string",
-    "description": "Reranker 模型名",
-    "hint": "留空时不传 model 字段（部分服务不需要）。",
-    "default": ""
-  },
-  "rerank_top_n": {
-    "type": "int",
-    "description": "Reranker 返回条数",
-    "hint": "Reranker 参与重排后保留的候选条数，建议 <= inject_memory_limit，过大可能增加延迟且收益有限。",
-    "default": 5
-  },
   "memory_scope": {
     "type": "string",
     "description": "记忆隔离范围",
@@ -256,24 +156,5 @@
     "description": "注入块最大字符数",
     "hint": "记忆块超出此长度时截断。0=不限。建议 500~2000。",
     "default": 0
-  },
-  "refine_quality_interval_days": {
-    "type": "int",
-    "description": "提馆间隔天数",
-    "hint": "每隔多少天对全量已蒸馏记忆进行质量重评（0=不启用自动提馆）。建议 3~7。",
-    "default": 0
-  },
-  "refine_quality_model_id": {
-    "type": "string",
-    "description": "提馆 LLM 模型",
-    "hint": "用于提馆的 LLM provider ID；留空时回退到 distill_model_id，再回退 distill_provider_id。可使用低成本模型。",
-    "default": "",
-    "_special": "select_provider"
-  },
-  "refine_quality_min_score": {
-    "type": "float",
-    "description": "提馆最低综合分",
-    "hint": "规则层：综合分（0.3×score + 0.4×importance + 0.3×confidence）低于此值的记忆直接失活。0=不启用规则层。",
-    "default": 0.0
   }
 }
