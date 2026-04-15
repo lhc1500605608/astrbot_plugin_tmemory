@@ -212,3 +212,10 @@ MEMORY_PLUGIN_BLUEPRINT.md
 
 # Kilo IDE internal files
 .kilo/
+
+# Skill Files
+.claude/
+.github/
+.vscode/
+ao-output/
+workflows/

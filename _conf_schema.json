@@ -43,8 +43,8 @@
   },
   "distill_provider_id": {
     "type": "string",
-    "description": "蒸馏模型提供商",
-    "hint": "留空则按消息来源自动推断当前 chat provider。",
+    "description": "蒸馏模型提供商（兼容旧配置）",
+    "hint": "兼容性后备项：仅在 distill_model_id 为空时生效；若两者都为空则按消息来源自动推断当前 chat provider。",
     "default": "",
     "_special": "select_provider"
   },
@@ -137,13 +137,13 @@
   "enable_vector_search": {
     "type": "bool",
     "description": "启用向量检索（实验性）",
-    "hint": "开启后将使用 sqlite-vec 做语义向量检索，需额外配置 Embedding API。未安装 sqlite-vec 时自动降级为关键词检索。",
+    "hint": "开启后使用 sqlite-vec + Embedding 做语义召回；关闭时仅使用关键词/规则检索。未安装 sqlite-vec 时会自动降级。",
     "default": false
   },
   "embed_provider_base_url": {
     "type": "string",
     "description": "Embedding API base_url",
-    "hint": "OpenAI 兼容的 Embedding API 地址，例如 https://api.openai.com 或本地 Ollama 地址。留空时向量检索不可用。",
+    "hint": "OpenAI 兼容的 Embedding API 根地址（不含 /v1/embeddings），例如 https://api.openai.com 或本地 Ollama 地址。留空时向量检索不可用。",
     "default": ""
   },
   "embed_provider_api_key": {
@@ -168,7 +168,7 @@
   "vector_weight": {
     "type": "float",
     "description": "向量相似度权重",
-    "hint": "混合检索中向量相似度的权重（0~1），剩余权重分给关键词/重要性。建议 0.3~0.5。",
+    "hint": "混合召回打分中向量相似度的权重（0~1）；值越高越偏语义匹配，值越低越偏关键词/历史强度。建议 0.3~0.5。",
     "default": 0.4
   },
   "manual_refine_default_mode": {
@@ -186,26 +186,26 @@
   "min_vector_sim": {
     "type": "float",
     "description": "向量最低相似度阈值",
-    "hint": "低于此阈值的向量结果不参与混合打分，减少语义噪声。建议 0.1~0.3。",
+    "hint": "向量候选的最低相似度门槛；低于该值的向量结果会被过滤，不参与后续混合排序。建议 0.1~0.3。",
     "default": 0.15
   },
   "distill_model_id": {
     "type": "string",
-    "description": "蒸馏专用模型 ID",
-    "hint": "蒸馏使用的 provider ID，优先级高于 distill_provider_id。留空则复用 distill_provider_id 或自动推断。",
+    "description": "蒸馏专用模型 ID（首选）",
+    "hint": "蒸馏主模型（推荐优先配置）。优先级最高：distill_model_id > distill_provider_id > 消息来源推断。",
     "default": "",
     "_special": "select_provider"
   },
   "enable_reranker": {
     "type": "bool",
     "description": "启用 Reranker 精排",
-    "hint": "开启后在向量召回结果上调用 Reranker API 做精排，效果更好但会增加延迟。需配置 rerank_base_url。",
+    "hint": "开启后对候选记忆调用 Reranker 做二次排序（在召回之后生效），通常提升相关性但会增加请求延迟。",
     "default": false
   },
   "rerank_base_url": {
     "type": "string",
     "description": "Reranker API 地址",
-    "hint": "兼容 /v1/rerank 接口的服务地址，如 Jina、Cohere、本地 rerank 服务。",
+    "hint": "兼容 /v1/rerank 的服务根地址（不含 /v1/rerank 路径），如 Jina、Cohere 或本地 rerank 服务。",
     "default": ""
   },
   "rerank_api_key": {
@@ -224,7 +224,7 @@
   "rerank_top_n": {
     "type": "int",
     "description": "Reranker 返回条数",
-    "hint": "Reranker 最终返回的精排结果数量，应 <= inject_memory_limit。",
+    "hint": "Reranker 参与重排后保留的候选条数，建议 <= inject_memory_limit，过大可能增加延迟且收益有限。",
     "default": 5
   },
   "memory_scope": {
@@ -266,7 +266,7 @@
   "refine_quality_model_id": {
     "type": "string",
     "description": "提馆 LLM 模型",
-    "hint": "用于提馆的 LLM provider ID，留空则复用 distill_model_id。可使用廉价模型。",
+    "hint": "用于提馆的 LLM provider ID；留空时回退到 distill_model_id，再回退 distill_provider_id。可使用低成本模型。",
     "default": "",
     "_special": "select_provider"
   },
