@@ -77,9 +77,7 @@ class TMemoryPlugin(Star):
         self.distill_batch_limit = max(
             20, int(self.config.get("distill_batch_limit", 80))
         )
-        # 蒸馏模型选择优先级：distill_model_id > distill_provider_id > 消息上下文推断。
         self.distill_model_id = str(self.config.get("distill_model_id", "")).strip()
-        # distill_provider_id 为兼容旧配置保留，作为 distill_model_id 的后备项。
         self.distill_provider_id = str(
             self.config.get("distill_provider_id", "")
         ).strip()
@@ -124,7 +122,6 @@ class TMemoryPlugin(Star):
         # 对已蒸馏的 memories 做优化/重评，淘汰低分/低置信/低重要的记忆。
         # purify_interval_days: 每隔多少天执行一次提纯（0=不启用）
         # purify_model_id: 用于提纯的 LLM provider/model id
-        #                 （留空回退到 distill_model_id，再回退 distill_provider_id）
         # purify_min_score: 综合分低于此值的记忆被失活（0=不限）
         self.purify_interval_days = max(
             0,
@@ -2819,7 +2816,6 @@ class TMemoryPlugin(Star):
         # ── LLM 层：批量质量重评 ──────────────────────────────────────────
         pruned_llm = 0
         kept = 0
-        # 提纯模型回退顺序：purify_model_id > distill_model_id > distill_provider_id。
         provider_id = (
             self.purify_model_id or self.distill_model_id or self.distill_provider_id
         )
