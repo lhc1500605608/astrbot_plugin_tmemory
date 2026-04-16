@@ -220,3 +220,18 @@ MEMORY_PLUGIN_BLUEPRINT.md
 ao-output/
 workflows/
 .ao-output/
+# Temporary & Ad-hoc debug scripts
+check.py
+check_vars.py
+fix_*.py
+test_linter.py
+stress_test.py
+*.patch
+
+# Node.js (Temporary)
+node_modules/
+package.json
+package-lock.json
+
+# Local Runtime Data
+data/

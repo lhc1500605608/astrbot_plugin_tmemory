@@ -4,7 +4,3 @@ aiohttp>=3.8.0
 sqlite-vec>=0.1.6
 jieba>=0.42.1
 numpy>=1.20.0
-bce-embedding-base_v1
-onnxruntime
-tokenizers
-huggingface_hub
