@@ -1,7 +1,8 @@
-import asyncio
+import numpy as np
 import hashlib
 import importlib.util
 import inspect
+import jieba
 import json
 import os
 import re
@@ -14,7 +15,7 @@ from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.provider import LLMResponse, ProviderRequest
 from astrbot.api.star import Context, Star, register
-
+from .hybrid_search import HybridMemorySystem
 
 @register(
     "tmemory",
@@ -1259,6 +1260,7 @@ class TMemoryPlugin(Star):
                     source_channel TEXT NOT NULL DEFAULT 'default',
                     memory_type TEXT NOT NULL DEFAULT 'fact',
                     memory TEXT NOT NULL,
+                    tokenized_memory TEXT NOT NULL DEFAULT '',
                     memory_hash TEXT NOT NULL,
                     score REAL NOT NULL DEFAULT 0.5,
                     importance REAL NOT NULL DEFAULT 0.5,
@@ -1275,6 +1277,49 @@ class TMemoryPlugin(Star):
                 )
                 """
             )
+            
+            # FTS5 表
+            conn.execute(
+                """
+                CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
+                    tokenized_memory,
+                    canonical_user_id UNINDEXED,
+                    tokenize='unicode61 remove_diacritics 1'
+                )
+                """
+            )
+
+            # 同步触发器
+            conn.execute(
+                """
+                CREATE TRIGGER IF NOT EXISTS t_memories_ai AFTER INSERT ON memories 
+                BEGIN
+                    INSERT INTO memories_fts(rowid, tokenized_memory, canonical_user_id) 
+                    VALUES (new.id, new.tokenized_memory, new.canonical_user_id);
+                END;
+                """
+            )
+            conn.execute(
+                """
+                CREATE TRIGGER IF NOT EXISTS t_memories_ad AFTER DELETE ON memories 
+                BEGIN
+                    INSERT INTO memories_fts(memories_fts, rowid, tokenized_memory, canonical_user_id) 
+                    VALUES ('delete', old.id, old.tokenized_memory, old.canonical_user_id);
+                END;
+                """
+            )
+            conn.execute(
+                """
+                CREATE TRIGGER IF NOT EXISTS t_memories_au AFTER UPDATE ON memories 
+                BEGIN
+                    INSERT INTO memories_fts(memories_fts, rowid, tokenized_memory, canonical_user_id) 
+                    VALUES ('delete', old.id, old.tokenized_memory, old.canonical_user_id);
+                    INSERT INTO memories_fts(rowid, tokenized_memory, canonical_user_id) 
+                    VALUES (new.id, new.tokenized_memory, new.canonical_user_id);
+                END;
+                """
+            )
+
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS conversation_cache (
@@ -1343,6 +1388,7 @@ class TMemoryPlugin(Star):
                 "is_pinned": "INTEGER NOT NULL DEFAULT 0",
                 "persona_id": "TEXT NOT NULL DEFAULT ''",
                 "scope": "TEXT NOT NULL DEFAULT 'user'",
+                "tokenized_memory": "TEXT NOT NULL DEFAULT ''",
             },
         )
         self._ensure_columns(
@@ -1388,6 +1434,61 @@ class TMemoryPlugin(Star):
                     duration_sec REAL NOT NULL DEFAULT 0
                 )
                 """
+            
+            # 初始化 FTS5 表和触发器 (保证 migration 也会建表)
+            conn.execute(
+                """
+                CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
+                    tokenized_memory,
+                    canonical_user_id UNINDEXED,
+                    tokenize='unicode61 remove_diacritics 1'
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TRIGGER IF NOT EXISTS t_memories_ai AFTER INSERT ON memories 
+                BEGIN
+                    INSERT INTO memories_fts(rowid, tokenized_memory, canonical_user_id) 
+                    VALUES (new.id, new.tokenized_memory, new.canonical_user_id);
+                END;
+                """
+            )
+            conn.execute(
+                """
+                CREATE TRIGGER IF NOT EXISTS t_memories_ad AFTER DELETE ON memories 
+                BEGIN
+                    INSERT INTO memories_fts(memories_fts, rowid, tokenized_memory, canonical_user_id) 
+                    VALUES ('delete', old.id, old.tokenized_memory, old.canonical_user_id);
+                END;
+                """
+            )
+            conn.execute(
+                """
+                CREATE TRIGGER IF NOT EXISTS t_memories_au AFTER UPDATE ON memories 
+                BEGIN
+                    INSERT INTO memories_fts(memories_fts, rowid, tokenized_memory, canonical_user_id) 
+                    VALUES ('delete', old.id, old.tokenized_memory, old.canonical_user_id);
+                    INSERT INTO memories_fts(rowid, tokenized_memory, canonical_user_id) 
+                    VALUES (new.id, new.tokenized_memory, new.canonical_user_id);
+                END;
+                """
+            )
+
+            # 数据迁移：回填空的 tokenized_memory
+            # 这是一个轻量级的检查，对于老数据进行分词更新。
+            try:
+                untokenized = conn.execute("SELECT id, memory FROM memories WHERE tokenized_memory = ''").fetchall()
+                if untokenized:
+                    logger.info(f"[tmemory] 正在为 {len(untokenized)} 条历史记忆生成全文检索词元...")
+                    for row in untokenized:
+                        mem_text = str(row["memory"])
+                        tokens = " ".join(jieba.cut_for_search(mem_text))
+                        conn.execute("UPDATE memories SET tokenized_memory = ? WHERE id = ?", (tokens, int(row["id"])))
+                    logger.info("[tmemory] 历史记忆分词完成。")
+            except Exception as e:
+                logger.error(f"[tmemory] 历史记忆分词更新失败: {e}")
+
             )
             # ── 核心索引（幂等 CREATE IF NOT EXISTS）──────────────────────────
             for idx_sql in [
@@ -1856,6 +1957,7 @@ class TMemoryPlugin(Star):
         ).hexdigest()
         now = self._now()
         memory_type_safe = self._safe_memory_type(memory_type)
+        tokenized_memory = " ".join(jieba.cut_for_search(memory))
         with self._db() as conn:
             row = conn.execute(
                 "SELECT id, reinforce_count FROM memories WHERE canonical_user_id=? AND memory_hash=?",
@@ -1866,7 +1968,7 @@ class TMemoryPlugin(Star):
                     """
                     UPDATE memories
                     SET score=?, memory_type=?, importance=MAX(importance, ?), confidence=MAX(confidence, ?),
-                        reinforce_count=?, last_seen_at=?, updated_at=?
+                        reinforce_count=?, last_seen_at=?, updated_at=?, tokenized_memory=?
                     WHERE id=?
                     """,
                     (
@@ -1877,6 +1979,7 @@ class TMemoryPlugin(Star):
                         int(row["reinforce_count"]) + 1,
                         now,
                         now,
+                        tokenized_memory,
                         int(row["id"]),
                     ),
                 )
@@ -1913,9 +2016,9 @@ class TMemoryPlugin(Star):
                 """
                 INSERT INTO memories(
                     canonical_user_id, source_adapter, source_user_id, source_channel, memory_type,
-                    memory, memory_hash, score, importance, confidence, reinforce_count, is_active,
+                    memory, tokenized_memory, memory_hash, score, importance, confidence, reinforce_count, is_active,
                     last_seen_at, created_at, updated_at, persona_id, scope
-                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     canonical_id,
@@ -1924,6 +2027,7 @@ class TMemoryPlugin(Star):
                     source_channel,
                     memory_type_safe,
                     memory,
+                    tokenized_memory,
                     mhash,
                     self._clamp01(score),
                     self._clamp01(importance),
@@ -2020,22 +2124,15 @@ class TMemoryPlugin(Star):
         persona_id: str = "",
         exclude_private: bool = False,
     ) -> List[Dict[str, object]]:
-        """从 memories 表中检索最相关的记忆，按综合评分排序。只返回 is_active=1 的有效记忆。
-
-        scope/persona_id 过滤：
-        - memory_scope="session" 时，scope 精确匹配 + 全局 user scope。
-        - persona_id 匹配当前人格 + 通用人格 (空字符串)。
-        - exclude_private=True 时，过滤掉 scope="private" 的私聊专属记忆。
-        """
-        query_words = set(self._tokenize(query))
+        """从 memories 表中检索最相关的记忆，按综合评分排序。只返回 is_active=1 的有效记忆。"""
         now_ts = int(time.time())
 
-        # 步骤 1：先在 DB 外完成 embedding 网络请求，避免持锁等网络
+        # 步骤 1：获取查询向量
         query_vec: Optional[List[float]] = None
         if self._vec_available and query:
             query_vec = await self._embed_text(query)
 
-        # 步骤 2：打开 DB 连接，构建过滤子句，读取记忆 + 向量检索
+        # 步骤 2：打开 DB 连接并使用 HybridMemorySystem
         scope_cond = ""
         scope_params: list = []
         if self.memory_scope == "session":
@@ -2044,54 +2141,59 @@ class TMemoryPlugin(Star):
         persona_cond = "AND (persona_id=? OR persona_id='')"
         persona_params = [persona_id]
         private_cond = "AND scope != 'private'" if exclude_private else ""
+
         with self._db() as conn:
-            rows = conn.execute(
-                f"""
-                SELECT id, memory_type, memory, score, importance, confidence, reinforce_count,
-                       last_seen_at, scope, persona_id
-                FROM memories
-                WHERE canonical_user_id=? AND is_active=1
-                {scope_cond} {persona_cond} {private_cond}
-                ORDER BY updated_at DESC
-                LIMIT 80
-                """,
-                [canonical_id, *scope_params, *persona_params],
-            ).fetchall()
-
-            # ── 向量检索（纯本地 sqlite-vec 查询）───────────────────────────
-            vec_scores: Dict[int, float] = {}
-            if query_vec and rows:
-                try:
-                    blob = self._sqlite_vec.serialize_float32(query_vec)
-                    vec_rows = conn.execute(
-                        """
-                        SELECT memory_id, distance FROM memory_vectors
-                        WHERE embedding MATCH ?
-                        AND k = 30
-                        ORDER BY distance
-                        """,
-                        [blob],
-                    ).fetchall()
-                    for vr in vec_rows:
-                        # L2 距离转相似度：距离越小越相似
-                        sim = 1.0 / (1.0 + float(vr["distance"]))
-                        if sim >= self.min_vector_sim:
-                            vec_scores[int(vr["memory_id"])] = sim
-                    self._vec_query_count += 1
-                    if vec_scores:
-                        self._vec_hit_count += 1
-                except Exception as _ve:
-                    logger.debug("[tmemory] vector query failed: %s", _ve)
-
-        kw_weight = 1.0 - self.vector_weight if vec_scores else 1.0
+            hybrid_system = HybridMemorySystem(conn, self.embed_dim)
+            
+            # 使用混合检索获得粗排结果
+            fused_results = hybrid_system.hybrid_search(
+                query=query, 
+                query_vector=query_vec, 
+                canonical_user_id=canonical_id, 
+                top_k=80
+            )
+            
+            # 如果没有查询，则回退到按时间/重要性获取最近的 active 记忆
+            if not query:
+                rows = conn.execute(
+                    f"""
+                    SELECT id, memory_type, memory, score, importance, confidence, reinforce_count,
+                           last_seen_at, scope, persona_id
+                    FROM memories
+                    WHERE canonical_user_id=? AND is_active=1
+                    {scope_cond} {persona_cond} {private_cond}
+                    ORDER BY updated_at DESC
+                    LIMIT 80
+                    """,
+                    [canonical_id, *scope_params, *persona_params],
+                ).fetchall()
+                candidates = {int(r["id"]): dict(r) for r in rows}
+                rrf_scores = {}
+            else:
+                # 基于 fused_results 查询有效记忆
+                if not fused_results:
+                    return []
+                
+                # 记录RRF分数
+                rrf_scores = {item["id"]: item["rrf_score"] for item in fused_results}
+                
+                placeholders = ",".join(["?"] * len(rrf_scores))
+                params = [canonical_id, *scope_params, *persona_params, *rrf_scores.keys()]
+                rows = conn.execute(
+                    f"""
+                    SELECT id, memory_type, memory, score, importance, confidence, reinforce_count,
+                           last_seen_at, scope, persona_id
+                    FROM memories
+                    WHERE canonical_user_id=? AND is_active=1
+                    {scope_cond} {persona_cond} {private_cond}
+                    AND id IN ({placeholders})
+                    """,
+                    params,
+                ).fetchall()
+                candidates = {int(r["id"]): dict(r) for r in rows}
 
         scored = []
-        for row in rows:
-            memory_text = str(row["memory"])
-            memory_words = set(self._tokenize(memory_text))
-            overlap = len(query_words.intersection(memory_words))
-            lexical = overlap / max(1, len(query_words)) if query_words else 0.0
-
+        for row_id, row in candidates.items():
             recency_bonus = 0.0
             last_seen = str(row["last_seen_at"])
             try:
@@ -2103,23 +2205,31 @@ class TMemoryPlugin(Star):
             except Exception:
                 pass
 
-            keyword_score = (
-                0.35 * float(row["score"])
-                + 0.25 * float(row["importance"])
-                + 0.20 * float(row["confidence"])
-                + 0.15 * lexical
-                + 0.05 * min(1.0, float(row["reinforce_count"]) / 10.0)
-                + recency_bonus
-            )
-
-            vector_sim = vec_scores.get(int(row["id"]), 0.0)
-            final_score = kw_weight * keyword_score + self.vector_weight * vector_sim
+            search_relevance = rrf_scores.get(row_id, 0.0)
+            
+            if query:
+                final_score = (
+                    0.20 * float(row["score"])
+                    + 0.15 * float(row["importance"])
+                    + 0.15 * float(row["confidence"])
+                    + 0.40 * search_relevance
+                    + 0.05 * min(1.0, float(row["reinforce_count"]) / 10.0)
+                    + recency_bonus
+                )
+            else:
+                final_score = (
+                    0.35 * float(row["score"])
+                    + 0.25 * float(row["importance"])
+                    + 0.20 * float(row["confidence"])
+                    + 0.05 * min(1.0, float(row["reinforce_count"]) / 10.0)
+                    + recency_bonus
+                )
 
             scored.append(
                 {
-                    "id": int(row["id"]),
+                    "id": row_id,
                     "memory_type": str(row["memory_type"]),
-                    "memory": memory_text,
+                    "memory": str(row["memory"]),
                     "final_score": float(final_score),
                 }
             )
@@ -2433,10 +2543,11 @@ class TMemoryPlugin(Star):
     def _update_memory_text(self, memory_id: int, memory: str) -> None:
         now = self._now()
         mhash = hashlib.sha256(self._normalize_text(memory).encode("utf-8")).hexdigest()
+        tokenized_memory = " ".join(jieba.cut_for_search(memory))
         with self._db() as conn:
             conn.execute(
-                "UPDATE memories SET memory=?, memory_hash=?, updated_at=? WHERE id=?",
-                (memory, mhash, now, memory_id),
+                "UPDATE memories SET memory=?, tokenized_memory=?, memory_hash=?, updated_at=? WHERE id=?",
+                (memory, tokenized_memory, mhash, now, memory_id),
             )
 
     def _update_memory_full(
@@ -2450,15 +2561,17 @@ class TMemoryPlugin(Star):
     ) -> None:
         now = self._now()
         mhash = hashlib.sha256(self._normalize_text(memory).encode("utf-8")).hexdigest()
+        tokenized_memory = " ".join(jieba.cut_for_search(memory))
         with self._db() as conn:
             conn.execute(
                 """
                 UPDATE memories
-                SET memory=?, memory_hash=?, memory_type=?, score=?, importance=?, confidence=?, updated_at=?
+                SET memory=?, tokenized_memory=?, memory_hash=?, memory_type=?, score=?, importance=?, confidence=?, updated_at=?
                 WHERE id=?
                 """,
                 (
                     memory,
+                    tokenized_memory,
                     mhash,
                     memory_type,
                     score,
