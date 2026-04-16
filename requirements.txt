@@ -1,4 +1,10 @@
 aiohttp>=3.8.0
 # 可选：向量检索支持（enable_vector_search=true 时需要）
 # pip install sqlite-vec
-sqlite-vec>=0.1.0
+sqlite-vec>=0.1.6
+jieba>=0.42.1
+numpy>=1.20.0
+bce-embedding-base_v1
+onnxruntime
+tokenizers
+huggingface_hub

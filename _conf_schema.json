@@ -53,6 +53,103 @@
     "hint": "规则蒸馏 fallback 时单条记忆的最大长度。",
     "default": 220
   },
+  "private_memory_in_group": {
+    "type": "bool",
+    "default": false,
+    "description": "群聊中注入私聊记忆",
+    "hint": "默认关闭。开启后群聊中也会注入该用户的私聊专属记忆，可能泄露隐私。"
+  },
+  "memory_providers": {
+    "type": "object",
+    "description": "记忆提供商",
+    "hint": "支持多种记忆提供商，如本地模型、云端 API 等。",
+    "items": {
+      "enable_vector_search": {
+        "type": "bool",
+        "default": false,
+        "description": "启用向量检索",
+        "hint": "开启后将启用基于 sqlite-vec 的 KNN + FTS5 混合检索。"
+      },
+      "vector_backend": {
+        "type": "string",
+        "default": "onnx",
+        "description": "向量化后端",
+        "hint": "可选 onnx (本地端侧运行) 或 api (调用外部大模型接口)。"
+      },
+      "embed_model_name": {
+        "type": "string",
+        "default": "BAAI/bge-small-zh-v1.5",
+        "description": "Embedding 模型",
+        "hint": "ONNX 模式填写模型名或路径，API 模式填写提供商的模型名（如 text-embedding-3-small）。"
+      },
+      "embed_api_url": {
+        "type": "string",
+        "default": "",
+        "description": "API Base URL",
+        "hint": "API 模式必填，例如 https://api.openai.com/v1/embeddings"
+      },
+      "embed_api_key": {
+        "type": "string",
+        "default": "",
+        "description": "API Key",
+        "hint": "API 模式鉴权密钥"
+      },
+      "embed_dim": {
+        "type": "int",
+        "default": 512,
+        "description": "向量维度",
+        "hint": "bge-small-zh-v1.5 为 512 维，text-embedding-3-small 可选 1536 维等。更换模型维度时需要重建数据库缓存。"
+      },
+      "reinforce_decay_rate": {
+        "type": "number",
+        "title": "遗忘曲线衰减率 (Advanced)",
+        "description": "默认 0.1。控制长时间未回忆的记忆得分下降速度。",
+        "default": 0.1
+      }
+    }
+  },
+  "vector_settings": {
+    "title": "向量搜索与本地模型设置",
+    "type": "object",
+    "properties": {
+      "vector_backend": {
+        "type": "string",
+        "title": "向量检索后端",
+        "description": "存储和检索向量的引擎，如果选择 sqlite-vec 则使用纯本地无依赖引擎。",
+        "enum": ["sqlite-vec"],
+        "default": "sqlite-vec"
+      },
+      "embed_provider": {
+        "type": "string",
+        "title": "Embeddings 提供商",
+        "description": "计算向量使用的 API 提供商或本地模型。",
+        "enum": ["local", "openai", "siliconflow"],
+        "default": "local"
+      },
+      "embed_model_name": {
+        "type": "string",
+        "title": "Embedding 模型名或路径",
+        "description": "当设为 local 时，可填 HuggingFace 仓库名（如 Xenova/bge-small-zh-v1.5）；使用 API 时填对应模型名。",
+        "default": "Xenova/bge-small-zh-v1.5"
+      },
+      "embed_dim": {
+        "type": "integer",
+        "title": "向量维度",
+        "description": "使用的模型维度 (bge-small-zh-v1.5 是 512，OpenAI 通常是 1536)",
+        "default": 512
+      },
+      "embed_api_key": {
+        "type": "string",
+        "title": "API Key",
+        "description": "如果使用 openai 或 siliconflow 等云端提供商时填写的 API Key。"
+      },
+      "embed_api_base": {
+        "type": "string",
+        "title": "API Base URL",
+        "description": "提供商的 API 代理或基础地址。"
+      }
+    }
+  },
   "webui_settings": {
     "type": "object",
     "description": "WebUI 管理面板",
@@ -132,12 +229,6 @@
     "description": "记忆隔离范围",
     "hint": "user=所有会话共用记忆（默认）；session=按会话隔离（群聊每个群独立）。",
     "default": "user"
-  },
-  "private_memory_in_group": {
-    "type": "bool",
-    "description": "群聊中注入私聊记忆",
-    "hint": "默认关闭。开启后群聊中也会注入该用户的私聊专属记忆，可能泄露隐私。",
-    "default": false
   },
   "inject_position": {
     "type": "string",
