@@ -219,3 +219,4 @@ MEMORY_PLUGIN_BLUEPRINT.md
 .vscode/
 ao-output/
 workflows/
+.ao-output/
