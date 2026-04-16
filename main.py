@@ -1,15 +1,14 @@
-import numpy as np
 import hashlib
 import importlib.util
-import inspect
 import jieba
 import json
 import os
 import re
 import sqlite3
 import time
+import asyncio
+from typing import Optional, List, Dict, Tuple, Sequence
 from collections import Counter
-from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, filter
@@ -378,9 +377,9 @@ class TMemoryPlugin(Star):
 
     @filter.on_llm_request()
     async def on_llm_request(self, event: AstrMessageEvent, req: ProviderRequest):
-        """在 LLM 调用前，将召回的用户记忆注入 system_prompt。
+        """在 LLM 调用前，将召回的用户记忆注入 system prompt。
 
-        只追加到 system_prompt 尾部，不替换原有内容，确保 persona 等配置不受影响。
+        只追加到 system prompt 尾部，不替换原有内容，确保 persona 等配置不受影响。
         """
         if not self.enable_memory_injection:
             return
@@ -1087,8 +1086,8 @@ class TMemoryPlugin(Star):
     )
 
     def _strip_think_tags(self, text: str) -> str:
-        """剥离 <think>/<thinking>/<thought> 思维链块，只保留最终 JSON 输出。"""
-        # 匹配 <think> / <thinking> / <thought> 等变体
+        """剥离 认为的思维链块，只保留最终 JSON 输出。"""
+        # 匹配 认为的思维链块
         stripped = re.sub(
             r"<th(?:ink(?:ing)?|ought)>.*?</th(?:ink(?:ing)?|ought)>",
             "",
@@ -1101,7 +1100,7 @@ class TMemoryPlugin(Star):
         if not raw_text:
             return []
 
-        # 先剥离思维链（Gemma / Claude extended thinking 等模型会输出 <thought>/<think>）
+        # 先剥离思维链（Gemma / Claude extended thinking 等模型会输出 <thought>/认为）
         raw_text = self._strip_think_tags(raw_text)
 
         data = None
@@ -1112,10 +1111,9 @@ class TMemoryPlugin(Star):
             start = raw_text.find("{")
             end = raw_text.rfind("}")
             if start != -1 and end != -1 and end > start:
-                chunk = raw_text[start : end + 1]
                 try:
-                    data = json.loads(chunk)
-                except json.JSONDecodeError:
+                    data = json.loads(raw_text[start:end+1])
+                except Exception:
                     return []
             else:
                 return []
@@ -1434,6 +1432,7 @@ class TMemoryPlugin(Star):
                     duration_sec REAL NOT NULL DEFAULT 0
                 )
                 """
+            )
             
             # 初始化 FTS5 表和触发器 (保证 migration 也会建表)
             conn.execute(
@@ -1489,7 +1488,6 @@ class TMemoryPlugin(Star):
             except Exception as e:
                 logger.error(f"[tmemory] 历史记忆分词更新失败: {e}")
 
-            )
             # ── 核心索引（幂等 CREATE IF NOT EXISTS）──────────────────────────
             for idx_sql in [
                 "CREATE INDEX IF NOT EXISTS idx_mem_user_active ON memories(canonical_user_id, is_active, updated_at DESC)",
@@ -1872,7 +1870,7 @@ class TMemoryPlugin(Star):
                             canonical_user_id, source_adapter, source_user_id, source_channel,
                             memory_type, memory, memory_hash, score, importance, confidence,
                             reinforce_count, last_seen_at, created_at, updated_at, is_active, is_pinned
-                        ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
                         (
                             to_id,
@@ -3267,8 +3265,7 @@ class TMemoryPlugin(Star):
                 "DELETE FROM memories WHERE canonical_user_id = ?", (canonical_id,)
             ).rowcount
             c = conn.execute(
-                "DELETE FROM conversation_cache WHERE canonical_user_id = ?",
-                (canonical_id,),
+                "DELETE FROM conversation_cache WHERE canonical_user_id = ?", (canonical_id,)
             ).rowcount
             conn.execute(
                 "DELETE FROM memory_events WHERE canonical_user_id = ?", (canonical_id,)
