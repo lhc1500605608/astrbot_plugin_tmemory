@@ -5,8 +5,10 @@ import json
 import os
 import re
 import sqlite3
+import threading
 import time
 import asyncio
+from contextlib import contextmanager
 from typing import Optional, List, Dict, Tuple, Sequence
 from collections import Counter
 
@@ -15,6 +17,21 @@ from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.provider import LLMResponse, ProviderRequest
 from astrbot.api.star import Context, Star, register
 from .hybrid_search import HybridMemorySystem
+
+
+class _NullWebServer:
+    """WebUI 降级替身（NullObject 模式）。
+
+    当 web_server.py 加载失败时作为 self._web_server 的替代，
+    保证所有对 self._web_server.start() / .stop() 的调用安全无操作。
+    """
+
+    async def start(self) -> None:
+        pass
+
+    async def stop(self) -> None:
+        pass
+
 
 @register(
     "tmemory",
@@ -29,6 +46,87 @@ class TMemoryPlugin(Star):
         self.plugin_name = "astrbot_plugin_tmemory"
         self.db_path = self._resolve_db_path()
 
+        # ── 持久 DB 连接 ─────────────────────────────────────────────────────
+        self._conn: Optional[sqlite3.Connection] = None
+        self._conn_lock = threading.Lock()
+
+        # ── 安全默认值（先全部设定，再用配置覆盖）──────────────────────────
+        self._set_safe_defaults()
+
+        # ── 从配置解析具体值（失败则保留默认值并记录警告）────────────────────
+        try:
+            self._parse_config()
+        except Exception as e:
+            logger.warning("[tmemory] 配置解析部分失败，使用安全默认值: %s", e)
+
+        # ── WebUI 独立服务器（降级保护）────────────────────────────────────
+        self._web_server = self._safe_load_web_server()
+
+    def _set_safe_defaults(self):
+        """设置所有配置属性的安全默认值，确保任何配置解析失败都不会导致 AttributeError。"""
+        self.cache_max_rows = 20
+        self.memory_max_chars = 220
+        self.enable_auto_capture = True
+        self.capture_assistant_reply = True
+        self._NO_MEMORY_MARKER = "\x00[astrbot:no-memory]\x00"
+        self.capture_skip_prefixes: List[str] = ["提醒 #"]
+        self._capture_skip_re: Optional[re.Pattern] = None
+        self.distill_interval_sec = 17280
+        self.distill_min_batch_count = 20
+        self.distill_batch_limit = 80
+        self.distill_model_id = ""
+        self.distill_provider_id = ""
+        self.enable_memory_injection = True
+        self.manual_purify_default_mode = "both"
+        self.manual_purify_default_limit = 20
+        self.manual_refine_default_mode = "both"
+        self.manual_refine_default_limit = 20
+        self.distill_pause = False
+        self.purify_interval_days = 0
+        self.purify_model_id = ""
+        self.purify_min_score = 0.0
+        self.refine_quality_interval_days = 0
+        self.refine_quality_model_id = ""
+        self.refine_quality_min_score = 0.0
+        # ── 向量检索管理器（新增）────────────────────────────────────
+        self._vector_manager: Optional["VectorManager"] = None
+        self.embed_provider_id = ""
+        self.embed_model_id = ""
+        self.embed_model = ""
+        self.embed_dim = 1536
+        self.vector_weight = 0.4
+        self.min_vector_sim = 0.15
+        self._sqlite_vec = None
+        self._vec_available = False
+        self.embed_base_url = ""
+        self.embed_api_key = ""
+        self.enable_reranker = False
+        self.rerank_provider_id = ""
+        self.rerank_model_id = ""
+        self.rerank_model = ""
+        self.rerank_top_n = 5
+        self.rerank_base_url = ""
+        self.memory_scope = "user"
+        self.private_memory_in_group = False
+        self.inject_position = "system_prompt"
+        self.inject_slot_marker = "{{tmemory}}"
+        self.inject_memory_limit = 5
+        self.inject_max_chars = 0
+        self._sanitize_patterns = []
+        self._distill_task: Optional[asyncio.Task] = None
+        self._worker_running = False
+        self._merge_needs_vector_rebuild = False
+        self._last_purify_ts = 0.0
+        self._embed_ok_count = 0
+        self._embed_fail_count = 0
+        self._embed_last_error = ""
+        self._vec_query_count = 0
+        self._vec_hit_count = 0
+        self._embed_semaphore = asyncio.Semaphore(4)
+        self._http_session = None
+
+    def _parse_config(self):
+        """从 self.config 解析配置值，覆盖默认值。"""
         # ── 基础配置 ──────────────────────────────────────────────────────────
         self.cache_max_rows = int(self.config.get("cache_max_rows", 20))
         self.memory_max_chars = int(self.config.get("memory_max_chars", 220))
@@ -236,28 +334,27 @@ class TMemoryPlugin(Star):
         # ── 敏感信息脱敏 ──────────────────────────────────────────────────────
         self._sanitize_patterns = self._build_sanitize_patterns()
 
-        # ── 内部状态 ──────────────────────────────────────────────────────────
-        self._distill_task: Optional[asyncio.Task] = None
-        self._worker_running = False
-        self._merge_needs_vector_rebuild = False
-        self._last_purify_ts = 0.0  # 上次提纯时间戳
+        # ── Embedding API 配置 ────────────────────────────────────────────────
+        self.embed_base_url = str(self.config.get("embed_base_url", "")).strip()
+        self.embed_api_key = str(self.config.get("embed_api_key", "")).strip()
 
-        # ── 向量可观测指标 ──────────────────────────────────────────────────
-        self._embed_ok_count = 0
-        self._embed_fail_count = 0
-        self._embed_last_error = ""
-        self._vec_query_count = 0
-        self._vec_hit_count = 0
-        self._embed_semaphore = asyncio.Semaphore(4)  # 并发 embedding 上限
+        # ── Reranker API 配置 ─────────────────────────────────────────────────
+        self.rerank_base_url = str(self.config.get("rerank_base_url", "")).strip()
 
-        # ── WebUI 独立服务器 ──────────────────────────────────────────────────
-        TMemoryWebServer = self._load_web_server_class()
-        # webui_settings 是嵌套 object，展平到顶层供 server 读取
-        webui_cfg = dict(self.config)
-        webui_sub = self.config.get("webui_settings", {})
-        if isinstance(webui_sub, dict):
-            webui_cfg.update(webui_sub)
-        self._web_server = TMemoryWebServer(self, webui_cfg)
+    def _safe_load_web_server(self):
+        """安全加载 WebUI 服务器，失败时降级为 _NullWebServer。"""
+        try:
+            TMemoryWebServer = self._load_web_server_class()
+            webui_cfg = dict(self.config)
+            webui_sub = self.config.get("webui_settings", {})
+            if isinstance(webui_sub, dict):
+                webui_cfg.update(webui_sub)
+            return TMemoryWebServer(self, webui_cfg)
+        except Exception as e:
+            logger.warning(
+                "[tmemory] WebUI 加载失败，核心功能不受影响: %s", e
+            )
+            return _NullWebServer()
 
     def _load_web_server_class(self):
         """通过文件路径动态加载 web_server.py，避免 `No module named 'web_server'`。"""
@@ -293,7 +390,11 @@ class TMemoryPlugin(Star):
         self._distill_task = asyncio.create_task(self._distill_worker_loop())
 
         # 启动独立 WebUI 服务器
-        await self._web_server.start()
+        try:
+            await self._web_server.start()
+        except Exception as e:
+            logger.warning("[tmemory] WebUI 启动失败，核心功能不受影响: %s", e)
+            self._web_server = _NullWebServer()
 
         logger.info(
             "[tmemory] initialized, db=%s, auto_capture=%s, memory_injection=%s, distill_interval=%ss",
@@ -312,7 +413,12 @@ class TMemoryPlugin(Star):
             except asyncio.CancelledError:
                 pass
         # 关闭 WebUI 服务器
-        await self._web_server.stop()
+        try:
+            await self._web_server.stop()
+        except Exception as e:
+            logger.warning("[tmemory] WebUI 关闭异常: %s", e)
+        # 关闭持久 DB 连接
+        self._close_db()
         logger.info("[tmemory] terminated")
 
     # =========================================================================
@@ -1511,19 +1617,38 @@ class TMemoryPlugin(Star):
                 conn.execute(f"ALTER TABLE {table_name} ADD COLUMN {col} {ddl}")
 
     def _db(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.db_path, check_same_thread=False)
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA synchronous=NORMAL")
-        conn.execute("PRAGMA busy_timeout=5000")
-        if self._vec_available:
-            try:
-                conn.enable_load_extension(True)
-                self._sqlite_vec.load(conn)
-                conn.enable_load_extension(False)
-            except Exception:
-                pass  # 扩展已加载或不可用
-        return conn
+        """获取持久 DB 连接（线程安全、单连接复用）。
+
+        使用上下文管理器模式：with self._db() as conn:
+        退出 with 块时自动 commit（异常时 rollback），但**不**关闭连接。
+        连接在插件 terminate() 时统一关闭。
+        """
+        with self._conn_lock:
+            if self._conn is None:
+                conn = sqlite3.connect(self.db_path, check_same_thread=False)
+                conn.row_factory = sqlite3.Row
+                conn.execute("PRAGMA journal_mode=WAL")
+                conn.execute("PRAGMA synchronous=NORMAL")
+                conn.execute("PRAGMA busy_timeout=5000")
+                if self._vec_available:
+                    try:
+                        conn.enable_load_extension(True)
+                        self._sqlite_vec.load(conn)
+                        conn.enable_load_extension(False)
+                    except Exception:
+                        pass
+                self._conn = conn
+            return self._conn
+
+    def _close_db(self):
+        """关闭持久连接。仅在 terminate() 中调用。"""
+        with self._conn_lock:
+            if self._conn is not None:
+                try:
+                    self._conn.close()
+                except Exception:
+                    pass
+                self._conn = None
 
     # =========================================================================
     # 向量检索辅助方法
