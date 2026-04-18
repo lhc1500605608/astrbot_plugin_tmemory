@@ -59,152 +59,157 @@
     "description": "群聊中注入私聊记忆",
     "hint": "默认关闭。开启后群聊中也会注入该用户的私聊专属记忆，可能泄露隐私。"
   },
-  "memory_providers": {
-    "type": "object",
-    "description": "记忆提供商",
-    "hint": "支持多种记忆提供商，如本地模型、云端 API 等。",
-    "items": {
-      "enable_vector_search": {
-        "type": "bool",
-        "default": false,
-        "description": "启用向量检索",
-        "hint": "开启后将启用基于 sqlite-vec 的 KNN + FTS5 混合检索。"
-      },
-      "vector_backend": {
-        "type": "string",
-        "default": "onnx",
-        "description": "向量化后端",
-        "hint": "可选 onnx (本地端侧运行) 或 api (调用外部大模型接口)。"
-      },
-      "embed_model_name": {
-        "type": "string",
-        "default": "BAAI/bge-small-zh-v1.5",
-        "description": "Embedding 模型",
-        "hint": "ONNX 模式填写模型名或路径，API 模式填写提供商的模型名（如 text-embedding-3-small）。"
-      },
-      "embed_api_url": {
-        "type": "string",
-        "default": "",
-        "description": "API Base URL",
-        "hint": "API 模式必填，例如 https://api.openai.com/v1/embeddings"
-      },
-      "embed_api_key": {
-        "type": "string",
-        "default": "",
-        "description": "API Key",
-        "hint": "API 模式鉴权密钥"
-      },
-      "embed_dim": {
-        "type": "int",
-        "default": 512,
-        "description": "向量维度",
-        "hint": "bge-small-zh-v1.5 为 512 维，text-embedding-3-small 可选 1536 维等。更换模型维度时需要重建数据库缓存。"
-      },
-      "reinforce_decay_rate": {
-        "type": "number",
-        "title": "遗忘曲线衰减率 (Advanced)",
-        "description": "默认 0.1。控制长时间未回忆的记忆得分下降速度。",
-        "default": 0.1
-      }
-    }
+  "enable_vector_search": {
+    "type": "bool",
+    "default": false,
+    "description": "启用向量检索",
+    "hint": "开启后将启用向量检索能力，提升记忆召回质量。需要先安装 sqlite-vec: pip install sqlite-vec"
   },
-  "vector_settings": {
-    "title": "向量搜索与本地模型设置",
-    "type": "object",
-    "properties": {
-      "vector_backend": {
-        "type": "string",
-        "title": "向量检索后端",
-        "description": "存储和检索向量的引擎，如果选择 sqlite-vec 则使用纯本地无依赖引擎。",
-        "enum": ["sqlite-vec"],
-        "default": "sqlite-vec"
-      },
-      "embed_provider": {
-        "type": "string",
-        "title": "Embeddings 提供商",
-        "description": "计算向量使用的 API 提供商或本地模型。",
-        "enum": ["local", "openai", "siliconflow"],
-        "default": "local"
-      },
-      "embed_model_name": {
-        "type": "string",
-        "title": "Embedding 模型名或路径",
-        "description": "当设为 local 时，可填 HuggingFace 仓库名（如 Xenova/bge-small-zh-v1.5）；使用 API 时填对应模型名。",
-        "default": "Xenova/bge-small-zh-v1.5"
-      },
-      "embed_dim": {
-        "type": "integer",
-        "title": "向量维度",
-        "description": "使用的模型维度 (bge-small-zh-v1.5 是 512，OpenAI 通常是 1536)",
-        "default": 512
-      },
-      "embed_api_key": {
-        "type": "string",
-        "title": "API Key",
-        "description": "如果使用 openai 或 siliconflow 等云端提供商时填写的 API Key。"
-      },
-      "embed_api_base": {
-        "type": "string",
-        "title": "API Base URL",
-        "description": "提供商的 API 代理或基础地址。"
-      }
-    }
+  "embed_provider_id": {
+    "type": "string",
+    "default": "",
+    "description": "Embedding 提供商 ID",
+    "hint": "填写提供商 ID，如 openai, siliconflow, volc 等。"
   },
-  "webui_settings": {
-    "type": "object",
-    "description": "WebUI 管理面板",
-    "hint": "独立端口的记忆管理面板，包含思维导图、记忆编辑、审计日志等功能。",
-    "items": {
-      "webui_enabled": {
-        "type": "bool",
-        "description": "启用 WebUI 面板",
-        "hint": "开启后将在独立端口启动记忆管理面板。",
-        "default": false
-      },
-      "webui_port": {
-        "type": "int",
-        "description": "监听端口",
-        "hint": "WebUI 面板监听的端口号。",
-        "default": 9966
-      },
-      "webui_host": {
-        "type": "string",
-        "description": "监听地址",
-        "hint": "绑定的 IP 地址。0.0.0.0 表示监听所有接口，127.0.0.1 表示仅本机。",
-        "default": "0.0.0.0"
-      },
-      "webui_username": {
-        "type": "string",
-        "description": "管理员用户名",
-        "hint": "登录 WebUI 面板的用户名。",
-        "default": "admin"
-      },
-      "webui_password": {
-        "type": "string",
-        "description": "管理员密码",
-        "hint": "登录 WebUI 面板的密码。必须设置密码后面板才会启动。",
-        "obvious_hint": true,
-        "default": ""
-      },
-      "webui_ip_whitelist": {
-        "type": "string",
-        "description": "IP 白名单",
-        "hint": "允许访问的 IP 地址，多个用逗号分隔。留空表示允许所有 IP。示例：127.0.0.1,192.168.1.0",
-        "default": ""
-      },
-      "webui_trust_proxy": {
-        "type": "bool",
-        "description": "信任反向代理",
-        "hint": "开启后将从 X-Forwarded-For / X-Real-IP 头获取真实客户端 IP，适用于 Nginx 等反代场景。",
-        "default": false
-      },
-      "webui_token_expire_hours": {
-        "type": "int",
-        "description": "登录有效期（小时）",
-        "hint": "JWT token 的有效时间。",
-        "default": 24
-      }
-    }
+  "embed_model_id": {
+    "type": "string",
+    "default": "text-embedding-3-small",
+    "description": "Embedding 模型名称",
+    "hint": "例如 text-embedding-3-small, nomic-embed-text-v1.5"
+  },
+  "embed_dim": {
+    "type": "int",
+    "default": 1536,
+    "description": "向量维度",
+    "hint": "Embedding 模型的输出维度，需与模型一致。如 text-embedding-3-small 是 1536，bge-small-zh-v1.5 是 512"
+  },
+  "embed_base_url": {
+    "type": "string",
+    "default": "https://api.openai.com/v1",
+    "description": "Embedding API Base URL",
+    "hint": "OpenAI 兼容的 Embedding API 地址，支持自定义代理。"
+  },
+  "embed_api_key": {
+    "type": "string",
+    "default": "",
+    "description": "Embedding API Key",
+    "hint": "OpenAI 兼容的 API 鉴权密钥。",
+    "obvious_hint": true
+  },
+  "vector_weight": {
+    "type": "float",
+    "default": 0.4,
+    "description": "向量检索权重",
+    "hint": "混合检索中向量相似度的权重（0~1）。1.0=纯向量，0.0=纯文本。"
+  },
+  "min_vector_sim": {
+    "type": "float",
+    "default": 0.15,
+    "description": "最小向量相似度",
+    "hint": "向量候选最低相似度阈值，(0~1)，低于阈值的结果会被过滤。"
+  },
+  "enable_reranker": {
+    "type": "bool",
+    "default": false,
+    "description": "启用重排序模型",
+    "hint": "对检索结果进行精排，提升召回准确率。"
+  },
+  "rerank_provider_id": {
+    "type": "string",
+    "default": "",
+    "description": "重排序提供商 ID",
+    "hint": "支持 cohere, jina, siliconflow 等重排序服务。"
+  },
+  "rerank_model_id": {
+    "type": "string",
+    "default": "",
+    "description": "重排序模型名称",
+    "hint": "例如 rerank-english-v3.0, jina-reranker-v1-base-en"
+  },
+  "rerank_base_url": {
+    "type": "string",
+    "default": "",
+    "description": "重排序 API 地址",
+    "hint": "自定义重排序 API 的 Base URL。"
+  },
+  "rerank_top_n": {
+    "type": "int",
+    "default": 5,
+    "description": "重排序返回数量",
+    "hint": "重排序后返回的最终结果数量。"
+  },
+  "refine_quality_interval_days": {
+    "type": "int",
+    "default": 0,
+    "description": "质量优化间隔（天）",
+    "hint": "自动优化记忆质量的间隔天数，0=关闭。"
+  },
+  "refine_quality_provider_id": {
+    "type": "string",
+    "default": "",
+    "description": "质量评估提供商",
+    "hint": "用于记忆质量评估的 LLM 提供商 ID。"
+  },
+  "refine_quality_model_id": {
+    "type": "string",
+    "default": "",
+    "description": "质量评估模型",
+    "hint": "用于记忆质量评估的模型名称。"
+  },
+  "refine_quality_min_score": {
+    "type": "float",
+    "default": 0.6,
+    "description": "最低质量分数",
+    "hint": "低于此分数的记忆将被标记为 low_quality。"
+  },
+  "webui_enabled": {
+    "type": "bool",
+    "description": "启用 WebUI 面板",
+    "hint": "开启后将在独立端口启动记忆管理面板。",
+    "default": false
+  },
+  "webui_port": {
+    "type": "int",
+    "description": "WebUI 监听端口",
+    "hint": "WebUI 面板监听的端口号。",
+    "default": 9966
+  },
+  "webui_host": {
+    "type": "string",
+    "description": "WebUI 监听地址",
+    "hint": "绑定的 IP 地址。0.0.0.0 表示监听所有接口，127.0.0.1 表示仅本机。",
+    "default": "0.0.0.0"
+  },
+  "webui_username": {
+    "type": "string",
+    "description": "WebUI 管理员用户名",
+    "hint": "登录 WebUI 面板的用户名。",
+    "default": "admin"
+  },
+  "webui_password": {
+    "type": "string",
+    "description": "WebUI 管理员密码",
+    "hint": "登录 WebUI 面板的密码。必须设置密码后面板才会启动。",
+    "obvious_hint": true,
+    "default": ""
+  },
+  "webui_ip_whitelist": {
+    "type": "string",
+    "description": "WebUI IP 白名单",
+    "hint": "允许访问的 IP 地址，多个用逗号分隔。留空表示允许所有 IP。示例：127.0.0.1,192.168.1.0",
+    "default": ""
+  },
+  "webui_trust_proxy": {
+    "type": "bool",
+    "description": "WebUI 信任反向代理",
+    "hint": "开启后将从 X-Forwarded-For / X-Real-IP 头获取真实客户端 IP，适用于 Nginx 等反代场景。",
+    "default": false
+  },
+  "webui_token_expire_hours": {
+    "type": "int",
+    "description": "WebUI 登录有效期（小时）",
+    "hint": "JWT token 的有效时间。",
+    "default": 24
   },
   "distill_pause": {
     "type": "bool",
@@ -215,7 +220,7 @@
   "capture_skip_prefixes": {
     "type": "string",
     "description": "跳过采集的内容前缀",
-    "hint": "逗号分隔的前缀列表，以这些前缀开头的消息不会被采集。内置了 tschedule 兼容前缀（'提醒 #'），无需手动添加。支持新版 tschedule 的 no-memory 协议标记，优先级最高（自动生效）。",
+    "hint": "逗号分隔的前缀列表，以这些前缀开头的消息不会被采集。内置了 tschedule 兼容前缀（'#提醒 '），无需手动添加。支持新版 tschedule 的 no-memory 协议标记，优先级最高（自动生效）。",
     "default": ""
   },
   "capture_skip_regex": {
