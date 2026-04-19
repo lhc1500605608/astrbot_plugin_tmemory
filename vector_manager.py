@@ -62,27 +62,35 @@ class VectorManager:
     async def _init_embedding_provider(self, config: dict):
         """初始化 Embedding 提供者"""
         provider_type = config.get("embedding_provider", "volc")
+        api_key = config.get("embedding_api_key", "")
+        model = config.get("embedding_model", "")
+        base_url = config.get("embedding_base_url", "")
         
         try:
             if provider_type == "volc":
-                api_key = config.get("volc_api_key", "")
-                model = config.get("volc_model", "doubao-embedding-vision-251215")
-                
                 if not api_key:
-                    logger.warning("[VectorManager] Volc API key not configured")
+                    logger.warning("[VectorManager] Embedding API key not configured")
                     return
+                
+                # 如果没有指定模型，使用默认值
+                if not model:
+                    model = "doubao-embedding-vision-251215"
                 
                 self.embedding_provider = VolcEmbeddingsProvider(api_key, model)
                 logger.info("[VectorManager] Using Volc Embeddings provider")
                 
             elif provider_type == "openai":
-                api_key = config.get("openai_api_key", "")
-                model = config.get("openai_model", "text-embedding-3-small")
-                base_url = config.get("openai_base_url", "https://api.openai.com/v1")
-                
                 if not api_key:
-                    logger.warning("[VectorManager] OpenAI API key not configured")
+                    logger.warning("[VectorManager] Embedding API key not configured")
                     return
+                
+                # 如果没有指定模型，使用默认值
+                if not model:
+                    model = "text-embedding-3-small"
+                
+                # 如果没有指定 base_url，使用默认值
+                if not base_url:
+                    base_url = "https://api.openai.com/v1"
                 
                 self.embedding_provider = OpenAIEmbeddingProvider(api_key, model, base_url)
                 logger.info("[VectorManager] Using OpenAI Embeddings provider")

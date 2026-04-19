@@ -116,6 +116,7 @@ class TMemoryPlugin(Star):
         self._distill_task: Optional[asyncio.Task] = None
         self._worker_running = False
         self._merge_needs_vector_rebuild = False
+        self._fts5_needs_rebuild = False
         self._last_purify_ts = 0.0
         self._embed_ok_count = 0
         self._embed_fail_count = 0
@@ -175,10 +176,20 @@ class TMemoryPlugin(Star):
         self.distill_batch_limit = max(
             20, int(self.config.get("distill_batch_limit", 80))
         )
-        self.distill_model_id = str(self.config.get("distill_model_id", "")).strip()
-        self.distill_provider_id = str(
-            self.config.get("distill_provider_id", "")
-        ).strip()
+        
+        # ── 独立蒸馏模型配置 ───────────────────────────────────────────────────
+        distill_cfg = self.config.get("distill_model_settings", {})
+        self.use_independent_distill_model = bool(distill_cfg.get("use_independent_distill_model", False))
+        self.distill_provider_id = str(distill_cfg.get("distill_provider_id", "")).strip()
+        self.distill_model_id = str(distill_cfg.get("distill_model_id", "")).strip()
+        self.purify_provider_id = str(distill_cfg.get("purify_provider_id", "")).strip()
+        self.purify_model_id = str(distill_cfg.get("purify_model_id", "")).strip()
+
+        # 兼容旧配置项
+        if not self.distill_model_id:
+            self.distill_model_id = str(self.config.get("distill_model_id", "")).strip()
+        if not self.distill_provider_id:
+            self.distill_provider_id = str(self.config.get("distill_provider_id", "")).strip()
 
         # ── 记忆召回注入 ──────────────────────────────────────────────────────
         # enable_memory_injection: 是否在 LLM 调用前将记忆上下文注入 system prompt
@@ -217,7 +228,7 @@ class TMemoryPlugin(Star):
         self.distill_pause = bool(self.config.get("distill_pause", False))
 
         # ── 提纯（Purification）───────────────────────────────────────────────
-        # 对已蒸馏的 memories 做优化/重评，淘汰低分/低置信/低重要的记忆。
+        # 对已蒸馏的 memories 做优化/重评，淘汰低分/低置信/低重要的记忆 。
         # purify_interval_days: 每隔多少天执行一次提纯（0=不启用）
         # purify_model_id: 用于提纯的 LLM provider/model id
         # purify_min_score: 综合分低于此值的记忆被失活（0=不限）
@@ -230,12 +241,15 @@ class TMemoryPlugin(Star):
                 )
             ),
         )
-        self.purify_model_id = str(
-            self.config.get(
-                "purify_model_id",
-                self.config.get("refine_quality_model_id", ""),
-            )
-        ).strip()
+        if not self.purify_model_id:
+            self.purify_model_id = str(
+                self.config.get(
+                    "purify_model_id",
+                    self.config.get("refine_quality_model_id", ""),
+                )
+            ).strip()
+        if not self.purify_provider_id:
+            self.purify_provider_id = str(self.config.get("purify_provider_id", "")).strip()
         self.purify_min_score = max(
             0.0,
             min(
@@ -253,37 +267,20 @@ class TMemoryPlugin(Star):
         self.refine_quality_model_id = self.purify_model_id
         self.refine_quality_min_score = self.purify_min_score
 
-        # ── 向量检索（sqlite-vec，软依赖）────────────────────────────────────
-        self.enable_vector_search = bool(self.config.get("enable_vector_search", False))
-        self.embed_provider_id = str(self.config.get("embed_provider_id", "")).strip()
-        self.embed_model_id = str(
-            self.config.get(
-                "embed_model_id",
-                self.config.get("embed_model", ""),
-            )
-        ).strip()
-        # 兼容旧属性名
+        # ── 向量检索（由 VectorManager 统一管理）──────────────────────────────
+        # 从 vector_retrieval 子配置读取
+        vr = self.config.get("vector_retrieval", {})
+        self.enable_vector_search = bool(vr.get("enable_vector_search", False))
+        
+        # 保留旧的属性用于兼容性（已被 VectorManager 取代）
+        self.embed_provider_id = str(vr.get("embedding_provider", "")).strip()
+        self.embed_model_id = str(vr.get("embedding_model", "")).strip()
         self.embed_model = self.embed_model_id
-        self.embed_dim = max(64, int(self.config.get("embed_dim", 1536)))
-        self.vector_weight = max(
-            0.0, min(1.0, float(self.config.get("vector_weight", 0.4)))
-        )
-        self.min_vector_sim = max(
-            0.0, min(1.0, float(self.config.get("min_vector_sim", 0.15)))
-        )
+        self.embed_dim = max(64, int(vr.get("vector_dim", 2048)))  # 默认维度改为2048
+        self.vector_weight = 0.4  # 固定值，由 VectorManager 管理
+        self.min_vector_sim = 0.15  # 固定值，由 VectorManager 管理
         self._sqlite_vec = None
         self._vec_available = False
-        if self.enable_vector_search:
-            try:
-                import sqlite_vec  # type: ignore[import-not-found]
-
-                self._sqlite_vec = sqlite_vec
-                self._vec_available = True
-            except ImportError:
-                logger.warning(
-                    "[tmemory] sqlite-vec not installed; vector search disabled. "
-                    "Run: pip install sqlite-vec"
-                )
 
         # ── Reranker（可选，内置 provider 反射调用）──────────────────────────
         self.enable_reranker = bool(self.config.get("enable_reranker", False))
@@ -334,9 +331,10 @@ class TMemoryPlugin(Star):
         # ── 敏感信息脱敏 ──────────────────────────────────────────────────────
         self._sanitize_patterns = self._build_sanitize_patterns()
 
-        # ── Embedding API 配置 ────────────────────────────────────────────────
-        self.embed_base_url = str(self.config.get("embed_base_url", "")).strip()
-        self.embed_api_key = str(self.config.get("embed_api_key", "")).strip()
+        # ── Embedding API 配置（从 vector_retrieval 子配置读取）────────────────
+        vr = self.config.get("vector_retrieval", {})
+        self.embed_base_url = str(vr.get("embedding_base_url", "")).strip()
+        self.embed_api_key = str(vr.get("embedding_api_key", "")).strip()
 
         # ── Reranker API 配置 ─────────────────────────────────────────────────
         self.rerank_base_url = str(self.config.get("rerank_base_url", "")).strip()
@@ -386,6 +384,18 @@ class TMemoryPlugin(Star):
         self._init_db()
         self._migrate_schema()
 
+        # 初始化 VectorManager（如果向量检索启用）
+        if self.enable_vector_search:
+            try:
+                from .vector_manager import VectorManager
+                vr = self.config.get("vector_retrieval", {})
+                self._vector_manager = VectorManager(self.db_path, vr)
+                await self._vector_manager.initialize()
+                logger.info("[tmemory] VectorManager initialized")
+            except Exception as e:
+                logger.error("[tmemory] Failed to initialize VectorManager: %s", e)
+                self._vector_manager = None
+
         self._worker_running = True
         self._distill_task = asyncio.create_task(self._distill_worker_loop())
 
@@ -412,6 +422,13 @@ class TMemoryPlugin(Star):
                 await self._distill_task
             except asyncio.CancelledError:
                 pass
+        # 关闭 VectorManager
+        if self._vector_manager:
+            try:
+                await self._vector_manager.close()
+                logger.info("[tmemory] VectorManager closed")
+            except Exception as e:
+                logger.warning("[tmemory] VectorManager close exception: %s", e)
         # 关闭 WebUI 服务器
         try:
             await self._web_server.stop()
@@ -1076,6 +1093,7 @@ class TMemoryPlugin(Star):
         prompt = self._build_distill_prompt(transcript)
 
         chat_provider_id = await self._resolve_distill_provider_id(rows)
+        chat_model_id = await self._resolve_distill_model_id(rows)
         if not chat_provider_id:
             # 无法确定 provider 时，回退到规则蒸馏。
             return [
@@ -1089,10 +1107,14 @@ class TMemoryPlugin(Star):
             ]
 
         try:
-            llm_resp = await self.context.llm_generate(
-                chat_provider_id=chat_provider_id,
-                prompt=prompt,
-            )
+            llm_generate_kwargs = {
+                "chat_provider_id": chat_provider_id,
+                "prompt": prompt,
+            }
+            if chat_model_id:
+                llm_generate_kwargs["model_id"] = chat_model_id
+                
+            llm_resp = await self.context.llm_generate(**llm_generate_kwargs)
             completion_text = self._normalize_text(
                 getattr(llm_resp, "completion_text", "") or ""
             )
@@ -1156,8 +1178,15 @@ class TMemoryPlugin(Star):
     async def _resolve_distill_provider_id(self, rows: List[Dict]) -> str:
         """解析要用于蒸馏的 provider ID。
 
-        优先级：distill_model_id > distill_provider_id > 消息来源推断
+        优先级：
+        1. 如果配置了独立蒸馏模型则使用该模型
+        2. distill_model_id (旧配置)
+        3. distill_provider_id (旧配置) 
+        4. 消息来源推断
         """
+        if self.use_independent_distill_model and self.distill_provider_id:
+            return self.distill_provider_id
+
         if self.distill_model_id:
             return self.distill_model_id
         if self.distill_provider_id:
@@ -1185,6 +1214,22 @@ class TMemoryPlugin(Star):
             except Exception:
                 pass
             return ""
+
+    async def _resolve_distill_model_id(self, rows: List[Dict]) -> str:
+        """解析要用于蒸馏的 model ID。
+
+        优先级：
+        1. 如果配置了独立蒸馏模型则使用该模型
+        2. distill_model_id (旧配置)
+        3. 消息来源推断
+        """
+        if self.use_independent_distill_model and self.distill_model_id:
+            return self.distill_model_id
+
+        if self.distill_model_id:
+            return self.distill_model_id
+
+        return ""
 
     # 匹配 thinking 模型的推理块（Gemma / Claude extended thinking 等）
     _THINK_RE = re.compile(
@@ -1340,6 +1385,33 @@ class TMemoryPlugin(Star):
         fallback_dir = os.path.dirname(os.path.abspath(__file__))
         return os.path.join(fallback_dir, "tmemory.db")
 
+    def _migrate_fts5_to_content_sync(self, conn: sqlite3.Connection) -> None:
+        """将旧的独立 FTS5 表迁移到 content-sync 模式。
+
+        独立 FTS5 表不支持 'delete' 命令（SQLite 3.51+），
+        需要改用 content='memories' 的外部内容模式。
+        迁移后自动 rebuild 以从 memories 表重建索引。
+        """
+        try:
+            row = conn.execute(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name='memories_fts'"
+            ).fetchone()
+            if row is None:
+                return  # 表不存在，无需迁移
+            create_sql = str(row[0] or row["sql"] if isinstance(row, sqlite3.Row) else row[0])
+            if "content=" in create_sql or "content =" in create_sql:
+                return  # 已是 content-sync 模式
+            # 旧的独立 FTS5 表：需要删除并重建
+            logger.info("[tmemory] 正在将 FTS5 表迁移到 content-sync 模式...")
+            conn.execute("DROP TRIGGER IF EXISTS t_memories_ai")
+            conn.execute("DROP TRIGGER IF EXISTS t_memories_ad")
+            conn.execute("DROP TRIGGER IF EXISTS t_memories_au")
+            conn.execute("DROP TABLE IF EXISTS memories_fts")
+            self._fts5_needs_rebuild = True
+            logger.info("[tmemory] FTS5 迁移完成，将重建 content-sync FTS5 表。")
+        except Exception as e:
+            logger.warning("[tmemory] FTS5 迁移检测失败: %s", e)
+
     def _init_db(self):
         with self._db() as conn:
             conn.execute(
@@ -1382,12 +1454,15 @@ class TMemoryPlugin(Star):
                 """
             )
             
-            # FTS5 表
+            # FTS5 表 (content-sync 模式，关联 memories 表)
+            # 检查是否需要从旧的独立 FTS5 表迁移到 content-sync 模式
+            self._migrate_fts5_to_content_sync(conn)
             conn.execute(
                 """
                 CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
                     tokenized_memory,
                     canonical_user_id UNINDEXED,
+                    content='memories', content_rowid='id',
                     tokenize='unicode61 remove_diacritics 1'
                 )
                 """
@@ -1478,6 +1553,15 @@ class TMemoryPlugin(Star):
                 except Exception as _ve:
                     logger.warning("[tmemory] failed to create memory_vectors: %s", _ve)
 
+            # FTS5 迁移后需要 rebuild 以从 memories 表重建索引
+            if self._fts5_needs_rebuild:
+                try:
+                    conn.execute("INSERT INTO memories_fts(memories_fts) VALUES('rebuild')")
+                    self._fts5_needs_rebuild = False
+                    logger.info("[tmemory] FTS5 索引重建完成。")
+                except Exception as e:
+                    logger.warning("[tmemory] FTS5 rebuild 失败: %s", e)
+
     def _migrate_schema(self):
         self._ensure_columns(
             "memories",
@@ -1541,11 +1625,13 @@ class TMemoryPlugin(Star):
             )
             
             # 初始化 FTS5 表和触发器 (保证 migration 也会建表)
+            self._migrate_fts5_to_content_sync(conn)
             conn.execute(
                 """
                 CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
                     tokenized_memory,
                     canonical_user_id UNINDEXED,
+                    content='memories', content_rowid='id',
                     tokenize='unicode61 remove_diacritics 1'
                 )
                 """
@@ -1581,18 +1667,57 @@ class TMemoryPlugin(Star):
             )
 
             # 数据迁移：回填空的 tokenized_memory
-            # 这是一个轻量级的检查，对于老数据进行分词更新。
+            # 注意：如果刚完成 FTS5 迁移，需要先禁用触发器以避免 UPDATE 触发空表 delete
             try:
                 untokenized = conn.execute("SELECT id, memory FROM memories WHERE tokenized_memory = ''").fetchall()
                 if untokenized:
                     logger.info(f"[tmemory] 正在为 {len(untokenized)} 条历史记忆生成全文检索词元...")
+                    # 回填时临时禁用触发器，最后用 rebuild 统一重建 FTS5
+                    if self._fts5_needs_rebuild:
+                        conn.execute("DROP TRIGGER IF EXISTS t_memories_ai")
+                        conn.execute("DROP TRIGGER IF EXISTS t_memories_ad")
+                        conn.execute("DROP TRIGGER IF EXISTS t_memories_au")
                     for row in untokenized:
                         mem_text = str(row["memory"])
                         tokens = " ".join(jieba.cut_for_search(mem_text))
                         conn.execute("UPDATE memories SET tokenized_memory = ? WHERE id = ?", (tokens, int(row["id"])))
+                    if self._fts5_needs_rebuild:
+                        # 重新创建触发器
+                        conn.execute("""
+                            CREATE TRIGGER IF NOT EXISTS t_memories_ai AFTER INSERT ON memories 
+                            BEGIN
+                                INSERT INTO memories_fts(rowid, tokenized_memory, canonical_user_id) 
+                                VALUES (new.id, new.tokenized_memory, new.canonical_user_id);
+                            END;
+                            ) VALUES(?, ?, ?)
+                        conn.execute("""
+                            CREATE TRIGGER IF NOT EXISTS t_memories_ad AFTER DELETE ON memories 
+                            BEGIN
+                                INSERT INTO memories_fts(memories_fts, rowid, tokenized_memory, canonical_user_id) 
+                                VALUES ('delete', old.id, old.tokenized_memory, old.canonical_user_id);
+                            END;
+                        """)
+                        conn.execute("""
+                            CREATE TRIGGER IF NOT EXISTS t_memories_au AFTER UPDATE ON memories 
+                            BEGIN
+                                INSERT INTO memories_fts(memories_fts, rowid, tokenized_memory, canonical_user_id) 
+                                VALUES ('delete', old.id, old.tokenized_memory, old.canonical_user_id);
+                                INSERT INTO memories_fts(rowid, tokenized_memory, canonical_user_id) 
+                                VALUES (new.id, new.tokenized_memory, new.canonical_user_id);
+                            END;
+                        """)
                     logger.info("[tmemory] 历史记忆分词完成。")
             except Exception as e:
                 logger.error(f"[tmemory] 历史记忆分词更新失败: {e}")
+
+            # FTS5 迁移后需要 rebuild 以从 memories 表重建索引
+            if self._fts5_needs_rebuild:
+                try:
+                    conn.execute("INSERT INTO memories_fts(memories_fts) VALUES('rebuild')")
+                    self._fts5_needs_rebuild = False
+                    logger.info("[tmemory] FTS5 索引重建完成。")
+                except Exception as e:
+                    logger.warning("[tmemory] FTS5 rebuild 失败: %s", e)
 
             # ── 核心索引（幂等 CREATE IF NOT EXISTS）──────────────────────────
             for idx_sql in [
@@ -1664,10 +1789,19 @@ class TMemoryPlugin(Star):
         return self._http_session
 
     async def _embed_text(self, text: str) -> Optional[List[float]]:
-        """调用 OpenAI-compatible /v1/embeddings 生成向量。
+        """生成文本向量。优先使用 VectorManager，如果不可用则回退到旧方法。
 
         包含：并发限流（semaphore）、429/5xx 重试（最多 2 次）、可观测计数。
         """
+        # 优先使用 VectorManager
+        if self._vector_manager and self._vector_manager.embedding_provider:
+            try:
+                return await self._vector_manager.embedding_provider.embed_text(text)
+            except Exception as e:
+                logger.warning("[tmemory] VectorManager embed_text failed: %s", e)
+                # 回退到旧方法
+        
+        # 回退到旧方法
         if not self._vec_available or not self.embed_base_url:
             return None
 
@@ -1995,7 +2129,7 @@ class TMemoryPlugin(Star):
                             canonical_user_id, source_adapter, source_user_id, source_channel,
                             memory_type, memory, memory_hash, score, importance, confidence,
                             reinforce_count, last_seen_at, created_at, updated_at, is_active, is_pinned
-                        ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
                         (
                             to_id,
@@ -3087,7 +3221,7 @@ class TMemoryPlugin(Star):
                 ids_to_deactivate = await self._llm_purify_judge(provider_id, mem_list)
                 if ids_to_deactivate:
                     with self._db() as conn:
-                        for mid in ids_to_deactivate:
+                                ) VALUES(?, ?, ?)
                             conn.execute(
                                 "UPDATE memories SET is_active=0 WHERE id=?", (mid,)
                             )
