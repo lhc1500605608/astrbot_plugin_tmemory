@@ -217,6 +217,7 @@ MEMORY_PLUGIN_BLUEPRINT.md
 .claude/
 .github/
 .vscode/
+.idea/
 ao-output/
 workflows/
 .ao-output/
@@ -228,10 +229,9 @@ test_linter.py
 stress_test.py
 *.patch
 
-# Node.js (Temporary)
+# Node.js
 node_modules/
-package.json
-package-lock.json
 
 # Local Runtime Data
 data/
+docs/
