@@ -125,6 +125,18 @@ class TMemoryPlugin(Star):
         self._vec_hit_count = 0
         self._embed_semaphore = asyncio.Semaphore(4)
         self._http_session = None
+        # ── 触发门控与批处理效率 ──────────────────────────────────────────────
+        # capture_min_content_len: 用户消息/助手回复中有效字符低于此值时跳过采集
+        # capture_dedup_window: 同用户在最近 N 条未蒸馏缓存中出现相同内容哈希时跳过
+        # distill_user_throttle_sec: 单用户最近一次蒸馏完成后的冷却时间(秒)，
+        #     冷却内再次出现于 pending_users 列表时跳过，防止高频用户每轮都被处理
+        self.capture_min_content_len = 5
+        self.capture_dedup_window = 10
+        self.distill_user_throttle_sec = 0
+        # 运行时统计：每次蒸馏周期中因门控被跳过的行数
+        self._distill_skipped_rows: int = 0
+        # 内存缓存：per-user 最近蒸馏完成时间戳（用于节流）
+        self._user_last_distilled_ts: Dict[str, float] = {}
 
     def _parse_config(self):
         """从 self.config 解析配置值，覆盖默认值。"""
@@ -338,6 +350,20 @@ class TMemoryPlugin(Star):
 
         # ── Reranker API 配置 ─────────────────────────────────────────────────
         self.rerank_base_url = str(self.config.get("rerank_base_url", "")).strip()
+
+        # ── 触发门控与批处理效率 ──────────────────────────────────────────────
+        # capture_min_content_len: 有效字符低于此值的消息跳过采集(0=不限)
+        self.capture_min_content_len = max(
+            0, int(self.config.get("capture_min_content_len", 5))
+        )
+        # capture_dedup_window: 在同用户最近 N 条未蒸馏缓存中去重(0=不去重)
+        self.capture_dedup_window = max(
+            0, int(self.config.get("capture_dedup_window", 10))
+        )
+        # distill_user_throttle_sec: 单用户蒸馏后的冷却时间(0=不启用)
+        self.distill_user_throttle_sec = max(
+            0, int(self.config.get("distill_user_throttle_sec", 0))
+        )
 
     def _safe_load_web_server(self):
         """安全加载 WebUI 服务器，失败时降级为 _NullWebServer。"""
@@ -580,17 +606,21 @@ class TMemoryPlugin(Star):
         """查看蒸馏 worker 状态:/tm_worker"""
         pending_users = self._count_pending_users()
         pending_rows = self._count_pending_rows()
-        yield event.plain_result(
-            "\n".join(
-                [
-                    f"worker_running={self._worker_running}",
-                    f"distill_interval_sec={self.distill_interval_sec}",
-                    f"distill_min_batch_count={self.distill_min_batch_count}",
-                    f"pending_users={pending_users}",
-                    f"pending_rows={pending_rows}",
-                ]
-            )
-        )
+        lines = [
+            f"worker_running={self._worker_running}",
+            f"distill_interval_sec={self.distill_interval_sec}",
+            f"distill_min_batch_count={self.distill_min_batch_count}",
+            f"distill_batch_limit={self.distill_batch_limit}",
+            f"pending_users={pending_users}",
+            f"pending_rows={pending_rows}",
+            f"--- gate stats ---",
+            f"capture_min_content_len={self.capture_min_content_len}",
+            f"capture_dedup_window={self.capture_dedup_window}",
+            f"distill_user_throttle_sec={self.distill_user_throttle_sec}",
+            f"distill_skipped_rows(lifetime)={self._distill_skipped_rows}",
+            f"throttled_users={sum(1 for ts in self._user_last_distilled_ts.values() if time.time() - ts < self.distill_user_throttle_sec) if self.distill_user_throttle_sec > 0 else 'N/A'}",
+        ]
+        yield event.plain_result("\n".join(lines))
 
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("tm_memory")
@@ -1057,13 +1087,33 @@ class TMemoryPlugin(Star):
         cycle_tok_in: int = -1
         cycle_tok_out: int = -1
 
+        now_ts = time.time()
         for canonical_id in pending_users:
             try:
+                # 用户级节流：force 模式跳过冷却检查
+                if (not force) and self.distill_user_throttle_sec > 0:
+                    last_ts = self._user_last_distilled_ts.get(canonical_id, 0.0)
+                    if now_ts - last_ts < self.distill_user_throttle_sec:
+                        continue  # 冷却中，跳过本用户
+
                 rows = self._fetch_pending_rows(canonical_id, self.distill_batch_limit)
                 if (not force) and len(rows) < self.distill_min_batch_count:
                     continue
 
-                llm_items, tok_in, tok_out = await self._distill_rows_with_llm(rows)
+                # 预过滤：在送入 LLM 前过滤掉低信息量行，减少 token 消耗
+                rows_for_llm = self._prefilter_distill_rows(rows)
+                if not rows_for_llm:
+                    # 所有行均为低信息量，直接标记为已蒸馏跳过
+                    self._mark_rows_distilled([int(r["id"]) for r in rows])
+                    self._distill_skipped_rows += len(rows)
+                    processed_users += 1
+                    self._user_last_distilled_ts[canonical_id] = now_ts
+                    continue
+
+                skipped = len(rows) - len(rows_for_llm)
+                self._distill_skipped_rows += skipped
+
+                llm_items, tok_in, tok_out = await self._distill_rows_with_llm(rows_for_llm)
 
                 # 累加 token 计数（-1 表示 provider 未返回，跳过累加）
                 if tok_in >= 0:
@@ -1073,6 +1123,7 @@ class TMemoryPlugin(Star):
 
                 if not llm_items:
                     self._mark_rows_distilled([int(r["id"]) for r in rows])
+                    self._user_last_distilled_ts[canonical_id] = now_ts
                     continue
 
                 valid_items = self._validate_distill_output(llm_items)
@@ -1104,6 +1155,7 @@ class TMemoryPlugin(Star):
                 self._mark_rows_distilled([int(r["id"]) for r in rows])
                 self._optimize_context(canonical_id)
                 processed_users += 1
+                self._user_last_distilled_ts[canonical_id] = now_ts
             except Exception as e:
                 failed_users += 1
                 errors.append(f"{canonical_id}: {type(e).__name__}: {e}")
@@ -1139,6 +1191,38 @@ class TMemoryPlugin(Star):
     # =========================================================================
     # LLM 蒸馏
     # =========================================================================
+
+    def _prefilter_distill_rows(self, rows: List[Dict]) -> List[Dict]:
+        """蒸馏前预过滤：去除低信息量行，减少送入 LLM 的无效 token。
+
+        过滤规则（满足任一则跳过该行）：
+        - content 在 _is_low_info_content 判定为低信息量
+        - role 为 'summary'（规则摘要行，已浓缩，不重复蒸馏）
+
+        保留规则：
+        - 如果过滤后为空，返回空列表（由调用方决定跳过 LLM 调用）
+        - 始终保留 role=assistant 行与其配对的 user 行（上下文完整性）
+          → 实现上采用宽松策略：只过滤掉纯噪声 user 行，不做配对强制保留
+        """
+        if not rows:
+            return []
+
+        filtered = []
+        for row in rows:
+            role = str(row.get("role", ""))
+            content = str(row.get("content", ""))
+
+            # 跳过规则摘要行（已是浓缩形式，无需再蒸馏）
+            if role == "summary":
+                continue
+
+            # 跳过低信息量行
+            if self._is_low_info_content(content):
+                continue
+
+            filtered.append(row)
+
+        return filtered
 
     async def _distill_rows_with_llm(
         self, rows: List[Dict]
@@ -3050,6 +3134,29 @@ class TMemoryPlugin(Star):
         scope: str = "user",
         persona_id: str = "",
     ):
+        truncated = content[:1000]
+
+        # 内容哈希去重：同用户最近 capture_dedup_window 条未蒸馏缓存中有相同内容时跳过
+        if self.capture_dedup_window > 0:
+            content_hash = hashlib.md5(truncated.encode("utf-8", errors="replace")).hexdigest()
+            with self._db() as conn:
+                exists = conn.execute(
+                    """
+                    SELECT 1 FROM conversation_cache
+                    WHERE canonical_user_id=? AND distilled=0
+                    AND id IN (
+                        SELECT id FROM conversation_cache
+                        WHERE canonical_user_id=? AND distilled=0
+                        ORDER BY id DESC LIMIT ?
+                    )
+                    AND content=?
+                    LIMIT 1
+                    """,
+                    (canonical_id, canonical_id, self.capture_dedup_window, truncated),
+                ).fetchone()
+                if exists:
+                    return  # 重复内容，跳过写入
+
         with self._db() as conn:
             conn.execute(
                 """
@@ -3061,7 +3168,7 @@ class TMemoryPlugin(Star):
                 (
                     canonical_id,
                     role,
-                    content[:1000],
+                    truncated,
                     source_adapter,
                     source_user_id,
                     unified_msg_origin,
@@ -3696,8 +3803,31 @@ class TMemoryPlugin(Star):
             text = pattern.sub(replacement, text)
         return text
 
+    def _is_low_info_content(self, text: str) -> bool:
+        """判断文本是否为低信息量内容（适合在 capture 层跳过）。
+
+        条件（满足任一即为低信息量）：
+        - 有效字符数低于 capture_min_content_len（配置项，默认 5）
+        - 去除噪声词后无实义词（纯感叹/颜文字/口头禅）
+        """
+        if self.capture_min_content_len <= 0:
+            return False
+        # 去除标点/空白后的有效字符长度
+        stripped = re.sub(r"[\s\W]+", "", text, flags=re.UNICODE)
+        if len(stripped) < self.capture_min_content_len:
+            return True
+        # 检查去除噪声词后是否还有实义词（≥2 字符的非噪声词）
+        words = [
+            w
+            for w in re.split(r"[^\w\u4e00-\u9fff]+", text)
+            if len(w) >= 2
+            and w.lower() not in self._NOISE_WORDS
+            and not self._JUNK_WORD_RE.match(w)
+        ]
+        return len(words) == 0
+
     def _should_skip_capture(self, text: str) -> bool:
-        """三层过滤器:判断消息是否应跳过采集。
+        """四层过滤器:判断消息是否应跳过采集。
 
         层 1 - 协议标记(最高优先级):
             兼容 ASTRBOT_NO_MEMORY 跨插件协议，任何插件均可在消息里
@@ -3709,6 +3839,9 @@ class TMemoryPlugin(Star):
 
         层 3 - 正则表达式:
             匹配 capture_skip_regex 配置中的正则，适用于复杂过滤场景。
+
+        层 4 - 低信息量门控（新增）:
+            文本长度/实义词不足时跳过，减少无效行进入 conversation_cache。
         """
         # 层 1:协议标记(不可见字符，不依赖文本内容)
         if self._NO_MEMORY_MARKER in text:
@@ -3718,6 +3851,9 @@ class TMemoryPlugin(Star):
             return True
         # 层 3:正则匹配
         if self._capture_skip_re and self._capture_skip_re.search(text):
+            return True
+        # 层 4:低信息量门控
+        if self._is_low_info_content(text):
             return True
         return False
 
