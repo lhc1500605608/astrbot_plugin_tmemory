@@ -707,6 +707,47 @@ class TMemoryPlugin(Star):
                 lines.append(f"embed_last_error: {self._embed_last_error[:80]}")
         elif self.enable_vector_search:
             lines.append("vector_search: enabled but sqlite-vec not installed")
+
+        # 最近 10 轮蒸馏 token 累计
+        distill_cost = self._get_distill_cost_summary(last_n=10)
+        lines.append("--- distill cost (last 10 runs) ---")
+        if distill_cost["has_usage"]:
+            lines.append(f"distill_runs: {distill_cost['runs']}")
+            lines.append(f"distill_tokens_input: {distill_cost['tokens_input']}")
+            lines.append(f"distill_tokens_output: {distill_cost['tokens_output']}")
+            lines.append(f"distill_tokens_total: {distill_cost['tokens_total']}")
+        else:
+            lines.append(
+                f"distill_runs: {distill_cost['runs']} (no usage data from provider)"
+            )
+
+        yield event.plain_result("\n".join(lines))
+
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @filter.command("tm_distill_history")
+    async def tm_distill_history(self, event: AstrMessageEvent):
+        """查看最近蒸馏历史（含 token 成本）:/tm_distill_history"""
+        rows = self._get_distill_history(limit=10)
+        if not rows:
+            yield event.plain_result("暂无蒸馏历史记录。")
+            return
+
+        lines = [f"最近 {len(rows)} 轮蒸馏历史（最新优先）:"]
+        for r in rows:
+            tok_in = r.get("tokens_input", -1)
+            tok_out = r.get("tokens_output", -1)
+            tok_total = r.get("tokens_total", -1)
+            tok_str = (
+                f"in={tok_in} out={tok_out} total={tok_total}"
+                if tok_total >= 0
+                else "tokens=N/A"
+            )
+            lines.append(
+                f"[{r['id']}] {r['started_at'][:16]} trigger={r['trigger_type']}"
+                f" users={r['users_processed']} mems={r['memories_created']}"
+                f" failed={r['users_failed']} dur={r['duration_sec']:.1f}s"
+                f" {tok_str}"
+            )
         yield event.plain_result("\n".join(lines))
 
     @filter.permission_type(filter.PermissionType.ADMIN)
@@ -1012,6 +1053,9 @@ class TMemoryPlugin(Star):
         total_memories = 0
         failed_users = 0
         errors: list = []
+        # token 累计；-1 表示本轮无任何有效 usage 数据
+        cycle_tok_in: int = -1
+        cycle_tok_out: int = -1
 
         for canonical_id in pending_users:
             try:
@@ -1019,7 +1063,14 @@ class TMemoryPlugin(Star):
                 if (not force) and len(rows) < self.distill_min_batch_count:
                     continue
 
-                llm_items = await self._distill_rows_with_llm(rows)
+                llm_items, tok_in, tok_out = await self._distill_rows_with_llm(rows)
+
+                # 累加 token 计数（-1 表示 provider 未返回，跳过累加）
+                if tok_in >= 0:
+                    cycle_tok_in = max(cycle_tok_in, 0) + tok_in
+                if tok_out >= 0:
+                    cycle_tok_out = max(cycle_tok_out, 0) + tok_out
+
                 if not llm_items:
                     self._mark_rows_distilled([int(r["id"]) for r in rows])
                     continue
@@ -1062,6 +1113,11 @@ class TMemoryPlugin(Star):
 
         # 记录蒸馏历史
         duration = round(time.time() - t0, 2)
+        cycle_tok_total = (
+            cycle_tok_in + cycle_tok_out
+            if cycle_tok_in >= 0 and cycle_tok_out >= 0
+            else -1
+        )
         self._record_distill_history(
             started_at=started_at,
             trigger=trigger,
@@ -1070,6 +1126,9 @@ class TMemoryPlugin(Star):
             users_failed=failed_users,
             errors=errors,
             duration=duration,
+            tokens_input=cycle_tok_in,
+            tokens_output=cycle_tok_out,
+            tokens_total=cycle_tok_total,
         )
 
         # 顺便执行记忆衰减
@@ -1081,8 +1140,15 @@ class TMemoryPlugin(Star):
     # LLM 蒸馏
     # =========================================================================
 
-    async def _distill_rows_with_llm(self, rows: List[Dict]) -> List[Dict[str, object]]:
-        """用 LLM 对一批对话行进行结构化蒸馏，失败时回退到规则蒸馏。"""
+    async def _distill_rows_with_llm(
+        self, rows: List[Dict]
+    ) -> Tuple[List[Dict[str, object]], int, int]:
+        """用 LLM 对一批对话行进行结构化蒸馏，失败时回退到规则蒸馏。
+
+        Returns:
+            (items, tokens_input, tokens_output)
+            tokens_input / tokens_output 为 -1 表示 provider 未返回 usage。
+        """
         transcript_lines = []
         for row in rows:
             role = str(row["role"])
@@ -1096,15 +1162,19 @@ class TMemoryPlugin(Star):
         chat_model_id = await self._resolve_distill_model_id(rows)
         if not chat_provider_id:
             # 无法确定 provider 时，回退到规则蒸馏。
-            return [
-                {
-                    "memory": self._distill_text(transcript),
-                    "memory_type": "fact",
-                    "importance": 0.55,
-                    "confidence": 0.50,
-                    "score": 0.60,
-                }
-            ]
+            return (
+                [
+                    {
+                        "memory": self._distill_text(transcript),
+                        "memory_type": "fact",
+                        "importance": 0.55,
+                        "confidence": 0.50,
+                        "score": 0.60,
+                    }
+                ],
+                -1,
+                -1,
+            )
 
         try:
             llm_generate_kwargs = {
@@ -1113,7 +1183,7 @@ class TMemoryPlugin(Star):
             }
             if chat_model_id:
                 llm_generate_kwargs["model_id"] = chat_model_id
-                
+
             llm_resp = await self.context.llm_generate(**llm_generate_kwargs)
             completion_text = self._normalize_text(
                 getattr(llm_resp, "completion_text", "") or ""
@@ -1121,20 +1191,35 @@ class TMemoryPlugin(Star):
             # 剥离思维链后再解析(兼容 Gemma / Claude extended thinking 等)
             completion_text = self._strip_think_tags(completion_text)
             parsed = self._parse_llm_json_memories(completion_text)
+
+            # 提取 token usage（provider 不支持时为 None）
+            usage = getattr(llm_resp, "usage", None)
+            if usage is not None:
+                tok_in = int(getattr(usage, "input_other", 0) or 0) + int(
+                    getattr(usage, "input_cached", 0) or 0
+                )
+                tok_out = int(getattr(usage, "output", 0) or 0)
+            else:
+                tok_in, tok_out = -1, -1
+
             if parsed:
-                return parsed
+                return parsed, tok_in, tok_out
         except Exception as e:
             logger.warning("[tmemory] llm distill failed, fallback to rule: %s", e)
 
-        return [
-            {
-                "memory": self._distill_text(transcript),
-                "memory_type": "fact",
-                "importance": 0.55,
-                "confidence": 0.50,
-                "score": 0.60,
-            }
-        ]
+        return (
+            [
+                {
+                    "memory": self._distill_text(transcript),
+                    "memory_type": "fact",
+                    "importance": 0.55,
+                    "confidence": 0.50,
+                    "score": 0.60,
+                }
+            ],
+            -1,
+            -1,
+        )
 
     def _build_distill_prompt(self, transcript: str) -> str:
         return (
@@ -1539,7 +1624,10 @@ class TMemoryPlugin(Star):
                     memories_created INTEGER NOT NULL DEFAULT 0,
                     users_failed INTEGER NOT NULL DEFAULT 0,
                     errors TEXT NOT NULL DEFAULT '',
-                    duration_sec REAL NOT NULL DEFAULT 0
+                    duration_sec REAL NOT NULL DEFAULT 0,
+                    tokens_input INTEGER NOT NULL DEFAULT -1,
+                    tokens_output INTEGER NOT NULL DEFAULT -1,
+                    tokens_total INTEGER NOT NULL DEFAULT -1
                 )
                 """
             )
@@ -1619,11 +1707,27 @@ class TMemoryPlugin(Star):
                     memories_created INTEGER NOT NULL DEFAULT 0,
                     users_failed INTEGER NOT NULL DEFAULT 0,
                     errors TEXT NOT NULL DEFAULT '',
-                    duration_sec REAL NOT NULL DEFAULT 0
+                    duration_sec REAL NOT NULL DEFAULT 0,
+                    tokens_input INTEGER NOT NULL DEFAULT -1,
+                    tokens_output INTEGER NOT NULL DEFAULT -1,
+                    tokens_total INTEGER NOT NULL DEFAULT -1
                 )
                 """
             )
-            
+
+            # 旧实例升级：为 distill_history 补充 token 列
+            for col, ddl in {
+                "tokens_input": "INTEGER NOT NULL DEFAULT -1",
+                "tokens_output": "INTEGER NOT NULL DEFAULT -1",
+                "tokens_total": "INTEGER NOT NULL DEFAULT -1",
+            }.items():
+                try:
+                    conn.execute(
+                        f"ALTER TABLE distill_history ADD COLUMN {col} {ddl}"
+                    )
+                except Exception:
+                    pass  # 列已存在则忽略
+
             # 初始化 FTS5 表和触发器 (保证 migration 也会建表)
             self._migrate_fts5_to_content_sync(conn)
             conn.execute(
@@ -3282,14 +3386,18 @@ class TMemoryPlugin(Star):
         users_failed: int,
         errors: list,
         duration: float,
+        tokens_input: int = -1,
+        tokens_output: int = -1,
+        tokens_total: int = -1,
     ):
         with self._db() as conn:
             conn.execute(
                 """
                 INSERT INTO distill_history(
                     started_at, finished_at, trigger_type, users_processed,
-                    memories_created, users_failed, errors, duration_sec
-                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?)
+                    memories_created, users_failed, errors, duration_sec,
+                    tokens_input, tokens_output, tokens_total
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     started_at,
@@ -3300,6 +3408,9 @@ class TMemoryPlugin(Star):
                     users_failed,
                     json.dumps(errors, ensure_ascii=False),
                     duration,
+                    tokens_input,
+                    tokens_output,
+                    tokens_total,
                 ),
             )
 
@@ -3309,6 +3420,36 @@ class TMemoryPlugin(Star):
                 "SELECT * FROM distill_history ORDER BY id DESC LIMIT ?", (limit,)
             ).fetchall()
         return [dict(r) for r in rows]
+
+    def _get_distill_cost_summary(self, last_n: int = 10) -> Dict:
+        """汇总最近 N 轮蒸馏的 token 消耗。
+
+        Returns dict with keys: runs, has_usage, tokens_input, tokens_output, tokens_total.
+        has_usage=False 时 tokens_* 无意义（provider 均未返回 usage）。
+        """
+        rows = self._get_distill_history(limit=last_n)
+        total_in = 0
+        total_out = 0
+        total_total = 0
+        has_usage = False
+        for r in rows:
+            ti = r.get("tokens_input", -1)
+            to_ = r.get("tokens_output", -1)
+            tt = r.get("tokens_total", -1)
+            if ti >= 0:
+                total_in += ti
+                has_usage = True
+            if to_ >= 0:
+                total_out += to_
+            if tt >= 0:
+                total_total += tt
+        return {
+            "runs": len(rows),
+            "has_usage": has_usage,
+            "tokens_input": total_in,
+            "tokens_output": total_out,
+            "tokens_total": total_total,
+        }
 
     # =========================================================================
     # 蒸馏输出校验器
