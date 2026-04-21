@@ -203,6 +203,24 @@
     "hint": "开启后停止后台自动蒸馏（手动蒸馏不受影响），用于成本控制或调试。",
     "default": false
   },
+  "capture_min_content_len": {
+    "type": "int",
+    "description": "采集最小有效字符数",
+    "hint": "去除标点/空白后有效字符数低于此值的消息跳过采集，避免纯感叹词/颜文字进入缓存。0=不启用。默认 5。",
+    "default": 5
+  },
+  "capture_dedup_window": {
+    "type": "int",
+    "description": "采集去重窗口",
+    "hint": "在同用户最近 N 条未蒸馏缓存中，若发现相同内容则跳过写入，抑制重复消息积累。0=不启用。默认 10。",
+    "default": 10
+  },
+  "distill_user_throttle_sec": {
+    "type": "int",
+    "description": "单用户蒸馏冷却时间（秒）",
+    "hint": "单用户完成一轮蒸馏后的最短冷却时间（秒）。冷却内即便积累了足够消息也不会再次蒸馏，防止高频用户垄断蒸馏资源。0=不启用。建议与 distill_interval_sec 相同。",
+    "default": 0
+  },
   "capture_skip_prefixes": {
     "type": "string",
     "description": "跳过采集的内容前缀",
