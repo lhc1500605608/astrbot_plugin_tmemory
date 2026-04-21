@@ -215,11 +215,14 @@ MEMORY_PLUGIN_BLUEPRINT.md
 
 # Skill Files
 .claude/
-.github/
+.github/*
+!.github/workflows/
+!.github/workflows/*.yml
+!.github/workflows/*.yaml
 .vscode/
 .idea/
 ao-output/
-workflows/
+/workflows/
 .ao-output/
 # Temporary & Ad-hoc debug scripts
 check.py

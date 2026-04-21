@@ -55,9 +55,17 @@ class FTSMemoryDB:
         return " ".join(tokens)
 
     def search_fts(self, query: str, canonical_user_id: str, limit: int = 10) -> List[Dict[str, Any]]:
-        query_tokens = list(jieba.cut_for_search(query))
-        fts_query = " AND ".join(query_tokens)
-        if not fts_query:
+        """FTS5 基础召回策略：先 AND 精确匹配，命中不足时回退到 OR 宽松匹配。
+
+        trade-off 说明：
+        - 纯 AND 策略：精度高但召回率低，多词查询极易返回空集（所有词必须共现）。
+          中文分词后的长短语（如"用户偏好使用Python"分成4+个词）几乎必然0命中。
+        - 纯 OR 策略：召回率高但精度低，噪声多。
+        - 本策略：优先 AND 保证精度；AND 命中 < max(2, limit//4) 时，
+          自动切换 OR 兜底，确保基础召回不为空，后续由 RRF 融合和评分纠偏。
+        """
+        query_tokens = [t for t in jieba.cut_for_search(query) if t.strip()]
+        if not query_tokens:
             return []
 
         sql = """
@@ -66,23 +74,45 @@ class FTSMemoryDB:
             WHERE memories_fts MATCH ? AND canonical_user_id = ?
             ORDER BY rank LIMIT ?
         """
-        params = [fts_query, canonical_user_id]
 
-        try:
-            cursor = self.conn.cursor()
-            cursor.execute(sql, params)
-            
-            results = []
-            for row in cursor.fetchall():
-                results.append({
-                    "id": row["rowid"],
-                    "score": abs(row["rank"]),
-                    "rank": row["rank"]
-                })
-            return results
-        except Exception as e:
-            logger.debug(f"[tmemory] fts query failed: {e}")
-            return []
+        def _run(fts_q: str) -> List[Dict[str, Any]]:
+            try:
+                cursor = self.conn.cursor()
+                cursor.execute(sql, [fts_q, canonical_user_id, limit])
+                rows = cursor.fetchall()
+                return [
+                    {"id": row["rowid"], "score": abs(row["rank"]), "rank": row["rank"]}
+                    for row in rows
+                ]
+            except Exception as e:
+                logger.debug(f"[tmemory] fts query failed: {e}")
+                return []
+
+        # 第一阶段：AND 精确匹配
+        and_query = " AND ".join(query_tokens)
+        and_results = _run(and_query)
+
+        # 命中充足时直接返回
+        fallback_threshold = max(2, limit // 4)
+        if len(and_results) >= fallback_threshold:
+            return and_results
+
+        # 第二阶段：OR 宽松召回兜底（去重后合并，AND 结果优先排在前面）
+        or_query = " OR ".join(query_tokens)
+        or_results = _run(or_query)
+
+        existing_ids = {r["id"] for r in and_results}
+        merged = list(and_results)
+        for r in or_results:
+            if r["id"] not in existing_ids:
+                merged.append(r)
+                existing_ids.add(r["id"])
+
+        logger.debug(
+            "[tmemory] fts fallback to OR: and_hits=%d or_hits=%d merged=%d tokens=%s",
+            len(and_results), len(or_results), len(merged), query_tokens[:6],
+        )
+        return merged[:limit]
 
 
 class RRFSearchFusion:

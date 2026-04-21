@@ -125,6 +125,17 @@ class TMemoryPlugin(Star):
         self._vec_hit_count = 0
         self._embed_semaphore = asyncio.Semaphore(4)
         self._http_session = None
+        # ── 蒸馏成本观测计数器 ────────────────────────────────────────────────
+        self._distill_llm_calls = 0          # 本进程生命周期累计蒸馏 LLM 调用次数
+        self._distill_tokens_input = 0       # 累计输入 token 数
+        self._distill_tokens_output = 0      # 累计输出 token 数
+        self._distill_llm_failures = 0       # 累计失败次数（回退到规则蒸馏）
+        # ── 每日软上限（按自然日重置）──────────────────────────────────────────
+        self._daily_reset_date: str = ""     # 上次重置的日期字符串 YYYY-MM-DD
+        self._daily_distill_calls = 0        # 当日已消耗 LLM 调用次数
+        self.distill_daily_limit = 0         # 每日全局 LLM 调用次数上限（0=不限）
+        self.distill_user_daily_limit = 0    # 每用户每日 LLM 调用次数上限（0=不限）
+        self._user_daily_calls: Dict[str, int] = {}  # {canonical_id: 当日调用次数}
 
     def _parse_config(self):
         """从 self.config 解析配置值，覆盖默认值。"""
@@ -175,6 +186,17 @@ class TMemoryPlugin(Star):
         )
         self.distill_batch_limit = max(
             20, int(self.config.get("distill_batch_limit", 80))
+        )
+
+        # ── 蒸馏成本软上限 ─────────────────────────────────────────────────────
+        # distill_daily_limit: 全局每日 LLM 蒸馏调用次数上限（0=不限）
+        # distill_user_daily_limit: 单用户每日 LLM 蒸馏调用次数上限（0=不限）
+        # 超限后当日跳过 LLM 蒸馏，回退到规则蒸馏，次日凌晨自动重置。
+        self.distill_daily_limit = max(
+            0, int(self.config.get("distill_daily_limit", 0))
+        )
+        self.distill_user_daily_limit = max(
+            0, int(self.config.get("distill_user_daily_limit", 0))
         )
         
         # ── 独立蒸馏模型配置 ───────────────────────────────────────────────────
@@ -691,6 +713,25 @@ class TMemoryPlugin(Star):
             f"pending_cached_rows: {stats['pending_cached_rows']}",
             f"total_events: {stats['total_events']}",
         ]
+        # ── 蒸馏成本观测 ─────────────────────────────────────────────────────
+        fail_rate = (
+            f"{self._distill_llm_failures / max(1, self._distill_llm_calls + self._distill_llm_failures) * 100:.1f}%"
+            if (self._distill_llm_calls + self._distill_llm_failures) > 0
+            else "N/A"
+        )
+        lines.append(
+            f"distill_llm_calls(lifetime): {self._distill_llm_calls} "
+            f"(fail_rate={fail_rate})"
+        )
+        lines.append(
+            f"distill_tokens(lifetime): in={self._distill_tokens_input} "
+            f"out={self._distill_tokens_output} "
+            f"total={self._distill_tokens_input + self._distill_tokens_output}"
+        )
+        daily_limit_str = str(self.distill_daily_limit) if self.distill_daily_limit > 0 else "∞"
+        lines.append(
+            f"distill_daily: {self._daily_distill_calls}/{daily_limit_str} calls today"
+        )
         if self._vec_available:
             lines.append(f"vector_index_rows: {stats.get('vector_index_rows', 0)}")
             lines.append(
@@ -1004,6 +1045,11 @@ class TMemoryPlugin(Star):
         """执行一轮蒸馏，记录历史，单用户失败不中断整轮。"""
         started_at = self._now()
         t0 = time.time()
+        # 快照：记录本轮开始前的累计指标，用于计算增量
+        _calls_before = self._distill_llm_calls
+        _tokens_in_before = self._distill_tokens_input
+        _tokens_out_before = self._distill_tokens_output
+        _failures_before = self._distill_llm_failures
         min_required = 1 if force else self.distill_min_batch_count
         pending_users = self._pending_distill_users(
             limit=(100 if force else 20), min_batch_count=min_required
@@ -1019,7 +1065,7 @@ class TMemoryPlugin(Star):
                 if (not force) and len(rows) < self.distill_min_batch_count:
                     continue
 
-                llm_items = await self._distill_rows_with_llm(rows)
+                llm_items = await self._distill_rows_with_llm(rows, canonical_id=canonical_id)
                 if not llm_items:
                     self._mark_rows_distilled([int(r["id"]) for r in rows])
                     continue
@@ -1060,8 +1106,12 @@ class TMemoryPlugin(Star):
                     "[tmemory] distill failed for user %s: %s", canonical_id, e
                 )
 
-        # 记录蒸馏历史
+        # 记录蒸馏历史（捕捉本轮 token 增量）
         duration = round(time.time() - t0, 2)
+        cycle_llm_calls = self._distill_llm_calls - _calls_before
+        cycle_tokens_in = self._distill_tokens_input - _tokens_in_before
+        cycle_tokens_out = self._distill_tokens_output - _tokens_out_before
+        cycle_failures = self._distill_llm_failures - _failures_before
         self._record_distill_history(
             started_at=started_at,
             trigger=trigger,
@@ -1070,6 +1120,16 @@ class TMemoryPlugin(Star):
             users_failed=failed_users,
             errors=errors,
             duration=duration,
+            llm_calls=cycle_llm_calls,
+            tokens_input=cycle_tokens_in,
+            tokens_output=cycle_tokens_out,
+            llm_failures=cycle_failures,
+        )
+        logger.info(
+            "[tmemory] distill cycle stats: users=%d memories=%d llm_calls=%d "
+            "tokens_in=%d tokens_out=%d failures=%d duration=%.1fs",
+            processed_users, total_memories, cycle_llm_calls,
+            cycle_tokens_in, cycle_tokens_out, cycle_failures, duration,
         )
 
         # 顺便执行记忆衰减
@@ -1081,8 +1141,13 @@ class TMemoryPlugin(Star):
     # LLM 蒸馏
     # =========================================================================
 
-    async def _distill_rows_with_llm(self, rows: List[Dict]) -> List[Dict[str, object]]:
-        """用 LLM 对一批对话行进行结构化蒸馏，失败时回退到规则蒸馏。"""
+    async def _distill_rows_with_llm(
+        self, rows: List[Dict], canonical_id: str = ""
+    ) -> List[Dict[str, object]]:
+        """用 LLM 对一批对话行进行结构化蒸馏，失败时回退到规则蒸馏。
+
+        同时记录 token 用量和失败率。若超出每日软上限，直接回退规则蒸馏。
+        """
         transcript_lines = []
         for row in rows:
             role = str(row["role"])
@@ -1106,6 +1171,39 @@ class TMemoryPlugin(Star):
                 }
             ]
 
+        # ── 每日软上限检查 ────────────────────────────────────────────────────
+        self._maybe_reset_daily_counters()
+        if self.distill_daily_limit > 0 and self._daily_distill_calls >= self.distill_daily_limit:
+            logger.info(
+                "[tmemory] distill daily limit reached (%d/%d), falling back to rule distill",
+                self._daily_distill_calls, self.distill_daily_limit,
+            )
+            return [
+                {
+                    "memory": self._distill_text(transcript),
+                    "memory_type": "fact",
+                    "importance": 0.55,
+                    "confidence": 0.50,
+                    "score": 0.55,
+                }
+            ]
+        if canonical_id and self.distill_user_daily_limit > 0:
+            user_calls = self._user_daily_calls.get(canonical_id, 0)
+            if user_calls >= self.distill_user_daily_limit:
+                logger.info(
+                    "[tmemory] user distill daily limit reached user=%s (%d/%d), fallback rule",
+                    canonical_id, user_calls, self.distill_user_daily_limit,
+                )
+                return [
+                    {
+                        "memory": self._distill_text(transcript),
+                        "memory_type": "fact",
+                        "importance": 0.55,
+                        "confidence": 0.50,
+                        "score": 0.55,
+                    }
+                ]
+
         try:
             llm_generate_kwargs = {
                 "chat_provider_id": chat_provider_id,
@@ -1113,8 +1211,33 @@ class TMemoryPlugin(Star):
             }
             if chat_model_id:
                 llm_generate_kwargs["model_id"] = chat_model_id
-                
+
             llm_resp = await self.context.llm_generate(**llm_generate_kwargs)
+
+            # ── token 用量采集 ─────────────────────────────────────────────────
+            self._distill_llm_calls += 1
+            self._daily_distill_calls += 1
+            if canonical_id:
+                self._user_daily_calls[canonical_id] = (
+                    self._user_daily_calls.get(canonical_id, 0) + 1
+                )
+            usage = getattr(llm_resp, "usage", None)
+            if usage is not None:
+                try:
+                    self._distill_tokens_input += int(getattr(usage, "input", 0))
+                    self._distill_tokens_output += int(getattr(usage, "output", 0))
+                except Exception:
+                    pass
+            logger.debug(
+                "[tmemory] distill llm call #%d user=%s tokens_in=%d tokens_out=%d daily=%d/%d",
+                self._distill_llm_calls,
+                canonical_id or "?",
+                int(getattr(usage, "input", 0)) if usage else 0,
+                int(getattr(usage, "output", 0)) if usage else 0,
+                self._daily_distill_calls,
+                self.distill_daily_limit or 0,
+            )
+
             completion_text = self._normalize_text(
                 getattr(llm_resp, "completion_text", "") or ""
             )
@@ -1124,6 +1247,7 @@ class TMemoryPlugin(Star):
             if parsed:
                 return parsed
         except Exception as e:
+            self._distill_llm_failures += 1
             logger.warning("[tmemory] llm distill failed, fallback to rule: %s", e)
 
         return [
@@ -1539,7 +1663,11 @@ class TMemoryPlugin(Star):
                     memories_created INTEGER NOT NULL DEFAULT 0,
                     users_failed INTEGER NOT NULL DEFAULT 0,
                     errors TEXT NOT NULL DEFAULT '',
-                    duration_sec REAL NOT NULL DEFAULT 0
+                    duration_sec REAL NOT NULL DEFAULT 0,
+                    llm_calls INTEGER NOT NULL DEFAULT 0,
+                    tokens_input INTEGER NOT NULL DEFAULT 0,
+                    tokens_output INTEGER NOT NULL DEFAULT 0,
+                    llm_failures INTEGER NOT NULL DEFAULT 0
                 )
                 """
             )
@@ -1591,6 +1719,16 @@ class TMemoryPlugin(Star):
                 "persona_id": "TEXT NOT NULL DEFAULT ''",
             },
         )
+        # 为 distill_history 补充成本观测字段（向前兼容旧数据库）
+        self._ensure_columns(
+            "distill_history",
+            {
+                "llm_calls": "INTEGER NOT NULL DEFAULT 0",
+                "tokens_input": "INTEGER NOT NULL DEFAULT 0",
+                "tokens_output": "INTEGER NOT NULL DEFAULT 0",
+                "llm_failures": "INTEGER NOT NULL DEFAULT 0",
+            },
+        )
 
         with self._db() as conn:
             conn.execute(
@@ -1619,11 +1757,15 @@ class TMemoryPlugin(Star):
                     memories_created INTEGER NOT NULL DEFAULT 0,
                     users_failed INTEGER NOT NULL DEFAULT 0,
                     errors TEXT NOT NULL DEFAULT '',
-                    duration_sec REAL NOT NULL DEFAULT 0
+                    duration_sec REAL NOT NULL DEFAULT 0,
+                    llm_calls INTEGER NOT NULL DEFAULT 0,
+                    tokens_input INTEGER NOT NULL DEFAULT 0,
+                    tokens_output INTEGER NOT NULL DEFAULT 0,
+                    llm_failures INTEGER NOT NULL DEFAULT 0
                 )
                 """
             )
-            
+
             # 初始化 FTS5 表和触发器 (保证 migration 也会建表)
             self._migrate_fts5_to_content_sync(conn)
             conn.execute(
@@ -3282,14 +3424,19 @@ class TMemoryPlugin(Star):
         users_failed: int,
         errors: list,
         duration: float,
+        llm_calls: int = 0,
+        tokens_input: int = 0,
+        tokens_output: int = 0,
+        llm_failures: int = 0,
     ):
         with self._db() as conn:
             conn.execute(
                 """
                 INSERT INTO distill_history(
                     started_at, finished_at, trigger_type, users_processed,
-                    memories_created, users_failed, errors, duration_sec
-                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?)
+                    memories_created, users_failed, errors, duration_sec,
+                    llm_calls, tokens_input, tokens_output, llm_failures
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     started_at,
@@ -3300,6 +3447,10 @@ class TMemoryPlugin(Star):
                     users_failed,
                     json.dumps(errors, ensure_ascii=False),
                     duration,
+                    llm_calls,
+                    tokens_input,
+                    tokens_output,
+                    llm_failures,
                 ),
             )
 
@@ -3309,6 +3460,18 @@ class TMemoryPlugin(Star):
                 "SELECT * FROM distill_history ORDER BY id DESC LIMIT ?", (limit,)
             ).fetchall()
         return [dict(r) for r in rows]
+
+    def _maybe_reset_daily_counters(self) -> None:
+        """若自然日已切换，重置每日蒸馏调用计数器。
+
+        设计：只在实际调用 LLM 之前检查，不依赖定时任务，零额外线程开销。
+        """
+        today = time.strftime("%Y-%m-%d")
+        if self._daily_reset_date != today:
+            self._daily_reset_date = today
+            self._daily_distill_calls = 0
+            self._user_daily_calls = {}
+            logger.debug("[tmemory] daily distill counters reset for %s", today)
 
     # =========================================================================
     # 蒸馏输出校验器
