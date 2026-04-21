@@ -3806,17 +3806,20 @@ class TMemoryPlugin(Star):
     def _is_low_info_content(self, text: str) -> bool:
         """判断文本是否为低信息量内容（适合在 capture 层跳过）。
 
-        条件（满足任一即为低信息量）：
-        - 有效字符数低于 capture_min_content_len（配置项，默认 5）
-        - 去除噪声词后无实义词（纯感叹/颜文字/口头禅）
+        判断逻辑（防误伤优先）：
+        1. 先提取实义词（≥2 字符、非噪声词、非颜文字）。
+        2. 若有实义词 → 不是低信息量，直接返回 False（保留关键短消息）。
+           这确保 restriction / task / preference 类短消息（如"不吃香菜"、
+           "明天开会"、"不要辣"）即使字符数低于 capture_min_content_len 也
+           不会被误删。
+        3. 若没有实义词，再看有效字符总数：低于 capture_min_content_len 则
+           视为低信息量（纯感叹词/口头禅/颜文字场景兜底）。
+
+        注：capture_min_content_len ≤ 0 时整个门控关闭，直接返回 False。
         """
         if self.capture_min_content_len <= 0:
             return False
-        # 去除标点/空白后的有效字符长度
-        stripped = re.sub(r"[\s\W]+", "", text, flags=re.UNICODE)
-        if len(stripped) < self.capture_min_content_len:
-            return True
-        # 检查去除噪声词后是否还有实义词（≥2 字符的非噪声词）
+        # 步骤 1：计算实义词（≥2 字符、非噪声词、非颜文字）
         words = [
             w
             for w in re.split(r"[^\w\u4e00-\u9fff]+", text)
@@ -3824,7 +3827,12 @@ class TMemoryPlugin(Star):
             and w.lower() not in self._NOISE_WORDS
             and not self._JUNK_WORD_RE.match(w)
         ]
-        return len(words) == 0
+        # 步骤 2：有实义词 → 保留（防止关键短消息被误伤）
+        if words:
+            return False
+        # 步骤 3：无实义词时，再用字符长度兜底
+        stripped = re.sub(r"[\s\W]+", "", text, flags=re.UNICODE)
+        return len(stripped) < self.capture_min_content_len
 
     def _should_skip_capture(self, text: str) -> bool:
         """四层过滤器:判断消息是否应跳过采集。
@@ -3882,11 +3890,10 @@ class TMemoryPlugin(Star):
             "呀",
             "哇",
             "唉",
-            # 常见口头禅 / 感叹词
+            # 常见口头禅 / 感叹词（二字）
             "哈哈",
             "嗯嗯",
             "哦哦",
-            "哈哈哈",
             "呵呵",
             "嘿嘿",
             "嗯呐",
@@ -3896,12 +3903,41 @@ class TMemoryPlugin(Star):
             "好嘞",
             "嗯哦",
             "啊啊",
+            "好耶",
+            "收到",
+            "明白",
+            "懂了",
+            "知道",
+            # 常见口头禅 / 感叹词（三字及以上）
+            "哈哈哈",
+            "嗯嗯嗯",
+            "哦哦哦",
+            "呵呵呵",
+            "哈哈哈哈",
+            "好的好的",
+            "收到啦",
+            "好的呀",
+            "好耶呀",
+            "收到了",
+            "明白了",
+            "懂了哦",
+            "知道了",
+            "好嘞嘞",
+            "好吧好吧",
+            "嗯嗯嗯嗯",
             # 英文口头禅
             "ok",
             "okay",
             "lol",
             "hhh",
             "haha",
+            "okok",
+            "okk",
+            "yep",
+            "yup",
+            "nope",
+            "sure",
+            "roger",
             # 对话角色前缀词(被 _TRANSCRIPT_PREFIX_RE 剥离后仍可能残留)
             "user",
             "assistant",
