@@ -55,7 +55,7 @@ class FTSMemoryDB:
         return " ".join(tokens)
 
     def search_fts(self, query: str, canonical_user_id: str, limit: int = 10) -> List[Dict[str, Any]]:
-        query_tokens = list(jieba.cut_for_search(query))
+        query_tokens = [token.strip() for token in jieba.cut_for_search(query) if token.strip()]
         fts_query = " AND ".join(query_tokens)
         if not fts_query:
             return []
@@ -66,7 +66,7 @@ class FTSMemoryDB:
             WHERE memories_fts MATCH ? AND canonical_user_id = ?
             ORDER BY rank LIMIT ?
         """
-        params = [fts_query, canonical_user_id]
+        params = [fts_query, canonical_user_id, limit]
 
         try:
             cursor = self.conn.cursor()

@@ -1,0 +1,129 @@
+{
+  "sample_name": "distill-efficiency-baseline",
+  "limitations": [
+    "这是离线轻量基线，只验证当前门控与去重是否减少无效蒸馏，不代表真实线上吞吐或端到端时延。",
+    "样本规模很小，场景由人工构造，主要用于优化前后回归对比，而不是得出普适性能结论。",
+    "结果没有接入真实外部模型服务，因此不能说明不同模型、网络抖动或 provider 限速下的真实成本。"
+  ],
+  "cases": [
+    {
+      "scenario": "high_frequency_short_messages",
+      "description": "高频短消息：全部进入缓存，但在蒸馏前被低信息量过滤。",
+      "capture_dedup_window": 0,
+      "messages": [
+        {"role": "user", "content": "哈哈哈"},
+        {"role": "user", "content": "收到啦"},
+        {"role": "user", "content": "嗯嗯嗯"},
+        {"role": "user", "content": "好的呀"},
+        {"role": "user", "content": "okok"},
+        {"role": "user", "content": "好耶呀"}
+      ],
+      "llm_response": []
+    },
+    {
+      "scenario": "repeated_low_value_messages",
+      "description": "重复低价值消息：capture 去重先拦掉重复，剩余候选在蒸馏前继续过滤。",
+      "capture_dedup_window": 2,
+      "messages": [
+        {"role": "user", "content": "哈哈哈"},
+        {"role": "user", "content": "收到啦"},
+        {"role": "user", "content": "哈哈哈"},
+        {"role": "user", "content": "收到啦"},
+        {"role": "user", "content": "哈哈哈"},
+        {"role": "user", "content": "收到啦"}
+      ],
+      "llm_response": []
+    },
+    {
+      "scenario": "hot_user_burst_then_high_value_fact",
+      "description": "热点用户突发短消息后补充关键事实：高频噪声应被过滤，但稳定事实需要被保留。",
+      "capture_dedup_window": 0,
+      "messages": [
+        {"role": "user", "content": "哈哈哈"},
+        {"role": "user", "content": "收到啦"},
+        {"role": "user", "content": "嗯嗯嗯"},
+        {"role": "user", "content": "okok"},
+        {"role": "user", "content": "我下周开始要控制糖分摄入，早餐改成无糖酸奶。"},
+        {"role": "assistant", "content": "收到，我后面会按控糖饮食来考虑建议。"},
+        {"role": "user", "content": "帮我记一下这个习惯。"}
+      ],
+      "llm_response": [
+        {
+          "memory": "用户下周开始需要控制糖分摄入，早餐改成无糖酸奶。",
+          "memory_type": "fact",
+          "importance": 0.84,
+          "confidence": 0.9,
+          "score": 0.88
+        }
+      ]
+    },
+    {
+      "scenario": "long_session_mixed_signal_preserves_key_memories",
+      "description": "长会话夹杂低价值消息与关键信息：噪声应被过滤，但关键偏好与例行安排需要稳定保留。",
+      "capture_dedup_window": 4,
+      "messages": [
+        {"role": "user", "content": "今天先随便聊聊。"},
+        {"role": "user", "content": "哈哈哈"},
+        {"role": "assistant", "content": "好，我们慢慢来。"},
+        {"role": "user", "content": "我每周二晚上都会和产品团队做复盘。"},
+        {"role": "user", "content": "好的呀"},
+        {"role": "user", "content": "如果后面给我建议，先列风险，再给执行建议。"},
+        {"role": "assistant", "content": "明白，后续我会先说风险，再给建议。"},
+        {"role": "user", "content": "嗯嗯嗯"},
+        {"role": "user", "content": "我每周二晚上都会和产品团队做复盘。"},
+        {"role": "user", "content": "哈哈哈"},
+        {"role": "user", "content": "如果后面给我建议，先列风险，再给执行建议。"},
+        {"role": "user", "content": "收到啦"},
+        {"role": "assistant", "content": "收到。"},
+        {"role": "user", "content": "这个偏好你可以长期记住。"}
+      ],
+      "llm_response": [
+        {
+          "memory": "用户每周二晚上会和产品团队做复盘。",
+          "memory_type": "fact",
+          "importance": 0.8,
+          "confidence": 0.86,
+          "score": 0.84
+        },
+        {
+          "memory": "用户希望答复先列风险，再给执行建议。",
+          "memory_type": "style",
+          "importance": 0.9,
+          "confidence": 0.92,
+          "score": 0.91
+        }
+      ]
+    },
+    {
+      "scenario": "normal_effective_dialogue",
+      "description": "正常有效对话：仍允许有效上下文进入蒸馏，并产出稳定记忆。",
+      "capture_dedup_window": 6,
+      "messages": [
+        {"role": "user", "content": "我每周三晚上都会去游泳训练。"},
+        {"role": "user", "content": "我希望你回答问题时先给结论，再展开细节。"},
+        {"role": "user", "content": "好的呀"},
+        {"role": "user", "content": "哈哈哈"},
+        {"role": "user", "content": "我每周三晚上都会去游泳训练。"},
+        {"role": "user", "content": "我希望你回答问题时先给结论，再展开细节。"},
+        {"role": "user", "content": "我最近在准备铁三比赛。"},
+        {"role": "user", "content": "我早餐通常喝黑咖啡，不加糖。"}
+      ],
+      "llm_response": [
+        {
+          "memory": "用户每周三晚上会去游泳训练，并在准备铁三比赛。",
+          "memory_type": "fact",
+          "importance": 0.82,
+          "confidence": 0.84,
+          "score": 0.86
+        },
+        {
+          "memory": "用户希望回答先给结论，再展开细节。",
+          "memory_type": "style",
+          "importance": 0.88,
+          "confidence": 0.9,
+          "score": 0.89
+        }
+      ]
+    }
+  ]
+}
