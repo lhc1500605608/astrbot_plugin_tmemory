@@ -1,0 +1,36 @@
+{
+  "sample_name": "fts-baseline",
+  "description": "Small, human-maintainable offline retrieval evaluation set for current FTS-first baseline.",
+  "top_k": 3,
+  "cases": [
+    {
+      "query": "黑 咖啡",
+      "memory": "用户喜欢黑咖啡，不加糖。",
+      "memory_type": "preference",
+      "notes": "词面召回基线，按当前分词结果检查偏好类记忆是否能被 FTS 命中。"
+    },
+    {
+      "query": "周三 游泳",
+      "memory": "用户周三晚上固定去游泳训练。",
+      "memory_type": "fact",
+      "notes": "事实类记忆，检查时间信息是否被稳定召回。"
+    },
+    {
+      "query": "结论 细节",
+      "memory": "开会时希望助手先给结论，再展开细节。",
+      "memory_type": "style",
+      "notes": "风格偏好类记忆，检查当前分词下的词面命中。"
+    },
+    {
+      "query": "西班牙语 口语",
+      "memory": "用户正在自学西班牙语口语。",
+      "memory_type": "fact",
+      "notes": "知识学习相关事实，检查词面召回。"
+    }
+  ],
+  "limitations": [
+    "样本量很小，只适合作为回归对照，不代表真实线上流量。",
+    "当前样本偏中文短句和单跳查询，不能说明复杂多意图查询的效果。",
+    "第一版基线不依赖外部 embedding 服务，因此不能代表真实向量召回质量。"
+  ]
+}
