@@ -144,11 +144,6 @@ class TMemoryPlugin(Star):
         merged = dict(vector_cfg)
         legacy_keys = (
             "enable_vector_search",
-            "vector_backend",
-            "qdrant_url",
-            "qdrant_api_key",
-            "qdrant_collection",
-            "fallback_to_sqlite_vec",
             "embedding_provider",
             "embedding_api_key",
             "embedding_model",
@@ -2675,8 +2670,8 @@ class TMemoryPlugin(Star):
                 top_k=80
             )
             
-            # 如果没有查询，则回退到按时间/重要性获取最近的 active 记忆
-            if not query:
+            # 如果没有查询，或者查询有词但 FTS+向量均未命中，则回退到按时间/重要性获取最近的 active 记忆
+            if not query or not fused_results:
                 rows = conn.execute(
                     f"""
                     SELECT id, memory_type, memory, score, importance, confidence, reinforce_count,
@@ -2693,9 +2688,6 @@ class TMemoryPlugin(Star):
                 rrf_scores = {}
             else:
                 # 基于 fused_results 查询有效记忆
-                if not fused_results:
-                    return []
-                
                 # 记录RRF分数
                 rrf_scores = {item["id"]: item["rrf_score"] for item in fused_results}
                 
