@@ -85,10 +85,7 @@ class TMemoryPlugin(Star):
         self.purify_interval_days = 0
         self.purify_model_id = ""
         self.purify_min_score = 0.0
-        self.refine_quality_interval_days = 0
-        self.refine_quality_model_id = ""
-        self.refine_quality_min_score = 0.0
-        # ── 向量检索管理器(新增)────────────────────────────────────
+        # ── 向量检索管理器 ──────────────────────────────────────────
         self._vector_manager: Optional["VectorManager"] = None
         self.embed_provider_id = ""
         self.embed_model_id = ""
@@ -137,6 +134,32 @@ class TMemoryPlugin(Star):
         self._distill_skipped_rows: int = 0
         # 内存缓存：per-user 最近蒸馏完成时间戳（用于节流）
         self._user_last_distilled_ts: Dict[str, float] = {}
+
+    def _get_vector_retrieval_config(self) -> Dict:
+        """兼容旧平铺配置和新嵌套配置的向量检索配置读取。"""
+        vector_cfg = self.config.get("vector_retrieval", {})
+        if not isinstance(vector_cfg, dict):
+            vector_cfg = {}
+
+        merged = dict(vector_cfg)
+        legacy_keys = (
+            "enable_vector_search",
+            "vector_backend",
+            "qdrant_url",
+            "qdrant_api_key",
+            "qdrant_collection",
+            "fallback_to_sqlite_vec",
+            "embedding_provider",
+            "embedding_api_key",
+            "embedding_model",
+            "embedding_base_url",
+            "vector_dim",
+            "auto_rebuild_on_dim_change",
+        )
+        for key in legacy_keys:
+            if key not in merged and key in self.config:
+                merged[key] = self.config.get(key)
+        return merged
 
     def _parse_config(self):
         """从 self.config 解析配置值，覆盖默认值。"""
@@ -274,23 +297,16 @@ class TMemoryPlugin(Star):
                 ),
             ),
         )
-        # 兼容旧属性名
-        self.refine_quality_interval_days = self.purify_interval_days
-        self.refine_quality_model_id = self.purify_model_id
-        self.refine_quality_min_score = self.purify_min_score
-
-        # ── 向量检索(由 VectorManager 统一管理)──────────────────────────────
+        # ── 向量检索 ─────────────────────────────────────────────────────────
         # 从 vector_retrieval 子配置读取
-        vr = self.config.get("vector_retrieval", {})
+        vr = self._get_vector_retrieval_config()
         self.enable_vector_search = bool(vr.get("enable_vector_search", False))
-        
-        # 保留旧的属性用于兼容性(已被 VectorManager 取代)
         self.embed_provider_id = str(vr.get("embedding_provider", "")).strip()
         self.embed_model_id = str(vr.get("embedding_model", "")).strip()
         self.embed_model = self.embed_model_id
-        self.embed_dim = max(64, int(vr.get("vector_dim", 2048)))  # 默认维度改为2048
-        self.vector_weight = 0.4  # 固定值，由 VectorManager 管理
-        self.min_vector_sim = 0.15  # 固定值，由 VectorManager 管理
+        self.embed_dim = max(64, int(vr.get("vector_dim", 2048)))
+        self.vector_weight = 0.4
+        self.min_vector_sim = 0.15
         self._sqlite_vec = None
         self._vec_available = False
 
@@ -344,7 +360,7 @@ class TMemoryPlugin(Star):
         self._sanitize_patterns = self._build_sanitize_patterns()
 
         # ── Embedding API 配置(从 vector_retrieval 子配置读取)────────────────
-        vr = self.config.get("vector_retrieval", {})
+        vr = self._get_vector_retrieval_config()
         self.embed_base_url = str(vr.get("embedding_base_url", "")).strip()
         self.embed_api_key = str(vr.get("embedding_api_key", "")).strip()
 
@@ -414,7 +430,7 @@ class TMemoryPlugin(Star):
         if self.enable_vector_search:
             try:
                 from .vector_manager import VectorManager
-                vr = self.config.get("vector_retrieval", {})
+                vr = self._get_vector_retrieval_config()
                 self._vector_manager = VectorManager(self.db_path, vr)
                 await self._vector_manager.initialize()
                 logger.info("[tmemory] VectorManager initialized")

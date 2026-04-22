@@ -226,6 +226,132 @@ async def test_terminate_cancels_background_task_and_closes_resources(plugin):
     assert plugin._conn is None
 
 
+@pytest.mark.asyncio
+async def test_initialize_passes_normalized_vector_config_to_manager(plugin_module, tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+
+    captured = {}
+
+    class DummyVectorManager:
+        def __init__(self, db_path, config):
+            captured["db_path"] = db_path
+            captured["config"] = dict(config)
+
+        async def initialize(self):
+            captured["initialized"] = True
+
+        async def close(self):
+            captured["closed"] = True
+
+    import sys
+    import types
+
+    fake_module = types.ModuleType("astrbot_plugin_tmemory.vector_manager")
+    fake_module.VectorManager = DummyVectorManager
+    sys.modules["astrbot_plugin_tmemory.vector_manager"] = fake_module
+
+    plugin = plugin_module.TMemoryPlugin(
+        context=None,
+        config={
+            "enable_vector_search": True,
+            "embedding_provider": "openai",
+            "embedding_api_key": "test-key",
+            "embedding_model": "text-embedding-3-small",
+            "vector_dim": 768,
+        },
+    )
+
+    await plugin.initialize()
+    await plugin.terminate()
+
+    assert captured["initialized"] is True
+    assert captured["closed"] is True
+    assert captured["config"]["enable_vector_search"] is True
+    assert captured["config"]["embedding_provider"] == "openai"
+    assert captured["config"]["embedding_api_key"] == "test-key"
+    assert captured["config"]["embedding_model"] == "text-embedding-3-small"
+    assert captured["config"]["vector_dim"] == 768
+
+
+def test_parse_config_supports_nested_and_legacy_distill_settings(plugin_module, tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+
+    nested = plugin_module.TMemoryPlugin(
+        context=None,
+        config={
+            "distill_model_settings": {
+                "use_independent_distill_model": True,
+                "distill_provider_id": "provider-a",
+                "distill_model_id": "model-a",
+                "purify_provider_id": "provider-b",
+                "purify_model_id": "model-b",
+            }
+        },
+    )
+
+    assert nested.use_independent_distill_model is True
+    assert nested.distill_provider_id == "provider-a"
+    assert nested.distill_model_id == "model-a"
+    assert nested.purify_provider_id == "provider-b"
+    assert nested.purify_model_id == "model-b"
+
+    legacy = plugin_module.TMemoryPlugin(
+        context=None,
+        config={
+            "distill_provider_id": "legacy-provider",
+            "distill_model_id": "legacy-model",
+            "purify_provider_id": "legacy-purify-provider",
+            "purify_model_id": "legacy-purify-model",
+        },
+    )
+
+    assert legacy.distill_provider_id == "legacy-provider"
+    assert legacy.distill_model_id == "legacy-model"
+    assert legacy.purify_provider_id == "legacy-purify-provider"
+    assert legacy.purify_model_id == "legacy-purify-model"
+
+
+def test_safe_load_web_server_merges_nested_webui_settings(plugin_module, tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+
+    captured = {}
+
+    class DummyWebServer:
+        def __init__(self, plugin, config):
+            captured["plugin"] = plugin
+            captured["config"] = dict(config)
+
+        async def start(self):
+            pass
+
+        async def stop(self):
+            pass
+
+    monkeypatch.setattr(
+        plugin_module.TMemoryPlugin,
+        "_load_web_server_class",
+        lambda self: DummyWebServer,
+    )
+
+    plugin = plugin_module.TMemoryPlugin(
+        context=None,
+        config={
+            "webui_enabled": False,
+            "webui_password": "legacy-secret",
+            "webui_settings": {
+                "webui_enabled": True,
+                "webui_password": "nested-secret",
+                "webui_port": 9001,
+            },
+        },
+    )
+
+    assert captured["plugin"] is plugin
+    assert captured["config"]["webui_enabled"] is True
+    assert captured["config"]["webui_password"] == "nested-secret"
+    assert captured["config"]["webui_port"] == 9001
+
+
 # =============================================================================
 # 新增：触发门控与批处理效率优化测试 (TMEAAA-35)
 # =============================================================================
