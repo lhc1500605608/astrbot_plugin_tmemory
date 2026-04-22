@@ -161,11 +161,34 @@ class TMemoryPlugin(Star):
                 merged[key] = self.config.get(key)
         return merged
 
+    @staticmethod
+    def _safe_int(value, default: int, *, label: str = "") -> int:
+        """类型安全的 int 转换；转换失败时记录 warning 并返回默认值。"""
+        try:
+            return int(value)
+        except (TypeError, ValueError) as _e:
+            if label:
+                logger.warning("[tmemory] config %s invalid (%r), using default %s: %s", label, value, default, _e)
+            return default
+
+    @staticmethod
+    def _safe_float(value, default: float, *, label: str = "") -> float:
+        """类型安全的 float 转换；转换失败时记录 warning 并返回默认值。"""
+        try:
+            return float(value)
+        except (TypeError, ValueError) as _e:
+            if label:
+                logger.warning("[tmemory] config %s invalid (%r), using default %s: %s", label, value, default, _e)
+            return default
+
     def _parse_config(self):
-        """从 self.config 解析配置值，覆盖默认值。"""
+        """从 self.config 解析配置值，覆盖默认值。
+
+        每个配置项独立转换，单项失败不影响其他项解析。
+        """
         # ── 基础配置 ──────────────────────────────────────────────────────────
-        self.cache_max_rows = int(self.config.get("cache_max_rows", 20))
-        self.memory_max_chars = int(self.config.get("memory_max_chars", 220))
+        self.cache_max_rows = self._safe_int(self.config.get("cache_max_rows", 20), 20, label="cache_max_rows")
+        self.memory_max_chars = self._safe_int(self.config.get("memory_max_chars", 220), 220, label="memory_max_chars")
 
         # ── 自动采集 ──────────────────────────────────────────────────────────
         self.enable_auto_capture = bool(self.config.get("enable_auto_capture", True))
@@ -203,13 +226,13 @@ class TMemoryPlugin(Star):
         # 只有积累了 distill_min_batch_count 条未蒸馏消息的用户才会被蒸馏，
         # 从而避免实时蒸馏造成的 token 浪费。
         self.distill_interval_sec = max(
-            4 * 3600, int(self.config.get("distill_interval_sec", 17280))
+            4 * 3600, self._safe_int(self.config.get("distill_interval_sec", 17280), 17280, label="distill_interval_sec")
         )
         self.distill_min_batch_count = max(
-            8, int(self.config.get("distill_min_batch_count", 20))
+            8, self._safe_int(self.config.get("distill_min_batch_count", 20), 20, label="distill_min_batch_count")
         )
         self.distill_batch_limit = max(
-            20, int(self.config.get("distill_batch_limit", 80))
+            20, self._safe_int(self.config.get("distill_batch_limit", 80), 80, label="distill_batch_limit")
         )
         
         # ── 独立蒸馏模型配置 ───────────────────────────────────────────────────
@@ -247,11 +270,13 @@ class TMemoryPlugin(Star):
             1,
             min(
                 200,
-                int(
+                self._safe_int(
                     self.config.get(
                         "manual_purify_default_limit",
                         self.config.get("manual_refine_default_limit", 20),
-                    )
+                    ),
+                    20,
+                    label="manual_purify_default_limit",
                 ),
             ),
         )
@@ -269,11 +294,13 @@ class TMemoryPlugin(Star):
         # purify_min_score: 综合分低于此值的记忆被失活(0=不限)
         self.purify_interval_days = max(
             0,
-            int(
+            self._safe_int(
                 self.config.get(
                     "purify_interval_days",
                     self.config.get("refine_quality_interval_days", 0),
-                )
+                ),
+                0,
+                label="purify_interval_days",
             ),
         )
         if not self.purify_model_id:
@@ -289,11 +316,13 @@ class TMemoryPlugin(Star):
             0.0,
             min(
                 1.0,
-                float(
+                self._safe_float(
                     self.config.get(
                         "purify_min_score",
                         self.config.get("refine_quality_min_score", 0.0),
-                    )
+                    ),
+                    0.0,
+                    label="purify_min_score",
                 ),
             ),
         )
@@ -304,7 +333,7 @@ class TMemoryPlugin(Star):
         self.embed_provider_id = str(vr.get("embedding_provider", "")).strip()
         self.embed_model_id = str(vr.get("embedding_model", "")).strip()
         self.embed_model = self.embed_model_id
-        self.embed_dim = max(64, int(vr.get("vector_dim", 2048)))
+        self.embed_dim = max(64, self._safe_int(vr.get("vector_dim", 2048), 2048, label="vector_dim"))
         self.vector_weight = 0.4
         self.min_vector_sim = 0.15
         self._sqlite_vec = None
@@ -318,7 +347,7 @@ class TMemoryPlugin(Star):
         ).strip()
         # 兼容旧属性名
         self.rerank_model = self.rerank_model_id
-        self.rerank_top_n = max(1, int(self.config.get("rerank_top_n", 5)))
+        self.rerank_top_n = max(1, self._safe_int(self.config.get("rerank_top_n", 5), 5, label="rerank_top_n"))
 
         # ── 用户/人格隔离 ─────────────────────────────────────────────────────
         # memory_scope 可选值:
@@ -353,8 +382,8 @@ class TMemoryPlugin(Star):
         self.inject_slot_marker = str(
             self.config.get("inject_slot_marker", "{{tmemory}}")
         ).strip()
-        self.inject_memory_limit = int(self.config.get("inject_memory_limit", 5))
-        self.inject_max_chars = int(self.config.get("inject_max_chars", 0))
+        self.inject_memory_limit = self._safe_int(self.config.get("inject_memory_limit", 5), 5, label="inject_memory_limit")
+        self.inject_max_chars = self._safe_int(self.config.get("inject_max_chars", 0), 0, label="inject_max_chars")
 
         # ── 敏感信息脱敏 ──────────────────────────────────────────────────────
         self._sanitize_patterns = self._build_sanitize_patterns()
@@ -370,15 +399,15 @@ class TMemoryPlugin(Star):
         # ── 触发门控与批处理效率 ──────────────────────────────────────────────
         # capture_min_content_len: 有效字符低于此值的消息跳过采集(0=不限)
         self.capture_min_content_len = max(
-            0, int(self.config.get("capture_min_content_len", 5))
+            0, self._safe_int(self.config.get("capture_min_content_len", 5), 5, label="capture_min_content_len")
         )
         # capture_dedup_window: 在同用户最近 N 条未蒸馏缓存中去重(0=不去重)
         self.capture_dedup_window = max(
-            0, int(self.config.get("capture_dedup_window", 10))
+            0, self._safe_int(self.config.get("capture_dedup_window", 10), 10, label="capture_dedup_window")
         )
         # distill_user_throttle_sec: 单用户蒸馏后的冷却时间(0=不启用)
         self.distill_user_throttle_sec = max(
-            0, int(self.config.get("distill_user_throttle_sec", 0))
+            0, self._safe_int(self.config.get("distill_user_throttle_sec", 0), 0, label="distill_user_throttle_sec")
         )
 
     def _safe_load_web_server(self):
@@ -476,6 +505,12 @@ class TMemoryPlugin(Star):
             await self._web_server.stop()
         except Exception as e:
             logger.warning("[tmemory] WebUI 关闭异常: %s", e)
+        # 关闭 aiohttp session（向量检索启用时防止连接泄漏）
+        if self._http_session and not self._http_session.closed:
+            try:
+                await self._http_session.close()
+            except Exception as e:
+                logger.warning("[tmemory] http_session 关闭异常: %s", e)
         # 关闭持久 DB 连接
         self._close_db()
         logger.info("[tmemory] terminated")
@@ -1676,8 +1711,7 @@ class TMemoryPlugin(Star):
                 """
                 CREATE TRIGGER IF NOT EXISTS t_memories_au AFTER UPDATE ON memories 
                 BEGIN
-                    INSERT INTO memories_fts(memories_fts, rowid, tokenized_memory, canonical_user_id) 
-                    VALUES ('delete', old.id, old.tokenized_memory, old.canonical_user_id);
+                    DELETE FROM memories_fts WHERE rowid = old.id;
                     INSERT INTO memories_fts(rowid, tokenized_memory, canonical_user_id) 
                     VALUES (new.id, new.tokenized_memory, new.canonical_user_id);
                 END;
@@ -1862,8 +1896,7 @@ class TMemoryPlugin(Star):
                 """
                 CREATE TRIGGER IF NOT EXISTS t_memories_au AFTER UPDATE ON memories 
                 BEGIN
-                    INSERT INTO memories_fts(memories_fts, rowid, tokenized_memory, canonical_user_id) 
-                    VALUES ('delete', old.id, old.tokenized_memory, old.canonical_user_id);
+                    DELETE FROM memories_fts WHERE rowid = old.id;
                     INSERT INTO memories_fts(rowid, tokenized_memory, canonical_user_id) 
                     VALUES (new.id, new.tokenized_memory, new.canonical_user_id);
                 END;
@@ -1904,8 +1937,7 @@ class TMemoryPlugin(Star):
                         conn.execute("""
                             CREATE TRIGGER IF NOT EXISTS t_memories_au AFTER UPDATE ON memories 
                             BEGIN
-                                INSERT INTO memories_fts(memories_fts, rowid, tokenized_memory, canonical_user_id) 
-                                VALUES ('delete', old.id, old.tokenized_memory, old.canonical_user_id);
+                                DELETE FROM memories_fts WHERE rowid = old.id;
                                 INSERT INTO memories_fts(rowid, tokenized_memory, canonical_user_id) 
                                 VALUES (new.id, new.tokenized_memory, new.canonical_user_id);
                             END;
@@ -1945,11 +1977,40 @@ class TMemoryPlugin(Star):
                     continue
                 conn.execute(f"ALTER TABLE {table_name} ADD COLUMN {col} {ddl}")
 
-    def _db(self) -> sqlite3.Connection:
+    class _LockedConnection:
+        """_db() 返回的包装器。
+
+        持有 _conn_lock 直到 with 块退出，保证同一时刻只有一个线程
+        在执行 SQL，消除并发写入 FTS5 触发器时的 SIGBUS 风险。
+        commit / rollback 委托给底层 sqlite3.Connection 的上下文管理器。
+        """
+
+        def __init__(self, lock: threading.Lock, conn: sqlite3.Connection):
+            self._lock = lock
+            self._conn = conn
+
+        def __enter__(self) -> sqlite3.Connection:
+            self._lock.acquire()
+            return self._conn.__enter__()
+
+        def __exit__(self, exc_type, exc_val, exc_tb):
+            try:
+                return self._conn.__exit__(exc_type, exc_val, exc_tb)
+            finally:
+                self._lock.release()
+
+        # 允许不走 with 语句直接使用（如 _init_db 中的大量 conn.execute）
+        def execute(self, *args, **kwargs):
+            return self._conn.execute(*args, **kwargs)
+
+        def executemany(self, *args, **kwargs):
+            return self._conn.executemany(*args, **kwargs)
+
+    def _db(self) -> "_LockedConnection":
         """获取持久 DB 连接(线程安全、单连接复用)。
 
         使用上下文管理器模式: with self._db() as conn:
-        退出 with 块时自动 commit(异常时 rollback), 但**不**关闭连接。
+        退出 with 块时自动 commit(异常时 rollback) 并释放锁, 但**不**关闭连接。
         连接在插件 terminate() 时统一关闭。
         """
         with self._conn_lock:
@@ -1967,7 +2028,7 @@ class TMemoryPlugin(Star):
                     except Exception:
                         pass
                 self._conn = conn
-            return self._conn
+        return self._LockedConnection(self._conn_lock, self._conn)
 
     def _close_db(self):
         """关闭持久连接。仅在 terminate() 中调用。"""
