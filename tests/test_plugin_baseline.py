@@ -353,3 +353,144 @@ def test_user_last_distilled_ts_throttle_dict_initialized(plugin):
     """_user_last_distilled_ts 在插件初始化后为空字典。"""
     assert isinstance(plugin._user_last_distilled_ts, dict)
     assert len(plugin._user_last_distilled_ts) == 0
+
+
+# =============================================================================
+# 新增：覆盖 6 个关键场景 (TMEAAA-53)
+# =============================================================================
+
+
+# ── 场景 1: Schema 初始化 ──────────────────────────────────────────────────
+
+
+def test_init_db_creates_fts5_sync_triggers(plugin):
+    """Schema 初始化后，FTS5 同步触发器应存在于 sqlite_master 中。"""
+    with plugin._db() as conn:
+        trigger_rows = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='trigger'"
+        ).fetchall()
+        trigger_names = {row["name"] for row in trigger_rows}
+
+    assert "t_memories_ai" in trigger_names
+    assert "t_memories_ad" in trigger_names
+    assert "t_memories_au" in trigger_names
+
+
+# ── 场景 2: 消息采集 ──────────────────────────────────────────────────────
+
+
+def test_should_skip_capture_no_memory_protocol_marker(plugin):
+    """含跨插件协议标记 \\x00[astrbot:no-memory]\\x00 的消息应被跳过采集。"""
+    marked = "\x00[astrbot:no-memory]\x00" + "我有一个重要偏好"
+    assert plugin._should_skip_capture(marked) is True
+    # 不含标记的正常文本不应被跳过
+    assert plugin._should_skip_capture("我有一个重要偏好") is False
+
+
+def test_should_skip_capture_custom_prefix(plugin):
+    """配置了 capture_skip_prefixes 后，匹配前缀的消息应被跳过采集。"""
+    plugin.capture_skip_prefixes = ["提醒 #", "/debug"]
+    assert plugin._should_skip_capture("提醒 # 明天开会") is True
+    assert plugin._should_skip_capture("/debug 内部调试") is True
+    # 不匹配前缀的正常消息不跳过
+    assert plugin._should_skip_capture("我喜欢喝咖啡") is False
+
+
+def test_should_skip_capture_regex_filter(plugin):
+    """配置了 capture_skip_regex 后，匹配正则的消息应被跳过采集。"""
+    import re
+    plugin._capture_skip_re = re.compile(r"^\[系统\]")
+    assert plugin._should_skip_capture("[系统] 自动回复消息") is True
+    assert plugin._should_skip_capture("用户喜欢看电影") is False
+
+
+# ── 场景 3: 记忆插入 / 冲突失活 ──────────────────────────────────────────
+
+
+def test_deactivated_memory_excluded_from_list(plugin):
+    """失活（is_active=0）的记忆不应出现在 _list_memories 的结果中。"""
+    mem_id = plugin._insert_memory(
+        canonical_id="user-inactive",
+        adapter="qq",
+        adapter_user="99",
+        memory="喜欢喝茶",
+        score=0.7,
+        memory_type="preference",
+        importance=0.6,
+        confidence=0.7,
+    )
+    with plugin._db() as conn:
+        conn.execute("UPDATE memories SET is_active=0 WHERE id=?", (mem_id,))
+
+    memories = plugin._list_memories("user-inactive", limit=10)
+    assert all(m["id"] != mem_id for m in memories)
+
+
+def test_delete_memory_logs_delete_event(plugin):
+    """删除记忆后，memory_events 中应存在对应的 delete 事件。"""
+    mem_id = plugin._insert_memory(
+        canonical_id="user-del",
+        adapter="qq",
+        adapter_user="55",
+        memory="喜欢骑行",
+        score=0.6,
+        memory_type="preference",
+        importance=0.5,
+        confidence=0.6,
+    )
+
+    deleted = plugin._delete_memory(mem_id)
+
+    with plugin._db() as conn:
+        event = conn.execute(
+            "SELECT event_type FROM memory_events WHERE canonical_user_id='user-del'"
+            " ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+
+    assert deleted is True
+    assert event is not None
+    assert event["event_type"] == "delete"
+
+
+# ── 场景 4: 身份绑定 / 合并 ──────────────────────────────────────────────
+
+
+def test_merge_identity_moves_unique_memories_to_target(plugin):
+    """合并时，from_user 独有（无哈希冲突）的记忆应迁移到 to_user，moved_count > 0。"""
+    plugin._insert_memory(
+        canonical_id="from-unique",
+        adapter="qq",
+        adapter_user="10",
+        memory="喜欢爬山",
+        score=0.6,
+        memory_type="preference",
+        importance=0.5,
+        confidence=0.6,
+    )
+
+    moved = plugin._merge_identity("from-unique", "to-unique")
+
+    with plugin._db() as conn:
+        from_rows = conn.execute(
+            "SELECT COUNT(*) AS n FROM memories WHERE canonical_user_id='from-unique'"
+        ).fetchone()["n"]
+        to_rows = conn.execute(
+            "SELECT COUNT(*) AS n FROM memories WHERE canonical_user_id='to-unique'"
+        ).fetchone()["n"]
+
+    assert moved == 1
+    assert from_rows == 0
+    assert to_rows == 1
+
+
+# ── 场景 5: WebUI 登录鉴权 ── 见 test_web_server.py
+
+# ── 场景 6: Terminate 资源清理 ────────────────────────────────────────────
+
+
+def test_close_db_sets_conn_to_none(plugin):
+    """_close_db() 调用后，plugin._conn 应为 None。"""
+    plugin._db()  # 确保连接已建立
+    assert plugin._conn is not None
+    plugin._close_db()
+    assert plugin._conn is None
