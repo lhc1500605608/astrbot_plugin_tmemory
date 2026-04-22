@@ -239,3 +239,4 @@ node_modules/
 # Local Runtime Data
 data/
 docs/
+.worktrees/
