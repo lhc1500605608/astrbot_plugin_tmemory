@@ -70,37 +70,6 @@
         "description": "启用向量检索",
         "hint": "开启后将启用向量检索能力，提升记忆召回质量。"
       },
-      "vector_backend": {
-        "type": "string",
-        "default": "qdrant",
-        "description": "向量存储后端",
-        "hint": "主向量存储引擎，可选 qdrant（独立服务）或 sqlite-vec（本地嵌入）。",
-        "options": ["qdrant", "sqlite-vec"]
-      },
-      "qdrant_url": {
-        "type": "string",
-        "default": "http://localhost:6333",
-        "description": "Qdrant 服务地址",
-        "hint": "Qdrant 服务器 URL，本地部署用 http://localhost:6333。"
-      },
-      "qdrant_api_key": {
-        "type": "string",
-        "default": "",
-        "description": "Qdrant API Key",
-        "hint": "如果 Qdrant 启用了 API Key 鉴权请填写。"
-      },
-      "qdrant_collection": {
-        "type": "string",
-        "default": "astrbot_memory",
-        "description": "Qdrant Collection 名称",
-        "hint": "向量集合的唯一标识符。"
-      },
-      "fallback_to_sqlite_vec": {
-        "type": "bool",
-        "default": true,
-        "description": "自动降级到 sqlite-vec",
-        "hint": "当主向量存储（Qdrant）不可用时，自动切换到 sqlite-vec。"
-      },
       "embedding_provider": {
         "type": "string",
         "default": "volc",
@@ -137,7 +106,7 @@
         "type": "bool",
         "default": true,
         "description": "维度变更时自动重建",
-        "hint": "检测到向量维度配置变更时，自动清空并重建向量库。"
+        "hint": "检测到 sqlite-vec 向量维度配置变更时，自动清空并重建向量索引。"
       }
     }
   },
