@@ -1,0 +1,11 @@
+version: "3.8"
+
+services:
+  astrbot:
+    image: soulter/astrbot:nightly-latest
+    container_name: astrbot_tmemory_test
+    restart: unless-stopped
+    ports:
+      - "6186:6185" # AstrBot WebUI
+    volumes:
+      - ./data:/AstrBot/data
