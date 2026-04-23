@@ -43,7 +43,7 @@ class TestIsLowInfoContent:
     def test_restriction_short_messages_not_low_info(self, plugin, text):
         """restriction 类关键短消息不应被判定为低信息量。"""
         plugin.capture_min_content_len = 5
-        assert plugin._is_low_info_content(text) is False, (
+        assert plugin._capture_filter.is_low_info_content(text) is False, (
             f"误判：restriction 短消息 {repr(text)} 被错误过滤"
         )
 
@@ -58,7 +58,7 @@ class TestIsLowInfoContent:
     def test_task_short_messages_not_low_info(self, plugin, text):
         """task 类关键短消息不应被判定为低信息量。"""
         plugin.capture_min_content_len = 5
-        assert plugin._is_low_info_content(text) is False, (
+        assert plugin._capture_filter.is_low_info_content(text) is False, (
             f"误判：task 短消息 {repr(text)} 被错误过滤"
         )
 
@@ -74,7 +74,7 @@ class TestIsLowInfoContent:
     def test_preference_short_messages_not_low_info(self, plugin, text):
         """preference / fact 类关键短消息不应被判定为低信息量。"""
         plugin.capture_min_content_len = 5
-        assert plugin._is_low_info_content(text) is False, (
+        assert plugin._capture_filter.is_low_info_content(text) is False, (
             f"误判：preference 短消息 {repr(text)} 被错误过滤"
         )
 
@@ -92,7 +92,7 @@ class TestIsLowInfoContent:
     def test_noise_messages_correctly_flagged_as_low_info(self, plugin, text):
         """纯噪声短消息应保持被正确过滤（不引入误放行）。"""
         plugin.capture_min_content_len = 5
-        assert plugin._is_low_info_content(text) is True, (
+        assert plugin._capture_filter.is_low_info_content(text) is True, (
             f"误放行：噪声短消息 {repr(text)} 未被正确过滤"
         )
 
@@ -126,7 +126,7 @@ class TestShouldSkipCapture:
     def test_critical_short_messages_pass_capture_filter(self, plugin, text, category):
         """关键短消息（restriction/task/preference）不应被采集层过滤掉。"""
         plugin.capture_min_content_len = 5
-        assert plugin._should_skip_capture(text) is False, (
+        assert plugin._capture_filter.should_skip_capture(text) is False, (
             f"采集层误伤：[{category}] {repr(text)} 被错误跳过"
         )
 
@@ -141,7 +141,7 @@ class TestShouldSkipCapture:
     def test_noise_messages_still_skipped(self, plugin, text):
         """修复后噪声短消息仍被正确跳过。"""
         plugin.capture_min_content_len = 5
-        assert plugin._should_skip_capture(text) is True, (
+        assert plugin._capture_filter.should_skip_capture(text) is True, (
             f"修复引入误放行：{repr(text)} 未被跳过"
         )
 
