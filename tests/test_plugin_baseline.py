@@ -197,8 +197,8 @@ async def test_merge_identity_moves_cache_rebinds_accounts_and_merges_duplicate_
     assert '"moved_count": 0' in event["payload_json"]
 
 
-    @pytest.mark.asyncio
-    async def test_terminate_cancels_background_task_and_closes_resources(plugin):
+@pytest.mark.asyncio
+async def test_terminate_cancels_background_task_and_closes_resources(plugin):
         state = {"vector_closed": False, "web_stopped": False}
 
         class DummyVectorManager:
