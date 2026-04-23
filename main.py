@@ -18,6 +18,68 @@ from astrbot.api.provider import LLMResponse, ProviderRequest
 from astrbot.api.star import Context, Star, register
 from .hybrid_search import HybridMemorySystem
 
+# ── Schema DDL 常量（被 _init_db 和 _migrate_schema 共用，消除重复定义）──────
+_DDL_MEMORY_EVENTS = """
+CREATE TABLE IF NOT EXISTS memory_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    canonical_user_id TEXT NOT NULL,
+    event_type TEXT NOT NULL,
+    payload_json TEXT NOT NULL,
+    created_at TEXT NOT NULL
+)
+"""
+
+_DDL_DISTILL_HISTORY = """
+CREATE TABLE IF NOT EXISTS distill_history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    started_at TEXT NOT NULL,
+    finished_at TEXT NOT NULL,
+    trigger_type TEXT NOT NULL DEFAULT 'auto',
+    users_processed INTEGER NOT NULL DEFAULT 0,
+    memories_created INTEGER NOT NULL DEFAULT 0,
+    users_failed INTEGER NOT NULL DEFAULT 0,
+    errors TEXT NOT NULL DEFAULT '',
+    duration_sec REAL NOT NULL DEFAULT 0,
+    tokens_input INTEGER NOT NULL DEFAULT -1,
+    tokens_output INTEGER NOT NULL DEFAULT -1,
+    tokens_total INTEGER NOT NULL DEFAULT -1
+)
+"""
+
+_DDL_FTS5 = """
+CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
+    tokenized_memory,
+    canonical_user_id UNINDEXED,
+    content='memories', content_rowid='id',
+    tokenize='unicode61 remove_diacritics 1'
+)
+"""
+
+_DDL_TRIGGER_AI = """
+CREATE TRIGGER IF NOT EXISTS t_memories_ai AFTER INSERT ON memories 
+BEGIN
+    INSERT INTO memories_fts(rowid, tokenized_memory, canonical_user_id) 
+    VALUES (new.id, new.tokenized_memory, new.canonical_user_id);
+END;
+"""
+
+_DDL_TRIGGER_AD = """
+CREATE TRIGGER IF NOT EXISTS t_memories_ad AFTER DELETE ON memories 
+BEGIN
+    INSERT INTO memories_fts(memories_fts, rowid, tokenized_memory, canonical_user_id) 
+    VALUES ('delete', old.id, old.tokenized_memory, old.canonical_user_id);
+END;
+"""
+
+_DDL_TRIGGER_AU = """
+CREATE TRIGGER IF NOT EXISTS t_memories_au AFTER UPDATE ON memories 
+BEGIN
+    DELETE FROM memories_fts WHERE rowid = old.id;
+    INSERT INTO memories_fts(rowid, tokenized_memory, canonical_user_id) 
+    VALUES (new.id, new.tokenized_memory, new.canonical_user_id);
+END;
+"""
+
 
 class _NullWebServer:
     """WebUI 降级替身(NullObject 模式)。
@@ -176,6 +238,23 @@ class TMemoryPlugin(Star):
                 logger.warning("[tmemory] config %s invalid (%r), using default %s: %s", label, value, default, _e)
             return default
 
+    @staticmethod
+    def _safe_bool(value, default: bool, *, label: str = "") -> bool:
+        """类型安全的 bool 转换。
+
+        将字符串 "false"/"0"/"no"/"off" 正确识别为 False，
+        避免 bool("false") == True 的陷阱。其他类型直接走 bool() 语义。
+        """
+        if isinstance(value, str):
+            if value.strip().lower() in {"false", "0", "no", "off", ""}:
+                return False
+            if value.strip().lower() in {"true", "1", "yes", "on"}:
+                return True
+            if label:
+                logger.warning("[tmemory] config %s invalid bool string (%r), using default %s", label, value, default)
+            return default
+        return bool(value)
+
     def _parse_config(self):
         """从 self.config 解析配置值，覆盖默认值。
 
@@ -186,9 +265,9 @@ class TMemoryPlugin(Star):
         self.memory_max_chars = self._safe_int(self.config.get("memory_max_chars", 220), 220, label="memory_max_chars")
 
         # ── 自动采集 ──────────────────────────────────────────────────────────
-        self.enable_auto_capture = bool(self.config.get("enable_auto_capture", True))
-        self.capture_assistant_reply = bool(
-            self.config.get("capture_assistant_reply", True)
+        self.enable_auto_capture = self._safe_bool(self.config.get("enable_auto_capture", True), True, label="enable_auto_capture")
+        self.capture_assistant_reply = self._safe_bool(
+            self.config.get("capture_assistant_reply", True), True, label="capture_assistant_reply"
         )
         # ── 采集过滤器(三层)────────────────────────────────────────────────
         # 层 1: 跨插件协议标记(最高优先级)
@@ -232,7 +311,7 @@ class TMemoryPlugin(Star):
         
         # ── 独立蒸馏模型配置 ───────────────────────────────────────────────────
         distill_cfg = self.config.get("distill_model_settings", {})
-        self.use_independent_distill_model = bool(distill_cfg.get("use_independent_distill_model", False))
+        self.use_independent_distill_model = self._safe_bool(distill_cfg.get("use_independent_distill_model", False), False, label="use_independent_distill_model")
         self.distill_provider_id = str(distill_cfg.get("distill_provider_id", "")).strip()
         self.distill_model_id = str(distill_cfg.get("distill_model_id", "")).strip()
         self.purify_provider_id = str(distill_cfg.get("purify_provider_id", "")).strip()
@@ -246,8 +325,8 @@ class TMemoryPlugin(Star):
 
         # ── 记忆召回注入 ──────────────────────────────────────────────────────
         # enable_memory_injection: 是否在 LLM 调用前将记忆上下文注入 system prompt
-        self.enable_memory_injection = bool(
-            self.config.get("enable_memory_injection", True)
+        self.enable_memory_injection = self._safe_bool(
+            self.config.get("enable_memory_injection", True), True, label="enable_memory_injection"
         )
         self.manual_purify_default_mode = (
             str(
@@ -280,7 +359,7 @@ class TMemoryPlugin(Star):
         self.manual_refine_default_limit = self.manual_purify_default_limit
 
         # ── 蒸馏暂停开关 ──────────────────────────────────────────────────────
-        self.distill_pause = bool(self.config.get("distill_pause", False))
+        self.distill_pause = self._safe_bool(self.config.get("distill_pause", False), False, label="distill_pause")
 
         # ── 提纯(Purification)───────────────────────────────────────────────
         # 对已蒸馏的 memories 做优化/重评，淘汰低分/低置信/低重要的记忆 。
@@ -324,7 +403,7 @@ class TMemoryPlugin(Star):
         # ── 向量检索 ─────────────────────────────────────────────────────────
         # 从 vector_retrieval 子配置读取
         vr = self._get_vector_retrieval_config()
-        self.enable_vector_search = bool(vr.get("enable_vector_search", False))
+        self.enable_vector_search = self._safe_bool(vr.get("enable_vector_search", False), False, label="enable_vector_search")
         self.embed_provider_id = str(vr.get("embedding_provider", "")).strip()
         self.embed_model_id = str(vr.get("embedding_model", "")).strip()
         self.embed_model = self.embed_model_id
@@ -335,7 +414,7 @@ class TMemoryPlugin(Star):
         self._vec_available = False
 
         # ── Reranker(可选，内置 provider 反射调用)──────────────────────────
-        self.enable_reranker = bool(self.config.get("enable_reranker", False))
+        self.enable_reranker = self._safe_bool(self.config.get("enable_reranker", False), False, label="enable_reranker")
         self.rerank_provider_id = str(self.config.get("rerank_provider_id", "")).strip()
         self.rerank_model_id = str(
             self.config.get("rerank_model_id", self.config.get("rerank_model", ""))
@@ -352,8 +431,8 @@ class TMemoryPlugin(Star):
         self.memory_scope = str(self.config.get("memory_scope", "user")).strip().lower()
         if self.memory_scope not in {"user", "session"}:
             self.memory_scope = "user"
-        self.private_memory_in_group = bool(
-            self.config.get("private_memory_in_group", False)
+        self.private_memory_in_group = self._safe_bool(
+            self.config.get("private_memory_in_group", False), False, label="private_memory_in_group"
         )
 
         # ── 注入位置与召回量 ──────────────────────────────────────────────────
@@ -559,16 +638,19 @@ class TMemoryPlugin(Star):
         if self._should_skip_capture(text):
             return
 
-        canonical_id, adapter, adapter_user = self._resolve_current_identity(event)
-        umo = self._safe_get_unified_msg_origin(event)
-        self._insert_conversation(
-            canonical_id=canonical_id,
-            role="assistant",
-            content=text,
-            source_adapter=adapter,
-            source_user_id=adapter_user,
-            unified_msg_origin=umo,
-        )
+        try:
+            canonical_id, adapter, adapter_user = self._resolve_current_identity(event)
+            umo = self._safe_get_unified_msg_origin(event)
+            self._insert_conversation(
+                canonical_id=canonical_id,
+                role="assistant",
+                content=text,
+                source_adapter=adapter,
+                source_user_id=adapter_user,
+                unified_msg_origin=umo,
+            )
+        except Exception as e:
+            logger.warning("[tmemory] on_llm_response capture failed: %s", e)
 
     @filter.on_llm_request()
     async def on_llm_request(self, event: AstrMessageEvent, req: ProviderRequest):
@@ -1672,46 +1754,12 @@ class TMemoryPlugin(Star):
             # FTS5 表 (content-sync 模式，关联 memories 表)
             # 检查是否需要从旧的独立 FTS5 表迁移到 content-sync 模式
             self._migrate_fts5_to_content_sync(conn)
-            conn.execute(
-                """
-                CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
-                    tokenized_memory,
-                    canonical_user_id UNINDEXED,
-                    content='memories', content_rowid='id',
-                    tokenize='unicode61 remove_diacritics 1'
-                )
-                """
-            )
+            conn.execute(_DDL_FTS5)
 
             # 同步触发器
-            conn.execute(
-                """
-                CREATE TRIGGER IF NOT EXISTS t_memories_ai AFTER INSERT ON memories 
-                BEGIN
-                    INSERT INTO memories_fts(rowid, tokenized_memory, canonical_user_id) 
-                    VALUES (new.id, new.tokenized_memory, new.canonical_user_id);
-                END;
-                """
-            )
-            conn.execute(
-                """
-                CREATE TRIGGER IF NOT EXISTS t_memories_ad AFTER DELETE ON memories 
-                BEGIN
-                    INSERT INTO memories_fts(memories_fts, rowid, tokenized_memory, canonical_user_id) 
-                    VALUES ('delete', old.id, old.tokenized_memory, old.canonical_user_id);
-                END;
-                """
-            )
-            conn.execute(
-                """
-                CREATE TRIGGER IF NOT EXISTS t_memories_au AFTER UPDATE ON memories 
-                BEGIN
-                    DELETE FROM memories_fts WHERE rowid = old.id;
-                    INSERT INTO memories_fts(rowid, tokenized_memory, canonical_user_id) 
-                    VALUES (new.id, new.tokenized_memory, new.canonical_user_id);
-                END;
-                """
-            )
+            conn.execute(_DDL_TRIGGER_AI)
+            conn.execute(_DDL_TRIGGER_AD)
+            conn.execute(_DDL_TRIGGER_AU)
 
             conn.execute(
                 """
@@ -1731,35 +1779,8 @@ class TMemoryPlugin(Star):
                 )
                 """
             )
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS memory_events (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    canonical_user_id TEXT NOT NULL,
-                    event_type TEXT NOT NULL,
-                    payload_json TEXT NOT NULL,
-                    created_at TEXT NOT NULL
-                )
-                """
-            )
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS distill_history (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    started_at TEXT NOT NULL,
-                    finished_at TEXT NOT NULL,
-                    trigger_type TEXT NOT NULL DEFAULT 'auto',
-                    users_processed INTEGER NOT NULL DEFAULT 0,
-                    memories_created INTEGER NOT NULL DEFAULT 0,
-                    users_failed INTEGER NOT NULL DEFAULT 0,
-                    errors TEXT NOT NULL DEFAULT '',
-                    duration_sec REAL NOT NULL DEFAULT 0,
-                    tokens_input INTEGER NOT NULL DEFAULT -1,
-                    tokens_output INTEGER NOT NULL DEFAULT -1,
-                    tokens_total INTEGER NOT NULL DEFAULT -1
-                )
-                """
-            )
+            conn.execute(_DDL_MEMORY_EVENTS)
+            conn.execute(_DDL_DISTILL_HISTORY)
             # ── 向量表(仅当 sqlite-vec 可用时创建)──────────────────────────
             if self._vec_available:
                 try:
@@ -1814,35 +1835,8 @@ class TMemoryPlugin(Star):
                 "UPDATE memories SET last_seen_at=COALESCE(NULLIF(last_seen_at, ''), updated_at, created_at)"
             )
             # Ensure memory_events table exists when upgrading from older versions
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS memory_events (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    canonical_user_id TEXT NOT NULL,
-                    event_type TEXT NOT NULL,
-                    payload_json TEXT NOT NULL,
-                    created_at TEXT NOT NULL
-                )
-                """
-            )
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS distill_history (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    started_at TEXT NOT NULL,
-                    finished_at TEXT NOT NULL,
-                    trigger_type TEXT NOT NULL DEFAULT 'auto',
-                    users_processed INTEGER NOT NULL DEFAULT 0,
-                    memories_created INTEGER NOT NULL DEFAULT 0,
-                    users_failed INTEGER NOT NULL DEFAULT 0,
-                    errors TEXT NOT NULL DEFAULT '',
-                    duration_sec REAL NOT NULL DEFAULT 0,
-                    tokens_input INTEGER NOT NULL DEFAULT -1,
-                    tokens_output INTEGER NOT NULL DEFAULT -1,
-                    tokens_total INTEGER NOT NULL DEFAULT -1
-                )
-                """
-            )
+            conn.execute(_DDL_MEMORY_EVENTS)
+            conn.execute(_DDL_DISTILL_HISTORY)
 
             # 旧实例升级：为 distill_history 补充 token 列
             for col, ddl in {
@@ -1859,44 +1853,10 @@ class TMemoryPlugin(Star):
 
             # 初始化 FTS5 表和触发器 (保证 migration 也会建表)
             self._migrate_fts5_to_content_sync(conn)
-            conn.execute(
-                """
-                CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
-                    tokenized_memory,
-                    canonical_user_id UNINDEXED,
-                    content='memories', content_rowid='id',
-                    tokenize='unicode61 remove_diacritics 1'
-                )
-                """
-            )
-            conn.execute(
-                """
-                CREATE TRIGGER IF NOT EXISTS t_memories_ai AFTER INSERT ON memories 
-                BEGIN
-                    INSERT INTO memories_fts(rowid, tokenized_memory, canonical_user_id) 
-                    VALUES (new.id, new.tokenized_memory, new.canonical_user_id);
-                END;
-                """
-            )
-            conn.execute(
-                """
-                CREATE TRIGGER IF NOT EXISTS t_memories_ad AFTER DELETE ON memories 
-                BEGIN
-                    INSERT INTO memories_fts(memories_fts, rowid, tokenized_memory, canonical_user_id) 
-                    VALUES ('delete', old.id, old.tokenized_memory, old.canonical_user_id);
-                END;
-                """
-            )
-            conn.execute(
-                """
-                CREATE TRIGGER IF NOT EXISTS t_memories_au AFTER UPDATE ON memories 
-                BEGIN
-                    DELETE FROM memories_fts WHERE rowid = old.id;
-                    INSERT INTO memories_fts(rowid, tokenized_memory, canonical_user_id) 
-                    VALUES (new.id, new.tokenized_memory, new.canonical_user_id);
-                END;
-                """
-            )
+            conn.execute(_DDL_FTS5)
+            conn.execute(_DDL_TRIGGER_AI)
+            conn.execute(_DDL_TRIGGER_AD)
+            conn.execute(_DDL_TRIGGER_AU)
 
             # 数据迁移:回填空的 tokenized_memory
             # 注意:如果刚完成 FTS5 迁移，需要先禁用触发器以避免 UPDATE 触发空表 delete
@@ -1915,28 +1875,9 @@ class TMemoryPlugin(Star):
                         conn.execute("UPDATE memories SET tokenized_memory = ? WHERE id = ?", (tokens, int(row["id"])))
                     if self._fts5_needs_rebuild:
                         # 重新创建触发器
-                        conn.execute("""
-                            CREATE TRIGGER IF NOT EXISTS t_memories_ai AFTER INSERT ON memories 
-                            BEGIN
-                                INSERT INTO memories_fts(rowid, tokenized_memory, canonical_user_id) 
-                                VALUES (new.id, new.tokenized_memory, new.canonical_user_id);
-                            END;
-                        """)
-                        conn.execute("""
-                            CREATE TRIGGER IF NOT EXISTS t_memories_ad AFTER DELETE ON memories 
-                            BEGIN
-                                INSERT INTO memories_fts(memories_fts, rowid, tokenized_memory, canonical_user_id) 
-                                VALUES ('delete', old.id, old.tokenized_memory, old.canonical_user_id);
-                            END;
-                        """)
-                        conn.execute("""
-                            CREATE TRIGGER IF NOT EXISTS t_memories_au AFTER UPDATE ON memories 
-                            BEGIN
-                                DELETE FROM memories_fts WHERE rowid = old.id;
-                                INSERT INTO memories_fts(rowid, tokenized_memory, canonical_user_id) 
-                                VALUES (new.id, new.tokenized_memory, new.canonical_user_id);
-                            END;
-                        """)
+                        conn.execute(_DDL_TRIGGER_AI)
+                        conn.execute(_DDL_TRIGGER_AD)
+                        conn.execute(_DDL_TRIGGER_AU)
                     logger.info("[tmemory] 历史记忆分词完成。")
             except Exception as e:
                 logger.error(f"[tmemory] 历史记忆分词更新失败: {e}")
@@ -3205,47 +3146,50 @@ class TMemoryPlugin(Star):
     ):
         truncated = content[:1000]
 
-        # 内容哈希去重：同用户最近 capture_dedup_window 条未蒸馏缓存中有相同内容时跳过
-        if self.capture_dedup_window > 0:
-            content_hash = hashlib.md5(truncated.encode("utf-8", errors="replace")).hexdigest()
-            with self._db() as conn:
-                exists = conn.execute(
-                    """
-                    SELECT 1 FROM conversation_cache
-                    WHERE canonical_user_id=? AND distilled=0
-                    AND id IN (
-                        SELECT id FROM conversation_cache
+        try:
+            # 内容哈希去重：同用户最近 capture_dedup_window 条未蒸馏缓存中有相同内容时跳过
+            if self.capture_dedup_window > 0:
+                content_hash = hashlib.md5(truncated.encode("utf-8", errors="replace")).hexdigest()
+                with self._db() as conn:
+                    exists = conn.execute(
+                        """
+                        SELECT 1 FROM conversation_cache
                         WHERE canonical_user_id=? AND distilled=0
-                        ORDER BY id DESC LIMIT ?
-                    )
-                    AND content=?
-                    LIMIT 1
-                    """,
-                    (canonical_id, canonical_id, self.capture_dedup_window, truncated),
-                ).fetchone()
-                if exists:
-                    return  # 重复内容，跳过写入
+                        AND id IN (
+                            SELECT id FROM conversation_cache
+                            WHERE canonical_user_id=? AND distilled=0
+                            ORDER BY id DESC LIMIT ?
+                        )
+                        AND content=?
+                        LIMIT 1
+                        """,
+                        (canonical_id, canonical_id, self.capture_dedup_window, truncated),
+                    ).fetchone()
+                    if exists:
+                        return  # 重复内容，跳过写入
 
-        with self._db() as conn:
-            conn.execute(
-                """
-                INSERT INTO conversation_cache(
-                    canonical_user_id, role, content, source_adapter, source_user_id,
-                    unified_msg_origin, distilled, distilled_at, created_at, scope, persona_id
-                ) VALUES(?, ?, ?, ?, ?, ?, 0, '', ?, ?, ?)
-                """,
-                (
-                    canonical_id,
-                    role,
-                    truncated,
-                    source_adapter,
-                    source_user_id,
-                    unified_msg_origin,
-                    self._now(),
-                    scope,
-                    persona_id,
-                ),
-            )
+            with self._db() as conn:
+                conn.execute(
+                    """
+                    INSERT INTO conversation_cache(
+                        canonical_user_id, role, content, source_adapter, source_user_id,
+                        unified_msg_origin, distilled, distilled_at, created_at, scope, persona_id
+                    ) VALUES(?, ?, ?, ?, ?, ?, 0, '', ?, ?, ?)
+                    """,
+                    (
+                        canonical_id,
+                        role,
+                        truncated,
+                        source_adapter,
+                        source_user_id,
+                        unified_msg_origin,
+                        self._now(),
+                        scope,
+                        persona_id,
+                    ),
+                )
+        except Exception as e:
+            logger.warning("[tmemory] _insert_conversation failed for user %s: %s", canonical_id, e)
 
     def _fetch_recent_conversation(
         self, canonical_id: str, limit: int = 20
