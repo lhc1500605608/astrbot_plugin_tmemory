@@ -146,8 +146,8 @@ def test_insert_memory_conflict_deactivates_old_memory_and_logs_event(plugin):
 
 
 def test_bind_identity_upserts_mapping_and_logs_event(plugin):
-    plugin._bind_identity("qq", "42", "user-a")
-    plugin._bind_identity("qq", "42", "user-b")
+    plugin._identity_mgr.bind_identity("qq", "42", "user-a")
+    plugin._identity_mgr.bind_identity("qq", "42", "user-b")
 
     with plugin._db() as conn:
         binding = conn.execute(
@@ -164,12 +164,12 @@ def test_bind_identity_upserts_mapping_and_logs_event(plugin):
 
 @pytest.mark.asyncio
 async def test_merge_identity_moves_cache_rebinds_accounts_and_merges_duplicate_memories(plugin):
-    plugin._bind_identity("qq", "42", "from-user")
+    plugin._identity_mgr.bind_identity("qq", "42", "from-user")
     await plugin._insert_conversation("from-user", "user", "hello", "qq", "42", "group:1")
     plugin._insert_memory("from-user", "qq", "42", "喜欢寿司", 0.5, "preference", 0.6, 0.7)
     plugin._insert_memory("to-user", "wx", "88", "喜欢寿司", 0.2, "preference", 0.3, 0.4)
 
-    moved = plugin._merge_identity("from-user", "to-user")
+    moved = plugin._identity_mgr.merge_identity("from-user", "to-user")
 
     with plugin._db() as conn:
         caches = conn.execute(
@@ -361,21 +361,21 @@ def test_low_info_content_is_skipped_by_should_skip_capture(plugin):
     """低信息量消息（纯感叹词/短字符串）不应被采集。"""
     plugin._cfg.capture_min_content_len = 5
     # 纯感叹词
-    assert plugin._should_skip_capture("哈哈哈") is True
-    assert plugin._should_skip_capture("ok") is True
+    assert plugin._capture_filter.should_skip_capture("哈哈哈") is True
+    assert plugin._capture_filter.should_skip_capture("ok") is True
     # 空格/标点占位的短文本
-    assert plugin._should_skip_capture("好") is True
+    assert plugin._capture_filter.should_skip_capture("好") is True
     # 有效实义文本不应被过滤
-    assert plugin._should_skip_capture("我喜欢吃火锅") is False
-    assert plugin._should_skip_capture("用户的职业是程序员") is False
+    assert plugin._capture_filter.should_skip_capture("我喜欢吃火锅") is False
+    assert plugin._capture_filter.should_skip_capture("用户的职业是程序员") is False
 
 
 def test_low_info_content_disabled_when_min_len_zero(plugin):
     """capture_min_content_len=0 时，低信息量门控不生效。"""
     plugin._cfg.capture_min_content_len = 0
     # 纯感叹词此时不被低信息量过滤（但可被其他层过滤）
-    assert plugin._is_low_info_content("哈哈哈") is False
-    assert plugin._is_low_info_content("ok") is False
+    assert plugin._capture_filter.is_low_info_content("哈哈哈") is False
+    assert plugin._capture_filter.is_low_info_content("ok") is False
 
 
 @pytest.mark.asyncio
@@ -522,26 +522,26 @@ def test_init_db_creates_fts5_sync_triggers(plugin):
 def test_should_skip_capture_no_memory_protocol_marker(plugin):
     """含跨插件协议标记 \\x00[astrbot:no-memory]\\x00 的消息应被跳过采集。"""
     marked = "\x00[astrbot:no-memory]\x00" + "我有一个重要偏好"
-    assert plugin._should_skip_capture(marked) is True
+    assert plugin._capture_filter.should_skip_capture(marked) is True
     # 不含标记的正常文本不应被跳过
-    assert plugin._should_skip_capture("我有一个重要偏好") is False
+    assert plugin._capture_filter.should_skip_capture("我有一个重要偏好") is False
 
 
 def test_should_skip_capture_custom_prefix(plugin):
     """配置了 capture_skip_prefixes 后，匹配前缀的消息应被跳过采集。"""
     plugin._cfg.capture_skip_prefixes = ["提醒 #", "/debug"]
-    assert plugin._should_skip_capture("提醒 # 明天开会") is True
-    assert plugin._should_skip_capture("/debug 内部调试") is True
+    assert plugin._capture_filter.should_skip_capture("提醒 # 明天开会") is True
+    assert plugin._capture_filter.should_skip_capture("/debug 内部调试") is True
     # 不匹配前缀的正常消息不跳过
-    assert plugin._should_skip_capture("我喜欢喝咖啡") is False
+    assert plugin._capture_filter.should_skip_capture("我喜欢喝咖啡") is False
 
 
 def test_should_skip_capture_regex_filter(plugin):
     """配置了 capture_skip_regex 后，匹配正则的消息应被跳过采集。"""
     import re
     plugin._cfg.capture_skip_regex = re.compile(r"^\[系统\]")
-    assert plugin._should_skip_capture("[系统] 自动回复消息") is True
-    assert plugin._should_skip_capture("用户喜欢看电影") is False
+    assert plugin._capture_filter.should_skip_capture("[系统] 自动回复消息") is True
+    assert plugin._capture_filter.should_skip_capture("用户喜欢看电影") is False
 
 
 # ── 场景 3: 记忆插入 / 冲突失活 ──────────────────────────────────────────
@@ -608,7 +608,7 @@ def test_merge_identity_moves_unique_memories_to_target(plugin):
         confidence=0.6,
     )
 
-    moved = plugin._merge_identity("from-unique", "to-unique")
+    moved = plugin._identity_mgr.merge_identity("from-unique", "to-unique")
 
     with plugin._db() as conn:
         from_rows = conn.execute(
