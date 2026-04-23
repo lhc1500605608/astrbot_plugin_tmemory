@@ -628,9 +628,12 @@ def test_merge_identity_moves_unique_memories_to_target(plugin):
 # ── 场景 6: Terminate 资源清理 ────────────────────────────────────────────
 
 
-    def test_close_db_sets_conn_to_none(plugin):
-        """_close_db() 调用后，plugin._conn 应为 None。"""
-        plugin._db()  # 确保连接已建立
-        assert plugin._db_mgr._conn is not None
-        plugin._close_db()
-        assert plugin._db_mgr._conn is None
+
+
+def test_close_db_sets_conn_to_none(plugin):
+    """_close_db() 调用后，plugin._db_mgr._conn 应为 None。"""
+    with plugin._db_mgr.db():
+        pass
+    assert plugin._db_mgr._conn is not None
+    plugin._close_db()
+    assert plugin._db_mgr._conn is None
