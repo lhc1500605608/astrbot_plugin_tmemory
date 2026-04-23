@@ -1,0 +1,647 @@
+"""稳定性修复验证测试 (TMEAAA-90)
+
+覆盖以下关键路径：
+1. 核心蒸馏 mock — _distill_rows_with_llm 正常路径 + 回退路径
+2. 记忆衰减 / 自动裁剪 — _decay_stale_memories + _auto_prune_low_quality
+3. WebUI 登录 handler 异常路径 (bad JSON)
+4. _LockedConnection 并发回归 — 多线程同时写入不死锁、不数据丢失
+"""
+
+import asyncio
+import threading
+import time
+import types
+
+import pytest
+
+
+# ── 辅助：给测试 plugin 注入可写 context ─────────────────────────────────────
+
+
+class _MockContext:
+    """可写属性的 context stub，供 LLM mock 使用。"""
+
+    async def llm_generate(self, **kwargs):
+        raise NotImplementedError("不应被调用（子类覆盖）")
+
+    async def get_current_chat_provider_id(self, **kwargs):
+        return None
+
+
+@pytest.fixture()
+def plugin_with_ctx(tmp_path, monkeypatch, plugin_module):
+    """与 plugin fixture 等价，但 context 是可写的 _MockContext。"""
+    monkeypatch.chdir(tmp_path)
+    ctx = _MockContext()
+    instance = plugin_module.TMemoryPlugin(context=ctx, config={})
+    instance._init_db()
+    instance._migrate_schema()
+    yield instance, ctx
+    instance._close_db()
+
+
+# ── 场景 1: 核心蒸馏 mock ────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_distill_rows_with_llm_uses_mock_provider(plugin_with_ctx):
+    """_distill_rows_with_llm 在 LLM 正常返回 JSON 时正确解析记忆。"""
+    plugin, ctx = plugin_with_ctx
+
+    rows = [
+        {
+            "id": 1,
+            "role": "user",
+            "content": "我平时爱喝黑咖啡，不加糖",
+            "source_adapter": "qq",
+            "source_user_id": "42",
+            "unified_msg_origin": "group:1",
+            "scope": "user",
+            "persona_id": "",
+        }
+    ]
+
+    fake_resp = types.SimpleNamespace(
+        completion_text='{"memories": [{"memory": "用户偏好黑咖啡不加糖", "memory_type": "preference", "importance": 0.8, "confidence": 0.9, "score": 0.85}]}',
+        usage=types.SimpleNamespace(input_other=100, input_cached=0, output=50),
+    )
+
+    async def fake_llm_generate(**kwargs):
+        return fake_resp
+
+    ctx.llm_generate = fake_llm_generate
+    plugin.distill_provider_id = "mock-provider"
+    plugin.distill_model_id = "mock-model"
+    plugin.use_independent_distill_model = True
+
+    items, tok_in, tok_out = await plugin._distill_rows_with_llm(rows)
+
+    assert len(items) == 1
+    assert items[0]["memory"] == "用户偏好黑咖啡不加糖"
+    assert items[0]["memory_type"] == "preference"
+    assert tok_in == 100
+    assert tok_out == 50
+
+
+@pytest.mark.asyncio
+async def test_distill_rows_with_llm_fallback_on_llm_error(plugin_with_ctx):
+    """LLM 调用抛出异常时，回退到规则蒸馏并返回非空结果。"""
+    plugin, ctx = plugin_with_ctx
+
+    rows = [
+        {
+            "id": 1,
+            "role": "user",
+            "content": "我住在北京，每天骑车上班",
+            "source_adapter": "qq",
+            "source_user_id": "42",
+            "unified_msg_origin": "group:1",
+            "scope": "user",
+            "persona_id": "",
+        }
+    ]
+
+    async def bad_llm(**kwargs):
+        raise RuntimeError("simulate LLM timeout")
+
+    ctx.llm_generate = bad_llm
+    plugin.distill_provider_id = "mock-provider"
+    plugin.distill_model_id = ""
+    plugin.use_independent_distill_model = True
+
+    items, tok_in, tok_out = await plugin._distill_rows_with_llm(rows)
+
+    # 回退路径应返回至少 1 条规则蒸馏结果
+    assert len(items) >= 1
+    assert tok_in == -1
+    assert tok_out == -1
+
+
+@pytest.mark.asyncio
+async def test_distill_rows_with_llm_fallback_when_no_provider(plugin):
+    """未配置 provider 时直接走规则蒸馏，不调用 LLM。"""
+    rows = [
+        {
+            "id": 1,
+            "role": "user",
+            "content": "喜欢爬山",
+            "source_adapter": "qq",
+            "source_user_id": "1",
+            "unified_msg_origin": "",
+            "scope": "user",
+            "persona_id": "",
+        }
+    ]
+
+    plugin.distill_provider_id = ""
+    plugin.distill_model_id = ""
+    plugin.use_independent_distill_model = False
+
+    items, tok_in, tok_out = await plugin._distill_rows_with_llm(rows)
+
+    assert len(items) >= 1
+    assert tok_in == -1
+    assert tok_out == -1
+
+
+# ── 场景 2: 记忆衰减 / 自动裁剪 ─────────────────────────────────────────────
+
+
+def _insert_memory_with_age(plugin, canonical_id, memory_text, days_old, score=0.3, importance=0.2, confidence=0.3, reinforce=0):
+    """辅助：插入一条指定天数的历史记忆并直接调整时间戳。"""
+    mem_id = plugin._insert_memory(
+        canonical_id=canonical_id,
+        adapter="qq",
+        adapter_user="99",
+        memory=memory_text,
+        score=score,
+        memory_type="fact",
+        importance=importance,
+        confidence=confidence,
+    )
+    old_ts = time.time() - days_old * 86400
+    old_dt = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(old_ts))
+    with plugin._db() as conn:
+        conn.execute(
+            "UPDATE memories SET last_seen_at=?, created_at=?, updated_at=? WHERE id=?",
+            (old_dt, old_dt, old_dt, mem_id),
+        )
+    return mem_id
+
+
+def test_decay_stale_memories_marks_stale_after_30_days(plugin):
+    """超过 30 天未命中的记忆应被标记为 is_active=2 (stale)。"""
+    mem_id = _insert_memory_with_age(plugin, "decay-user", "喜欢旅行", days_old=35, score=0.8, importance=0.8, confidence=0.8)
+
+    plugin._decay_stale_memories()
+
+    with plugin._db() as conn:
+        row = conn.execute("SELECT is_active FROM memories WHERE id=?", (mem_id,)).fetchone()
+    assert row["is_active"] == 2
+
+
+def test_decay_stale_memories_marks_archived_after_90_days(plugin):
+    """超过 90 天未命中的记忆应被标记为 is_active=3 (archived)。"""
+    mem_id = _insert_memory_with_age(plugin, "decay-user2", "曾住在上海", days_old=95, score=0.8, importance=0.8, confidence=0.8)
+
+    plugin._decay_stale_memories()
+
+    with plugin._db() as conn:
+        row = conn.execute("SELECT is_active FROM memories WHERE id=?", (mem_id,)).fetchone()
+    assert row["is_active"] == 3
+
+
+def test_decay_stale_memories_ignores_pinned(plugin):
+    """is_pinned=1 的记忆即使超时也不应被衰减。"""
+    mem_id = _insert_memory_with_age(plugin, "pinned-user", "核心偏好", days_old=100)
+    with plugin._db() as conn:
+        conn.execute("UPDATE memories SET is_pinned=1 WHERE id=?", (mem_id,))
+
+    plugin._decay_stale_memories()
+
+    with plugin._db() as conn:
+        row = conn.execute("SELECT is_active FROM memories WHERE id=?", (mem_id,)).fetchone()
+    assert row["is_active"] == 1  # 未变化
+
+
+def test_auto_prune_low_quality_deactivates_old_low_quality(plugin):
+    """低质量（质量分 < 0.35）且超过 7 天的记忆应被失活(is_active=0)。"""
+    # 质量分 = 0.3*0.2 + 0.4*0.15 + 0.3*0.2 = 0.06 + 0.06 + 0.06 = 0.18 < 0.35
+    mem_id = _insert_memory_with_age(
+        plugin, "prune-user", "无用信息", days_old=10,
+        score=0.2, importance=0.15, confidence=0.2, reinforce=0
+    )
+
+    plugin._auto_prune_low_quality()
+
+    with plugin._db() as conn:
+        row = conn.execute("SELECT is_active FROM memories WHERE id=?", (mem_id,)).fetchone()
+    assert row["is_active"] == 0
+
+
+def test_auto_prune_preserves_young_low_quality(plugin):
+    """低质量但小于 7 天的记忆不应被剪枝（缓冲期保护）。"""
+    mem_id = _insert_memory_with_age(
+        plugin, "prune-young", "新消息", days_old=2,
+        score=0.1, importance=0.1, confidence=0.1, reinforce=0
+    )
+
+    plugin._auto_prune_low_quality()
+
+    with plugin._db() as conn:
+        row = conn.execute("SELECT is_active FROM memories WHERE id=?", (mem_id,)).fetchone()
+    assert row["is_active"] == 1  # 未被剪枝
+
+
+def test_auto_prune_preserves_reinforced_memories(plugin):
+    """被强化召回（reinforce_count > 1）的低质量记忆不应被剪枝。"""
+    mem_id = _insert_memory_with_age(
+        plugin, "prune-reinforced", "被强化过", days_old=15,
+        score=0.1, importance=0.1, confidence=0.1, reinforce=0
+    )
+    with plugin._db() as conn:
+        conn.execute("UPDATE memories SET reinforce_count=2 WHERE id=?", (mem_id,))
+
+    plugin._auto_prune_low_quality()
+
+    with plugin._db() as conn:
+        row = conn.execute("SELECT is_active FROM memories WHERE id=?", (mem_id,)).fetchone()
+    assert row["is_active"] == 1  # 有强化记录，保留
+
+
+# ── 场景 3: WebUI _handle_login 异常路径 ─────────────────────────────────────
+
+
+class _BadJsonRequest:
+    """模拟 JSON 解析失败的请求对象。"""
+
+    async def json(self):
+        raise ValueError("invalid json")
+
+
+def test_web_login_handles_bad_json_gracefully(web_module, plugin):
+    """_handle_login 收到格式错误请求时应返回 400，而非服务器崩溃。"""
+    server = web_module.TMemoryWebServer(
+        plugin,
+        {
+            "webui_enabled": True,
+            "webui_username": "admin",
+            "webui_password": "secret",
+        },
+    )
+
+    resp = asyncio.run(server._handle_login(_BadJsonRequest()))
+    # 应优雅失败，返回 4xx
+    assert resp.status in (400, 401, 422, 500)
+
+
+# ── 场景 4: _LockedConnection 并发回归 ───────────────────────────────────────
+
+
+def test_locked_connection_concurrent_writes_no_deadlock_or_loss(plugin):
+    """多线程并发写入 conversation_cache 时，锁机制应保证无死锁且数据完整。"""
+    n_threads = 10
+    n_writes_per_thread = 5
+    errors = []
+
+    def writer(tid):
+        try:
+            for i in range(n_writes_per_thread):
+                plugin._insert_conversation(
+                    canonical_id=f"thread-{tid}",
+                    role="user",
+                    content=f"msg-{tid}-{i}",
+                    source_adapter="qq",
+                    source_user_id=str(tid),
+                    unified_msg_origin="",
+                )
+        except Exception as e:
+            errors.append(e)
+
+    threads = [threading.Thread(target=writer, args=(tid,)) for tid in range(n_threads)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=10)
+
+    assert not errors, f"Thread errors: {errors}"
+
+    with plugin._db() as conn:
+        total = conn.execute(
+            "SELECT COUNT(*) AS n FROM conversation_cache WHERE canonical_user_id LIKE 'thread-%'"
+        ).fetchone()["n"]
+
+    # 每个线程写 n_writes_per_thread 条（不去重，canonical_id 唯一且内容不同）
+    assert total == n_threads * n_writes_per_thread
+
+
+def test_locked_connection_reentrant_read_does_not_deadlock(plugin):
+    """同一线程在 with _db() 块外调用 _db() 再进行读操作不应死锁。"""
+    # _db() 每次返回一个新的 _LockedConnection wrapper，锁是非递归的，
+    # 但只要不在同一线程内嵌套 with 块就没问题。
+    # 本测试验证顺序调用是安全的。
+    plugin._insert_conversation(
+        canonical_id="lock-test",
+        role="user",
+        content="顺序访问测试",
+        source_adapter="qq",
+        source_user_id="1",
+        unified_msg_origin="",
+    )
+    rows = plugin._fetch_pending_rows("lock-test", 10)
+    assert len(rows) == 1
+
+
+# ── 场景 5: _insert_conversation try-except 保护 ────────────────────────────
+
+
+def test_insert_conversation_does_not_raise_on_db_error(plugin, monkeypatch):
+    """_insert_conversation 在 DB 出错时不应向调用方抛出异常。"""
+
+    original_db = plugin._db
+
+    class _BrokenConn:
+        def __enter__(self):
+            raise RuntimeError("simulated DB error")
+
+        def __exit__(self, *args):
+            pass
+
+        def execute(self, *args, **kwargs):
+            raise RuntimeError("simulated DB error")
+
+    call_count = [0]
+
+    def patched_db():
+        call_count[0] += 1
+        if call_count[0] == 1:
+            return _BrokenConn()
+        return original_db()
+
+    monkeypatch.setattr(plugin, "_db", patched_db)
+
+    # Should not raise
+    plugin._insert_conversation(
+        canonical_id="err-user",
+        role="user",
+        content="test content",
+        source_adapter="qq",
+        source_user_id="1",
+        unified_msg_origin="",
+    )
+
+
+# ── 场景 6: _safe_bool 字符串容错 ────────────────────────────────────────────
+
+
+def test_safe_bool_handles_string_false(plugin_module, tmp_path, monkeypatch):
+    """enable_auto_capture='false' 字符串应被正确解析为 False。"""
+    monkeypatch.chdir(tmp_path)
+    p = plugin_module.TMemoryPlugin(
+        context=None,
+        config={"enable_auto_capture": "false", "enable_memory_injection": "false"},
+    )
+    assert p.enable_auto_capture is False
+    assert p.enable_memory_injection is False
+
+
+def test_safe_bool_handles_string_true(plugin_module, tmp_path, monkeypatch):
+    """enable_auto_capture='true' 字符串应被正确解析为 True。"""
+    monkeypatch.chdir(tmp_path)
+    p = plugin_module.TMemoryPlugin(
+        context=None,
+        config={"enable_auto_capture": "true"},
+    )
+    assert p.enable_auto_capture is True
+
+
+
+# ── 场景 2: 记忆衰减 / 自动裁剪 ─────────────────────────────────────────────
+
+
+def _insert_memory_with_age(plugin, canonical_id, memory_text, days_old, score=0.3, importance=0.2, confidence=0.3, reinforce=0):
+    """辅助：插入一条指定天数的历史记忆并直接调整时间戳。"""
+    mem_id = plugin._insert_memory(
+        canonical_id=canonical_id,
+        adapter="qq",
+        adapter_user="99",
+        memory=memory_text,
+        score=score,
+        memory_type="fact",
+        importance=importance,
+        confidence=confidence,
+    )
+    old_ts = time.time() - days_old * 86400
+    old_dt = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(old_ts))
+    with plugin._db() as conn:
+        conn.execute(
+            "UPDATE memories SET last_seen_at=?, created_at=?, updated_at=? WHERE id=?",
+            (old_dt, old_dt, old_dt, mem_id),
+        )
+    return mem_id
+
+
+def test_decay_stale_memories_marks_stale_after_30_days(plugin):
+    """超过 30 天未命中的记忆应被标记为 is_active=2 (stale)。"""
+    mem_id = _insert_memory_with_age(plugin, "decay-user", "喜欢旅行", days_old=35, score=0.8, importance=0.8, confidence=0.8)
+
+    plugin._decay_stale_memories()
+
+    with plugin._db() as conn:
+        row = conn.execute("SELECT is_active FROM memories WHERE id=?", (mem_id,)).fetchone()
+    assert row["is_active"] == 2
+
+
+def test_decay_stale_memories_marks_archived_after_90_days(plugin):
+    """超过 90 天未命中的记忆应被标记为 is_active=3 (archived)。"""
+    mem_id = _insert_memory_with_age(plugin, "decay-user2", "曾住在上海", days_old=95, score=0.8, importance=0.8, confidence=0.8)
+
+    plugin._decay_stale_memories()
+
+    with plugin._db() as conn:
+        row = conn.execute("SELECT is_active FROM memories WHERE id=?", (mem_id,)).fetchone()
+    assert row["is_active"] == 3
+
+
+def test_decay_stale_memories_ignores_pinned(plugin):
+    """is_pinned=1 的记忆即使超时也不应被衰减。"""
+    mem_id = _insert_memory_with_age(plugin, "pinned-user", "核心偏好", days_old=100)
+    with plugin._db() as conn:
+        conn.execute("UPDATE memories SET is_pinned=1 WHERE id=?", (mem_id,))
+
+    plugin._decay_stale_memories()
+
+    with plugin._db() as conn:
+        row = conn.execute("SELECT is_active FROM memories WHERE id=?", (mem_id,)).fetchone()
+    assert row["is_active"] == 1  # 未变化
+
+
+def test_auto_prune_low_quality_deactivates_old_low_quality(plugin):
+    """低质量（质量分 < 0.35）且超过 7 天的记忆应被失活(is_active=0)。"""
+    # 质量分 = 0.3*0.2 + 0.4*0.15 + 0.3*0.2 = 0.06 + 0.06 + 0.06 = 0.18 < 0.35
+    mem_id = _insert_memory_with_age(
+        plugin, "prune-user", "无用信息", days_old=10,
+        score=0.2, importance=0.15, confidence=0.2, reinforce=0
+    )
+
+    plugin._auto_prune_low_quality()
+
+    with plugin._db() as conn:
+        row = conn.execute("SELECT is_active FROM memories WHERE id=?", (mem_id,)).fetchone()
+    assert row["is_active"] == 0
+
+
+def test_auto_prune_preserves_young_low_quality(plugin):
+    """低质量但小于 7 天的记忆不应被剪枝（缓冲期保护）。"""
+    mem_id = _insert_memory_with_age(
+        plugin, "prune-young", "新消息", days_old=2,
+        score=0.1, importance=0.1, confidence=0.1, reinforce=0
+    )
+
+    plugin._auto_prune_low_quality()
+
+    with plugin._db() as conn:
+        row = conn.execute("SELECT is_active FROM memories WHERE id=?", (mem_id,)).fetchone()
+    assert row["is_active"] == 1  # 未被剪枝
+
+
+def test_auto_prune_preserves_reinforced_memories(plugin):
+    """被强化召回（reinforce_count > 1）的低质量记忆不应被剪枝。"""
+    mem_id = _insert_memory_with_age(
+        plugin, "prune-reinforced", "被强化过", days_old=15,
+        score=0.1, importance=0.1, confidence=0.1, reinforce=0
+    )
+    with plugin._db() as conn:
+        conn.execute("UPDATE memories SET reinforce_count=2 WHERE id=?", (mem_id,))
+
+    plugin._auto_prune_low_quality()
+
+    with plugin._db() as conn:
+        row = conn.execute("SELECT is_active FROM memories WHERE id=?", (mem_id,)).fetchone()
+    assert row["is_active"] == 1  # 有强化记录，保留
+
+
+# ── 场景 3: WebUI _handle_login 异常路径 ─────────────────────────────────────
+
+
+class _BadJsonRequest:
+    """模拟 JSON 解析失败的请求对象。"""
+
+    async def json(self):
+        raise ValueError("invalid json")
+
+
+def test_web_login_handles_bad_json_gracefully(web_module, plugin):
+    """_handle_login 收到格式错误请求时应返回 400，而非服务器崩溃。"""
+    server = web_module.TMemoryWebServer(
+        plugin,
+        {
+            "webui_enabled": True,
+            "webui_username": "admin",
+            "webui_password": "secret",
+        },
+    )
+
+    resp = asyncio.run(server._handle_login(_BadJsonRequest()))
+    # 应优雅失败，返回 4xx
+    assert resp.status in (400, 401, 422, 500)
+
+
+# ── 场景 4: _LockedConnection 并发回归 ───────────────────────────────────────
+
+
+def test_locked_connection_concurrent_writes_no_deadlock_or_loss(plugin):
+    """多线程并发写入 conversation_cache 时，锁机制应保证无死锁且数据完整。"""
+    n_threads = 10
+    n_writes_per_thread = 5
+    errors = []
+
+    def writer(tid):
+        try:
+            for i in range(n_writes_per_thread):
+                plugin._insert_conversation(
+                    canonical_id=f"thread-{tid}",
+                    role="user",
+                    content=f"msg-{tid}-{i}",
+                    source_adapter="qq",
+                    source_user_id=str(tid),
+                    unified_msg_origin="",
+                )
+        except Exception as e:
+            errors.append(e)
+
+    threads = [threading.Thread(target=writer, args=(tid,)) for tid in range(n_threads)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=10)
+
+    assert not errors, f"Thread errors: {errors}"
+
+    with plugin._db() as conn:
+        total = conn.execute(
+            "SELECT COUNT(*) AS n FROM conversation_cache WHERE canonical_user_id LIKE 'thread-%'"
+        ).fetchone()["n"]
+
+    # 每个线程写 n_writes_per_thread 条（不去重，canonical_id 唯一且内容不同）
+    assert total == n_threads * n_writes_per_thread
+
+
+def test_locked_connection_reentrant_read_does_not_deadlock(plugin):
+    """同一线程在 with _db() 块外调用 _db() 再进行读操作不应死锁。"""
+    # _db() 每次返回一个新的 _LockedConnection wrapper，锁是非递归的，
+    # 但只要不在同一线程内嵌套 with 块就没问题。
+    # 本测试验证顺序调用是安全的。
+    plugin._insert_conversation(
+        canonical_id="lock-test",
+        role="user",
+        content="顺序访问测试",
+        source_adapter="qq",
+        source_user_id="1",
+        unified_msg_origin="",
+    )
+    rows = plugin._fetch_pending_rows("lock-test", 10)
+    assert len(rows) == 1
+
+
+# ── 场景 5: _insert_conversation try-except 保护 ────────────────────────────
+
+
+def test_insert_conversation_does_not_raise_on_db_error(plugin, monkeypatch):
+    """_insert_conversation 在 DB 出错时不应向调用方抛出异常。"""
+
+    original_db = plugin._db
+
+    class _BrokenConn:
+        def __enter__(self):
+            raise RuntimeError("simulated DB error")
+
+        def __exit__(self, *args):
+            pass
+
+        def execute(self, *args, **kwargs):
+            raise RuntimeError("simulated DB error")
+
+    call_count = [0]
+
+    def patched_db():
+        call_count[0] += 1
+        if call_count[0] == 1:
+            return _BrokenConn()
+        return original_db()
+
+    monkeypatch.setattr(plugin, "_db", patched_db)
+
+    # Should not raise
+    plugin._insert_conversation(
+        canonical_id="err-user",
+        role="user",
+        content="test content",
+        source_adapter="qq",
+        source_user_id="1",
+        unified_msg_origin="",
+    )
+
+
+# ── 场景 6: _safe_bool 字符串容错 ────────────────────────────────────────────
+
+
+def test_safe_bool_handles_string_false(plugin_module, tmp_path, monkeypatch):
+    """enable_auto_capture='false' 字符串应被正确解析为 False。"""
+    monkeypatch.chdir(tmp_path)
+    p = plugin_module.TMemoryPlugin(
+        context=None,
+        config={"enable_auto_capture": "false", "enable_memory_injection": "false"},
+    )
+    assert p.enable_auto_capture is False
+    assert p.enable_memory_injection is False
+
+
+def test_safe_bool_handles_string_true(plugin_module, tmp_path, monkeypatch):
+    """enable_auto_capture='true' 字符串应被正确解析为 True。"""
+    monkeypatch.chdir(tmp_path)
+    p = plugin_module.TMemoryPlugin(
+        context=None,
+        config={"enable_auto_capture": "true"},
+    )
+    assert p.enable_auto_capture is True

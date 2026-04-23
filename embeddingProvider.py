@@ -19,7 +19,11 @@ class BaseEmbeddingProvider(ABC):
     
     def __init__(self):
         pass
-    
+
+    async def close(self) -> None:
+        """关闭底层 HTTP 会话（如有）。子类按需覆盖。"""
+        pass
+
     @abstractmethod
     async def embed_text(self, text: str) -> List[float]:
         """将文本向量化为向量
@@ -65,7 +69,16 @@ class VolcEmbeddingsProvider(BaseEmbeddingProvider):
         if self._session is None or self._session.closed:
             self._session = aiohttp.ClientSession()
         return self._session
-    
+
+    async def close(self) -> None:
+        """关闭底层 HTTP 会话，释放连接资源。"""
+        if self._session is not None and not self._session.closed:
+            try:
+                await self._session.close()
+            except Exception as e:
+                logger.warning("VolcEmbeddingsProvider.close() error: %s", e)
+            self._session = None
+
     async def embed_text(self, text: str) -> List[float]:
         """向量化单条文本"""
         try:
@@ -147,7 +160,16 @@ class OpenAIEmbeddingProvider(BaseEmbeddingProvider):
         if self._session is None or self._session.closed:
             self._session = aiohttp.ClientSession()
         return self._session
-    
+
+    async def close(self) -> None:
+        """关闭底层 HTTP 会话，释放连接资源。"""
+        if self._session is not None and not self._session.closed:
+            try:
+                await self._session.close()
+            except Exception as e:
+                logger.warning("OpenAIEmbeddingProvider.close() error: %s", e)
+            self._session = None
+
     async def embed_text(self, text: str) -> List[float]:
         """向量化单条文本"""
         try:
