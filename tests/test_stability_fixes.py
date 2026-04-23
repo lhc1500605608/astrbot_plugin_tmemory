@@ -70,9 +70,9 @@ async def test_distill_rows_with_llm_uses_mock_provider(plugin_with_ctx):
         return fake_resp
 
     ctx.llm_generate = fake_llm_generate
-    plugin.distill_provider_id = "mock-provider"
-    plugin.distill_model_id = "mock-model"
-    plugin.use_independent_distill_model = True
+    plugin._cfg.distill_provider_id = "mock-provider"
+    plugin._cfg.distill_model_id = "mock-model"
+    plugin._cfg.use_independent_distill_model = True
 
     items, tok_in, tok_out = await plugin._distill_rows_with_llm(rows)
 
@@ -105,9 +105,9 @@ async def test_distill_rows_with_llm_fallback_on_llm_error(plugin_with_ctx):
         raise RuntimeError("simulate LLM timeout")
 
     ctx.llm_generate = bad_llm
-    plugin.distill_provider_id = "mock-provider"
-    plugin.distill_model_id = ""
-    plugin.use_independent_distill_model = True
+    plugin._cfg.distill_provider_id = "mock-provider"
+    plugin._cfg.distill_model_id = ""
+    plugin._cfg.use_independent_distill_model = True
 
     items, tok_in, tok_out = await plugin._distill_rows_with_llm(rows)
 
@@ -133,9 +133,9 @@ async def test_distill_rows_with_llm_fallback_when_no_provider(plugin):
         }
     ]
 
-    plugin.distill_provider_id = ""
-    plugin.distill_model_id = ""
-    plugin.use_independent_distill_model = False
+    plugin._cfg.distill_provider_id = ""
+    plugin._cfg.distill_model_id = ""
+    plugin._cfg.use_independent_distill_model = False
 
     items, tok_in, tok_out = await plugin._distill_rows_with_llm(rows)
 
@@ -278,16 +278,17 @@ def test_web_login_handles_bad_json_gracefully(web_module, plugin):
 # ── 场景 4: _LockedConnection 并发回归 ───────────────────────────────────────
 
 
-def test_locked_connection_concurrent_writes_no_deadlock_or_loss(plugin):
+@pytest.mark.asyncio
+async def test_locked_connection_concurrent_writes_no_deadlock_or_loss(plugin):
     """多线程并发写入 conversation_cache 时，锁机制应保证无死锁且数据完整。"""
     n_threads = 10
     n_writes_per_thread = 5
     errors = []
 
-    def writer(tid):
+    async def writer(tid):
         try:
             for i in range(n_writes_per_thread):
-                plugin._insert_conversation(
+                await plugin._insert_conversation(
                     canonical_id=f"thread-{tid}",
                     role="user",
                     content=f"msg-{tid}-{i}",
@@ -298,7 +299,10 @@ def test_locked_connection_concurrent_writes_no_deadlock_or_loss(plugin):
         except Exception as e:
             errors.append(e)
 
-    threads = [threading.Thread(target=writer, args=(tid,)) for tid in range(n_threads)]
+    def thread_runner(tid):
+        asyncio.run(writer(tid))
+
+    threads = [threading.Thread(target=thread_runner, args=(tid,)) for tid in range(n_threads)]
     for t in threads:
         t.start()
     for t in threads:
@@ -315,12 +319,13 @@ def test_locked_connection_concurrent_writes_no_deadlock_or_loss(plugin):
     assert total == n_threads * n_writes_per_thread
 
 
-def test_locked_connection_reentrant_read_does_not_deadlock(plugin):
+@pytest.mark.asyncio
+async def test_locked_connection_reentrant_read_does_not_deadlock(plugin):
     """同一线程在 with _db() 块外调用 _db() 再进行读操作不应死锁。"""
     # _db() 每次返回一个新的 _LockedConnection wrapper，锁是非递归的，
     # 但只要不在同一线程内嵌套 with 块就没问题。
     # 本测试验证顺序调用是安全的。
-    plugin._insert_conversation(
+    await plugin._insert_conversation(
         canonical_id="lock-test",
         role="user",
         content="顺序访问测试",
@@ -335,7 +340,8 @@ def test_locked_connection_reentrant_read_does_not_deadlock(plugin):
 # ── 场景 5: _insert_conversation try-except 保护 ────────────────────────────
 
 
-def test_insert_conversation_does_not_raise_on_db_error(plugin, monkeypatch):
+@pytest.mark.asyncio
+async def test_insert_conversation_does_not_raise_on_db_error(plugin, monkeypatch):
     """_insert_conversation 在 DB 出错时不应向调用方抛出异常。"""
 
     original_db = plugin._db
@@ -361,7 +367,7 @@ def test_insert_conversation_does_not_raise_on_db_error(plugin, monkeypatch):
     monkeypatch.setattr(plugin, "_db", patched_db)
 
     # Should not raise
-    plugin._insert_conversation(
+    await plugin._insert_conversation(
         canonical_id="err-user",
         role="user",
         content="test content",
@@ -381,8 +387,8 @@ def test_safe_bool_handles_string_false(plugin_module, tmp_path, monkeypatch):
         context=None,
         config={"enable_auto_capture": "false", "enable_memory_injection": "false"},
     )
-    assert p.enable_auto_capture is False
-    assert p.enable_memory_injection is False
+    assert p._cfg.enable_auto_capture is False
+    assert p._cfg.enable_memory_injection is False
 
 
 def test_safe_bool_handles_string_true(plugin_module, tmp_path, monkeypatch):
@@ -392,7 +398,7 @@ def test_safe_bool_handles_string_true(plugin_module, tmp_path, monkeypatch):
         context=None,
         config={"enable_auto_capture": "true"},
     )
-    assert p.enable_auto_capture is True
+    assert p._cfg.enable_auto_capture is True
 
 
 
@@ -530,16 +536,17 @@ def test_web_login_handles_bad_json_gracefully(web_module, plugin):
 # ── 场景 4: _LockedConnection 并发回归 ───────────────────────────────────────
 
 
-def test_locked_connection_concurrent_writes_no_deadlock_or_loss(plugin):
+@pytest.mark.asyncio
+async def test_locked_connection_concurrent_writes_no_deadlock_or_loss(plugin):
     """多线程并发写入 conversation_cache 时，锁机制应保证无死锁且数据完整。"""
     n_threads = 10
     n_writes_per_thread = 5
     errors = []
 
-    def writer(tid):
+    async def writer(tid):
         try:
             for i in range(n_writes_per_thread):
-                plugin._insert_conversation(
+                await plugin._insert_conversation(
                     canonical_id=f"thread-{tid}",
                     role="user",
                     content=f"msg-{tid}-{i}",
@@ -550,7 +557,10 @@ def test_locked_connection_concurrent_writes_no_deadlock_or_loss(plugin):
         except Exception as e:
             errors.append(e)
 
-    threads = [threading.Thread(target=writer, args=(tid,)) for tid in range(n_threads)]
+    def thread_runner(tid):
+        asyncio.run(writer(tid))
+
+    threads = [threading.Thread(target=thread_runner, args=(tid,)) for tid in range(n_threads)]
     for t in threads:
         t.start()
     for t in threads:
@@ -567,12 +577,13 @@ def test_locked_connection_concurrent_writes_no_deadlock_or_loss(plugin):
     assert total == n_threads * n_writes_per_thread
 
 
-def test_locked_connection_reentrant_read_does_not_deadlock(plugin):
+@pytest.mark.asyncio
+async def test_locked_connection_reentrant_read_does_not_deadlock(plugin):
     """同一线程在 with _db() 块外调用 _db() 再进行读操作不应死锁。"""
     # _db() 每次返回一个新的 _LockedConnection wrapper，锁是非递归的，
     # 但只要不在同一线程内嵌套 with 块就没问题。
     # 本测试验证顺序调用是安全的。
-    plugin._insert_conversation(
+    await plugin._insert_conversation(
         canonical_id="lock-test",
         role="user",
         content="顺序访问测试",
@@ -587,7 +598,8 @@ def test_locked_connection_reentrant_read_does_not_deadlock(plugin):
 # ── 场景 5: _insert_conversation try-except 保护 ────────────────────────────
 
 
-def test_insert_conversation_does_not_raise_on_db_error(plugin, monkeypatch):
+@pytest.mark.asyncio
+async def test_insert_conversation_does_not_raise_on_db_error(plugin, monkeypatch):
     """_insert_conversation 在 DB 出错时不应向调用方抛出异常。"""
 
     original_db = plugin._db
@@ -613,7 +625,7 @@ def test_insert_conversation_does_not_raise_on_db_error(plugin, monkeypatch):
     monkeypatch.setattr(plugin, "_db", patched_db)
 
     # Should not raise
-    plugin._insert_conversation(
+    await plugin._insert_conversation(
         canonical_id="err-user",
         role="user",
         content="test content",
@@ -633,8 +645,8 @@ def test_safe_bool_handles_string_false(plugin_module, tmp_path, monkeypatch):
         context=None,
         config={"enable_auto_capture": "false", "enable_memory_injection": "false"},
     )
-    assert p.enable_auto_capture is False
-    assert p.enable_memory_injection is False
+    assert p._cfg.enable_auto_capture is False
+    assert p._cfg.enable_memory_injection is False
 
 
 def test_safe_bool_handles_string_true(plugin_module, tmp_path, monkeypatch):
@@ -644,4 +656,4 @@ def test_safe_bool_handles_string_true(plugin_module, tmp_path, monkeypatch):
         context=None,
         config={"enable_auto_capture": "true"},
     )
-    assert p.enable_auto_capture is True
+    assert p._cfg.enable_auto_capture is True

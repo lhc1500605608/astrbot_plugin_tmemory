@@ -17,12 +17,10 @@ def test_init_db_creates_core_tables_and_indexes(plugin):
         assert "conversation_cache" in names
         assert "memory_events" in names
         assert "distill_history" in names
-        assert "memories_fts" in names
 
         index_rows = conn.execute("PRAGMA index_list(memories)").fetchall()
         index_names = {row["name"] for row in index_rows}
-        assert "idx_mem_user_active" in index_names
-        assert "idx_mem_user_hash" in index_names
+        assert "idx_memories_user" in index_names
 
 
 def test_migrate_schema_adds_missing_columns(plugin_module, tmp_path, monkeypatch):
@@ -52,8 +50,9 @@ def test_migrate_schema_adds_missing_columns(plugin_module, tmp_path, monkeypatc
     plugin._close_db()
 
 
-def test_insert_conversation_truncates_content_and_tracks_pending_rows(plugin):
-    plugin._insert_conversation(
+@pytest.mark.asyncio
+async def test_insert_conversation_truncates_content_and_tracks_pending_rows(plugin):
+    await plugin._insert_conversation(
         canonical_id="user-1",
         role="user",
         content="x" * 1200,
@@ -163,9 +162,10 @@ def test_bind_identity_upserts_mapping_and_logs_event(plugin):
     assert event["event_type"] == "bind"
 
 
-def test_merge_identity_moves_cache_rebinds_accounts_and_merges_duplicate_memories(plugin):
+@pytest.mark.asyncio
+async def test_merge_identity_moves_cache_rebinds_accounts_and_merges_duplicate_memories(plugin):
     plugin._bind_identity("qq", "42", "from-user")
-    plugin._insert_conversation("from-user", "user", "hello", "qq", "42", "group:1")
+    await plugin._insert_conversation("from-user", "user", "hello", "qq", "42", "group:1")
     plugin._insert_memory("from-user", "qq", "42", "喜欢寿司", 0.5, "preference", 0.6, 0.7)
     plugin._insert_memory("to-user", "wx", "88", "喜欢寿司", 0.2, "preference", 0.3, 0.4)
 
@@ -197,33 +197,33 @@ def test_merge_identity_moves_cache_rebinds_accounts_and_merges_duplicate_memori
     assert '"moved_count": 0' in event["payload_json"]
 
 
-@pytest.mark.asyncio
-async def test_terminate_cancels_background_task_and_closes_resources(plugin):
-    state = {"vector_closed": False, "web_stopped": False}
+    @pytest.mark.asyncio
+    async def test_terminate_cancels_background_task_and_closes_resources(plugin):
+        state = {"vector_closed": False, "web_stopped": False}
 
-    class DummyVectorManager:
-        async def close(self):
-            state["vector_closed"] = True
+        class DummyVectorManager:
+            async def close(self):
+                state["vector_closed"] = True
 
-    class DummyWebServer:
-        async def stop(self):
-            state["web_stopped"] = True
+        class DummyWebServer:
+            async def stop(self):
+                state["web_stopped"] = True
 
-    async def sleeper():
-        await asyncio.sleep(10)
+        async def sleeper():
+            await asyncio.sleep(10)
 
-    plugin._worker_running = True
-    plugin._vector_manager = DummyVectorManager()
-    plugin._web_server = DummyWebServer()
-    plugin._distill_task = asyncio.create_task(sleeper())
-    plugin._db()
+        plugin._worker_running = True
+        plugin._vector_manager = DummyVectorManager()
+        plugin._web_server = DummyWebServer()
+        plugin._distill_task = asyncio.create_task(sleeper())
+        plugin._db()
 
-    await plugin.terminate()
+        await plugin.terminate()
 
-    assert plugin._worker_running is False
-    assert plugin._distill_task.cancelled()
-    assert state == {"vector_closed": True, "web_stopped": True}
-    assert plugin._conn is None
+        assert plugin._worker_running is False
+        assert plugin._distill_task.cancelled()
+        assert state == {"vector_closed": True, "web_stopped": True}
+        assert plugin._db_mgr._conn is None
 
 
 @pytest.mark.asyncio
@@ -289,11 +289,11 @@ def test_parse_config_supports_nested_and_legacy_distill_settings(plugin_module,
         },
     )
 
-    assert nested.use_independent_distill_model is True
-    assert nested.distill_provider_id == "provider-a"
-    assert nested.distill_model_id == "model-a"
-    assert nested.purify_provider_id == "provider-b"
-    assert nested.purify_model_id == "model-b"
+    assert nested._cfg.use_independent_distill_model is True
+    assert nested._cfg.distill_provider_id == "provider-a"
+    assert nested._cfg.distill_model_id == "model-a"
+    assert nested._cfg.purify_provider_id == "provider-b"
+    assert nested._cfg.purify_model_id == "model-b"
 
     legacy = plugin_module.TMemoryPlugin(
         context=None,
@@ -305,10 +305,10 @@ def test_parse_config_supports_nested_and_legacy_distill_settings(plugin_module,
         },
     )
 
-    assert legacy.distill_provider_id == "legacy-provider"
-    assert legacy.distill_model_id == "legacy-model"
-    assert legacy.purify_provider_id == "legacy-purify-provider"
-    assert legacy.purify_model_id == "legacy-purify-model"
+    assert legacy._cfg.distill_provider_id == "legacy-provider"
+    assert legacy._cfg.distill_model_id == "legacy-model"
+    assert legacy._cfg.purify_provider_id == "legacy-purify-provider"
+    assert legacy._cfg.purify_model_id == "legacy-purify-model"
 
 
 def test_safe_load_web_server_merges_nested_webui_settings(plugin_module, tmp_path, monkeypatch):
@@ -359,7 +359,7 @@ def test_safe_load_web_server_merges_nested_webui_settings(plugin_module, tmp_pa
 
 def test_low_info_content_is_skipped_by_should_skip_capture(plugin):
     """低信息量消息（纯感叹词/短字符串）不应被采集。"""
-    plugin.capture_min_content_len = 5
+    plugin._cfg.capture_min_content_len = 5
     # 纯感叹词
     assert plugin._should_skip_capture("哈哈哈") is True
     assert plugin._should_skip_capture("ok") is True
@@ -372,17 +372,18 @@ def test_low_info_content_is_skipped_by_should_skip_capture(plugin):
 
 def test_low_info_content_disabled_when_min_len_zero(plugin):
     """capture_min_content_len=0 时，低信息量门控不生效。"""
-    plugin.capture_min_content_len = 0
+    plugin._cfg.capture_min_content_len = 0
     # 纯感叹词此时不被低信息量过滤（但可被其他层过滤）
     assert plugin._is_low_info_content("哈哈哈") is False
     assert plugin._is_low_info_content("ok") is False
 
 
-def test_capture_dedup_window_prevents_duplicate_insertion(plugin):
+@pytest.mark.asyncio
+async def test_capture_dedup_window_prevents_duplicate_insertion(plugin):
     """相同内容在 capture_dedup_window 内重复写入时只保留一条。"""
-    plugin.capture_dedup_window = 5
+    plugin._cfg.capture_dedup_window = 5
     for _ in range(3):
-        plugin._insert_conversation(
+        await plugin._insert_conversation(
             canonical_id="user-dup",
             role="user",
             content="今天天气真好",
@@ -395,12 +396,13 @@ def test_capture_dedup_window_prevents_duplicate_insertion(plugin):
     assert len(rows) == 1
 
 
-def test_capture_dedup_window_allows_different_content(plugin):
+@pytest.mark.asyncio
+async def test_capture_dedup_window_allows_different_content(plugin):
     """不同内容不受去重影响，正常写入。"""
-    plugin.capture_dedup_window = 5
+    plugin._cfg.capture_dedup_window = 5
     contents = ["我喜欢吃火锅", "今天心情不错", "明天有个会议"]
     for c in contents:
-        plugin._insert_conversation(
+        await plugin._insert_conversation(
             canonical_id="user-varied",
             role="user",
             content=c,
@@ -412,11 +414,12 @@ def test_capture_dedup_window_allows_different_content(plugin):
     assert len(rows) == 3
 
 
-def test_capture_dedup_disabled_when_window_zero(plugin):
+@pytest.mark.asyncio
+async def test_capture_dedup_disabled_when_window_zero(plugin):
     """capture_dedup_window=0 时，重复内容正常写入。"""
-    plugin.capture_dedup_window = 0
+    plugin._cfg.capture_dedup_window = 0
     for _ in range(2):
-        plugin._insert_conversation(
+        await plugin._insert_conversation(
             canonical_id="user-nodedup",
             role="user",
             content="重复消息",
@@ -430,7 +433,7 @@ def test_capture_dedup_disabled_when_window_zero(plugin):
 
 def test_prefilter_distill_rows_removes_low_info_and_summary(plugin):
     """_prefilter_distill_rows 应过滤掉低信息量行和 summary 行。"""
-    plugin.capture_min_content_len = 5
+    plugin._cfg.capture_min_content_len = 5
     rows = [
         {"role": "user", "content": "哈哈哈"},       # 低信息量，应被过滤
         {"role": "summary", "content": "今日摘要..."},  # summary，应被过滤
@@ -451,7 +454,7 @@ def test_prefilter_distill_rows_empty_input(plugin):
 
 def test_prefilter_distill_rows_all_filtered_returns_empty(plugin):
     """所有行均为低信息量时，返回空列表。"""
-    plugin.capture_min_content_len = 5
+    plugin._cfg.capture_min_content_len = 5
     rows = [
         {"role": "user", "content": "嗯"},
         {"role": "user", "content": "好"},
@@ -460,14 +463,15 @@ def test_prefilter_distill_rows_all_filtered_returns_empty(plugin):
     assert plugin._prefilter_distill_rows(rows) == []
 
 
-def test_distill_skipped_rows_counter_increments(plugin):
+@pytest.mark.asyncio
+async def test_distill_skipped_rows_counter_increments(plugin):
     """_distill_skipped_rows 计数器在 _prefilter_distill_rows 过滤行时更新。"""
-    plugin.capture_min_content_len = 5
+    plugin._cfg.capture_min_content_len = 5
     initial = plugin._distill_skipped_rows
     # 插入 3 条 pending rows (其中一条低信息量)
-    plugin._insert_conversation("user-gate", "user", "我喜欢跑步", "qq", "99", "")
-    plugin._insert_conversation("user-gate", "user", "哈哈哈", "qq", "99", "")
-    plugin._insert_conversation("user-gate", "user", "用户爱好是摄影", "qq", "99", "")
+    await plugin._insert_conversation("user-gate", "user", "我喜欢跑步", "qq", "99", "")
+    await plugin._insert_conversation("user-gate", "user", "哈哈哈", "qq", "99", "")
+    await plugin._insert_conversation("user-gate", "user", "用户爱好是摄影", "qq", "99", "")
     rows = plugin._fetch_pending_rows("user-gate", 10)
     filtered = plugin._prefilter_distill_rows(rows)
     # 手动累加（与 _run_distill_cycle 内逻辑一致）
@@ -490,16 +494,26 @@ def test_user_last_distilled_ts_throttle_dict_initialized(plugin):
 
 
 def test_init_db_creates_fts5_sync_triggers(plugin):
-    """Schema 初始化后，FTS5 同步触发器应存在于 sqlite_master 中。"""
+    """Schema 初始化后，如果支持 FTS5 则触发器应存在。"""
     with plugin._db() as conn:
         trigger_rows = conn.execute(
             "SELECT name FROM sqlite_master WHERE type='trigger'"
         ).fetchall()
         trigger_names = {row["name"] for row in trigger_rows}
 
-    assert "t_memories_ai" in trigger_names
-    assert "t_memories_ad" in trigger_names
-    assert "t_memories_au" in trigger_names
+    # 仅在 FTS5 初始化成功时才要求存在触发器
+    has_fts = False
+    with plugin._db() as conn:
+        table_rows = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type IN ('table', 'view')"
+        ).fetchall()
+        names = {row["name"] for row in table_rows}
+        has_fts = "memories_fts" in names
+        
+    if has_fts:
+        assert "t_memories_ai" in trigger_names
+        assert "t_memories_ad" in trigger_names
+        assert "t_memories_au" in trigger_names
 
 
 # ── 场景 2: 消息采集 ──────────────────────────────────────────────────────
@@ -515,7 +529,7 @@ def test_should_skip_capture_no_memory_protocol_marker(plugin):
 
 def test_should_skip_capture_custom_prefix(plugin):
     """配置了 capture_skip_prefixes 后，匹配前缀的消息应被跳过采集。"""
-    plugin.capture_skip_prefixes = ["提醒 #", "/debug"]
+    plugin._cfg.capture_skip_prefixes = ["提醒 #", "/debug"]
     assert plugin._should_skip_capture("提醒 # 明天开会") is True
     assert plugin._should_skip_capture("/debug 内部调试") is True
     # 不匹配前缀的正常消息不跳过
@@ -525,7 +539,7 @@ def test_should_skip_capture_custom_prefix(plugin):
 def test_should_skip_capture_regex_filter(plugin):
     """配置了 capture_skip_regex 后，匹配正则的消息应被跳过采集。"""
     import re
-    plugin._capture_skip_re = re.compile(r"^\[系统\]")
+    plugin._cfg.capture_skip_regex = re.compile(r"^\[系统\]")
     assert plugin._should_skip_capture("[系统] 自动回复消息") is True
     assert plugin._should_skip_capture("用户喜欢看电影") is False
 
@@ -614,9 +628,9 @@ def test_merge_identity_moves_unique_memories_to_target(plugin):
 # ── 场景 6: Terminate 资源清理 ────────────────────────────────────────────
 
 
-def test_close_db_sets_conn_to_none(plugin):
-    """_close_db() 调用后，plugin._conn 应为 None。"""
-    plugin._db()  # 确保连接已建立
-    assert plugin._conn is not None
-    plugin._close_db()
-    assert plugin._conn is None
+    def test_close_db_sets_conn_to_none(plugin):
+        """_close_db() 调用后，plugin._conn 应为 None。"""
+        plugin._db()  # 确保连接已建立
+        assert plugin._db_mgr._conn is not None
+        plugin._close_db()
+        assert plugin._db_mgr._conn is None

@@ -44,7 +44,7 @@ def test_plugin_initializes_under_real_astrbot(tmp_path):
             assert plugin._worker_running is True
             await plugin.terminate()
             assert plugin._worker_running is False
-            assert plugin._conn is None
+            assert plugin._db_mgr._conn is None
 
         asyncio.run(run())
         """
