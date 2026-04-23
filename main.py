@@ -95,6 +95,9 @@ class _NullWebServer:
         pass
 
 
+from .core.db import DatabaseManager, _LockedConnection
+from .core.config import PluginConfig, parse_config
+
 @register(
     "tmemory",
     "shangtang",
@@ -108,69 +111,89 @@ class TMemoryPlugin(Star):
         self.plugin_name = "astrbot_plugin_tmemory"
         self.db_path = self._resolve_db_path()
 
-        # ── 持久 DB 连接 ─────────────────────────────────────────────────────
-        self._conn: Optional[sqlite3.Connection] = None
-        self._conn_lock = threading.Lock()
+        # ── DB Manager ─────────────────────────────────────────────────────
+        self._db_mgr = DatabaseManager(self.db_path)
 
-        # ── 安全默认值(先全部设定，再用配置覆盖)──────────────────────────
-        self._set_safe_defaults()
-
-        # ── 从配置解析具体值(失败则保留默认值并记录警告)────────────────────
+        # ── 配置解析 ─────────────────────────────────────────────────────
         try:
-            self._parse_config()
+            self._cfg = parse_config(self.config)
         except Exception as e:
             logger.warning("[tmemory] 配置解析部分失败，使用安全默认值: %s", e)
+            self._cfg = PluginConfig()
+
+        # ── 其他运行时状态 ─────────────────────────────────────────────────────
+        self._vector_manager: Optional["VectorManager"] = None
+        self._sqlite_vec = None
+        self._vec_available = False
+        self._sanitize_patterns = []
+        self._distill_task: Optional[asyncio.Task] = None
+        self._worker_running = False
+        self._merge_needs_vector_rebuild = False
+        self._fts5_needs_rebuild = False
+        self._last_purify_ts = 0.0
+        self._embed_ok_count = 0
+        self._embed_fail_count = 0
+        self._embed_last_error = ""
+        self._vec_query_count = 0
+        self._vec_hit_count = 0
+        self._embed_semaphore = asyncio.Semaphore(4)
+        self._http_session = None
+        self._distill_skipped_rows: int = 0
+        self._user_last_distilled_ts: Dict[str, float] = {}
+
+        # ── 敏感信息脱敏 ──────────────────────────────────────────────────────
+        self._sanitize_patterns = self._build_sanitize_patterns()
 
         # ── WebUI 独立服务器(降级保护)────────────────────────────────────
         self._web_server = self._safe_load_web_server()
 
     def _set_safe_defaults(self):
         """设置所有配置属性的安全默认值，确保任何配置解析失败都不会导致 AttributeError。"""
-        self.cache_max_rows = 20
-        self.memory_max_chars = 220
-        self.enable_auto_capture = True
-        self.capture_assistant_reply = True
-        self._NO_MEMORY_MARKER = "\x00[astrbot:no-memory]\x00"
-        self.capture_skip_prefixes: List[str] = ["提醒 #"]
-        self._capture_skip_re: Optional[re.Pattern] = None
-        self.distill_interval_sec = 17280
-        self.distill_min_batch_count = 20
-        self.distill_batch_limit = 80
-        self.distill_model_id = ""
-        self.distill_provider_id = ""
-        self.enable_memory_injection = True
-        self.manual_purify_default_mode = "both"
-        self.manual_purify_default_limit = 20
+        self._cfg.cache_max_rows = 20
+        self._cfg.memory_max_chars = 220
+        self._cfg.enable_auto_capture = True
+        self._cfg.capture_assistant_reply = True
+        self._cfg.no_memory_marker = "\x00[astrbot:no-memory]\x00"
+        self._cfg.capture_skip_prefixes: List[str] = ["提醒 #"]
+        self._cfg.capture_skip_regex: Optional[re.Pattern] = None
+        self._cfg.distill_interval_sec = 17280
+        self._cfg.distill_min_batch_count = 20
+        self._cfg.distill_batch_limit = 80
+        self._cfg.distill_model_id = ""
+        self._cfg.distill_provider_id = ""
+        self._cfg.enable_memory_injection = True
+        self._cfg.manual_purify_default_mode = "both"
+        self._cfg.manual_purify_default_limit = 20
         self.manual_refine_default_mode = "both"
         self.manual_refine_default_limit = 20
-        self.distill_pause = False
-        self.purify_interval_days = 0
-        self.purify_model_id = ""
-        self.purify_min_score = 0.0
+        self._cfg.distill_pause = False
+        self._cfg.purify_interval_days = 0
+        self._cfg.purify_model_id = ""
+        self._cfg.purify_min_score = 0.0
         # ── 向量检索管理器 ──────────────────────────────────────────
         self._vector_manager: Optional["VectorManager"] = None
-        self.embed_provider_id = ""
-        self.embed_model_id = ""
+        self._cfg.embed_provider_id = ""
+        self._cfg.embed_model_id = ""
         self.embed_model = ""
-        self.embed_dim = 1536
+        self._cfg.embed_dim = 1536
         self.vector_weight = 0.4
         self.min_vector_sim = 0.15
         self._sqlite_vec = None
         self._vec_available = False
-        self.embed_base_url = ""
-        self.embed_api_key = ""
-        self.enable_reranker = False
-        self.rerank_provider_id = ""
-        self.rerank_model_id = ""
+        self._cfg.embed_base_url = ""
+        self._cfg.embed_api_key = ""
+        self._cfg.enable_reranker = False
+        self._cfg.rerank_provider_id = ""
+        self._cfg.rerank_model_id = ""
         self.rerank_model = ""
-        self.rerank_top_n = 5
-        self.rerank_base_url = ""
-        self.memory_scope = "user"
-        self.private_memory_in_group = False
-        self.inject_position = "system_prompt"
-        self.inject_slot_marker = "{{tmemory}}"
-        self.inject_memory_limit = 5
-        self.inject_max_chars = 0
+        self._cfg.rerank_top_n = 5
+        self._cfg.rerank_base_url = ""
+        self._cfg.memory_scope = "user"
+        self._cfg.private_memory_in_group = False
+        self._cfg.inject_position = "system_prompt"
+        self._cfg.inject_slot_marker = "{{tmemory}}"
+        self._cfg.inject_memory_limit = 5
+        self._cfg.inject_max_chars = 0
         self._sanitize_patterns = []
         self._distill_task: Optional[asyncio.Task] = None
         self._worker_running = False
@@ -189,9 +212,9 @@ class TMemoryPlugin(Star):
         # capture_dedup_window: 同用户在最近 N 条未蒸馏缓存中出现相同内容哈希时跳过
         # distill_user_throttle_sec: 单用户最近一次蒸馏完成后的冷却时间(秒)，
         #     冷却内再次出现于 pending_users 列表时跳过，防止高频用户每轮都被处理
-        self.capture_min_content_len = 5
-        self.capture_dedup_window = 10
-        self.distill_user_throttle_sec = 0
+        self._cfg.capture_min_content_len = 5
+        self._cfg.capture_dedup_window = 10
+        self._cfg.distill_user_throttle_sec = 0
         # 运行时统计：每次蒸馏周期中因门控被跳过的行数
         self._distill_skipped_rows: int = 0
         # 内存缓存：per-user 最近蒸馏完成时间戳（用于节流）
@@ -218,271 +241,16 @@ class TMemoryPlugin(Star):
                 merged[key] = self.config.get(key)
         return merged
 
-    @staticmethod
-    def _safe_int(value, default: int, *, label: str = "") -> int:
-        """类型安全的 int 转换；转换失败时记录 warning 并返回默认值。"""
-        try:
-            return int(value)
-        except (TypeError, ValueError) as _e:
-            if label:
-                logger.warning("[tmemory] config %s invalid (%r), using default %s: %s", label, value, default, _e)
-            return default
-
-    @staticmethod
-    def _safe_float(value, default: float, *, label: str = "") -> float:
-        """类型安全的 float 转换；转换失败时记录 warning 并返回默认值。"""
-        try:
-            return float(value)
-        except (TypeError, ValueError) as _e:
-            if label:
-                logger.warning("[tmemory] config %s invalid (%r), using default %s: %s", label, value, default, _e)
-            return default
-
-    @staticmethod
-    def _safe_bool(value, default: bool, *, label: str = "") -> bool:
-        """类型安全的 bool 转换。
-
-        将字符串 "false"/"0"/"no"/"off" 正确识别为 False，
-        避免 bool("false") == True 的陷阱。其他类型直接走 bool() 语义。
-        """
-        if isinstance(value, str):
-            if value.strip().lower() in {"false", "0", "no", "off", ""}:
-                return False
-            if value.strip().lower() in {"true", "1", "yes", "on"}:
-                return True
-            if label:
-                logger.warning("[tmemory] config %s invalid bool string (%r), using default %s", label, value, default)
-            return default
-        return bool(value)
-
-    def _parse_config(self):
-        """从 self.config 解析配置值，覆盖默认值。
-
-        每个配置项独立转换，单项失败不影响其他项解析。
-        """
-        # ── 基础配置 ──────────────────────────────────────────────────────────
-        self.cache_max_rows = self._safe_int(self.config.get("cache_max_rows", 20), 20, label="cache_max_rows")
-        self.memory_max_chars = self._safe_int(self.config.get("memory_max_chars", 220), 220, label="memory_max_chars")
-
-        # ── 自动采集 ──────────────────────────────────────────────────────────
-        self.enable_auto_capture = self._safe_bool(self.config.get("enable_auto_capture", True), True, label="enable_auto_capture")
-        self.capture_assistant_reply = self._safe_bool(
-            self.config.get("capture_assistant_reply", True), True, label="capture_assistant_reply"
-        )
-        # ── 采集过滤器(三层)────────────────────────────────────────────────
-        # 层 1: 跨插件协议标记(最高优先级)
-        #   插件在消息里嵌入 \x00[astrbot:no-memory]\x00，tmemory 识别后跳过。
-        self._NO_MEMORY_MARKER = "\x00[astrbot:no-memory]\x00"
-
-        # 层 2: 文本前缀过滤(配置化)
-        _raw_prefixes = self.config.get("capture_skip_prefixes", "")
-        _user_prefixes = (
-            [p.strip() for p in str(_raw_prefixes).split(",") if p.strip()]
-            if _raw_prefixes
-            else []
-        )
-        self.capture_skip_prefixes: List[str] = [
-            "提醒 #",  # tschedule 兼容旧版(无 marker 时)
-            *_user_prefixes,
-        ]
-
-        # 层 3: 正则过滤(配置化，高级场景)
-        _raw_regex = self.config.get("capture_skip_regex", "")
-        self._capture_skip_re: Optional[re.Pattern] = None
-        if _raw_regex:
-            try:
-                self._capture_skip_re = re.compile(_raw_regex)
-            except re.error as _e:
-                logger.warning("[tmemory] invalid capture_skip_regex: %s", _e)
-
-        # ── 蒸馏调度 ──────────────────────────────────────────────────────────
-        # distill_interval_sec: 两次蒸馏之间的最小间隔(秒)，默认 17280s(约 4.8 小时，每天约 5 次)。
-        # 只有积累了 distill_min_batch_count 条未蒸馏消息的用户才会被蒸馏，
-        # 从而避免实时蒸馏造成的 token 浪费。
-        self.distill_interval_sec = max(
-            4 * 3600, self._safe_int(self.config.get("distill_interval_sec", 17280), 17280, label="distill_interval_sec")
-        )
-        self.distill_min_batch_count = max(
-            8, self._safe_int(self.config.get("distill_min_batch_count", 20), 20, label="distill_min_batch_count")
-        )
-        self.distill_batch_limit = max(
-            20, self._safe_int(self.config.get("distill_batch_limit", 80), 80, label="distill_batch_limit")
-        )
-        
-        # ── 独立蒸馏模型配置 ───────────────────────────────────────────────────
-        distill_cfg = self.config.get("distill_model_settings", {})
-        self.use_independent_distill_model = self._safe_bool(distill_cfg.get("use_independent_distill_model", False), False, label="use_independent_distill_model")
-        self.distill_provider_id = str(distill_cfg.get("distill_provider_id", "")).strip()
-        self.distill_model_id = str(distill_cfg.get("distill_model_id", "")).strip()
-        self.purify_provider_id = str(distill_cfg.get("purify_provider_id", "")).strip()
-        self.purify_model_id = str(distill_cfg.get("purify_model_id", "")).strip()
-
-        # 兼容旧配置项
-        if not self.distill_model_id:
-            self.distill_model_id = str(self.config.get("distill_model_id", "")).strip()
-        if not self.distill_provider_id:
-            self.distill_provider_id = str(self.config.get("distill_provider_id", "")).strip()
-
-        # ── 记忆召回注入 ──────────────────────────────────────────────────────
-        # enable_memory_injection: 是否在 LLM 调用前将记忆上下文注入 system prompt
-        self.enable_memory_injection = self._safe_bool(
-            self.config.get("enable_memory_injection", True), True, label="enable_memory_injection"
-        )
-        self.manual_purify_default_mode = (
-            str(
-                self.config.get(
-                    "manual_purify_default_mode",
-                    self.config.get("manual_refine_default_mode", "both"),
-                )
-            )
-            .strip()
-            .lower()
-        )
-        if self.manual_purify_default_mode not in {"merge", "split", "both"}:
-            self.manual_purify_default_mode = "both"
-        self.manual_purify_default_limit = max(
-            1,
-            min(
-                200,
-                self._safe_int(
-                    self.config.get(
-                        "manual_purify_default_limit",
-                        self.config.get("manual_refine_default_limit", 20),
-                    ),
-                    20,
-                    label="manual_purify_default_limit",
-                ),
-            ),
-        )
-        # 兼容旧属性名
-        self.manual_refine_default_mode = self.manual_purify_default_mode
-        self.manual_refine_default_limit = self.manual_purify_default_limit
-
-        # ── 蒸馏暂停开关 ──────────────────────────────────────────────────────
-        self.distill_pause = self._safe_bool(self.config.get("distill_pause", False), False, label="distill_pause")
-
-        # ── 提纯(Purification)───────────────────────────────────────────────
-        # 对已蒸馏的 memories 做优化/重评，淘汰低分/低置信/低重要的记忆 。
-        # purify_interval_days: 每隔多少天执行一次提纯(0=不启用)
-        # purify_model_id: 用于提纯的 LLM provider/model id
-        # purify_min_score: 综合分低于此值的记忆被失活(0=不限)
-        self.purify_interval_days = max(
-            0,
-            self._safe_int(
-                self.config.get(
-                    "purify_interval_days",
-                    self.config.get("refine_quality_interval_days", 0),
-                ),
-                0,
-                label="purify_interval_days",
-            ),
-        )
-        if not self.purify_model_id:
-            self.purify_model_id = str(
-                self.config.get(
-                    "purify_model_id",
-                    self.config.get("refine_quality_model_id", ""),
-                )
-            ).strip()
-        if not self.purify_provider_id:
-            self.purify_provider_id = str(self.config.get("purify_provider_id", "")).strip()
-        self.purify_min_score = max(
-            0.0,
-            min(
-                1.0,
-                self._safe_float(
-                    self.config.get(
-                        "purify_min_score",
-                        self.config.get("refine_quality_min_score", 0.0),
-                    ),
-                    0.0,
-                    label="purify_min_score",
-                ),
-            ),
-        )
-        # ── 向量检索 ─────────────────────────────────────────────────────────
-        # 从 vector_retrieval 子配置读取
-        vr = self._get_vector_retrieval_config()
-        self.enable_vector_search = self._safe_bool(vr.get("enable_vector_search", False), False, label="enable_vector_search")
-        self.embed_provider_id = str(vr.get("embedding_provider", "")).strip()
-        self.embed_model_id = str(vr.get("embedding_model", "")).strip()
-        self.embed_model = self.embed_model_id
-        self.embed_dim = max(64, self._safe_int(vr.get("vector_dim", 2048), 2048, label="vector_dim"))
-        self.vector_weight = 0.4
-        self.min_vector_sim = 0.15
-        self._sqlite_vec = None
-        self._vec_available = False
-
-        # ── Reranker(可选，内置 provider 反射调用)──────────────────────────
-        self.enable_reranker = self._safe_bool(self.config.get("enable_reranker", False), False, label="enable_reranker")
-        self.rerank_provider_id = str(self.config.get("rerank_provider_id", "")).strip()
-        self.rerank_model_id = str(
-            self.config.get("rerank_model_id", self.config.get("rerank_model", ""))
-        ).strip()
-        # 兼容旧属性名
-        self.rerank_model = self.rerank_model_id
-        self.rerank_top_n = max(1, self._safe_int(self.config.get("rerank_top_n", 5), 5, label="rerank_top_n"))
-
-        # ── 用户/人格隔离 ─────────────────────────────────────────────────────
-        # memory_scope 可选值:
-        #   "user"    - 仅按用户隔离，跨会话/群聊共用同一份记忆(默认)
-        #   "session" - 按 unified_msg_origin 隔离，群聊每个会话独立
-        # private_memory_in_group: True 时允许群聊注入私聊记忆(默认 False，保护隐私)
-        self.memory_scope = str(self.config.get("memory_scope", "user")).strip().lower()
-        if self.memory_scope not in {"user", "session"}:
-            self.memory_scope = "user"
-        self.private_memory_in_group = self._safe_bool(
-            self.config.get("private_memory_in_group", False), False, label="private_memory_in_group"
-        )
-
-        # ── 注入位置与召回量 ──────────────────────────────────────────────────
-        # inject_position 可选值:
-        #   "system_prompt"        - 注入到 system_prompt(追加末尾，默认)
-        #   "user_message_before"  - 作为用户消息的前缀(memory block + \n\n + user msg)
-        #   "user_message_after"   - 作为用户消息的后缀(user msg + \n\n + memory block)
-        #   "slot"                 - 替换 system_prompt 中的占位符
-        # inject_slot_marker: "slot" 模式时 system_prompt 中的占位文字
-        # inject_max_chars: 注入块字符上限，0=不限
-        self.inject_position = (
-            str(self.config.get("inject_position", "system_prompt")).strip().lower()
-        )
-        if self.inject_position not in {
-            "system_prompt",
-            "user_message_before",
-            "user_message_after",
-            "slot",
-        }:
-            self.inject_position = "system_prompt"
-        self.inject_slot_marker = str(
-            self.config.get("inject_slot_marker", "{{tmemory}}")
-        ).strip()
-        self.inject_memory_limit = self._safe_int(self.config.get("inject_memory_limit", 5), 5, label="inject_memory_limit")
-        self.inject_max_chars = self._safe_int(self.config.get("inject_max_chars", 0), 0, label="inject_max_chars")
-
-        # ── 敏感信息脱敏 ──────────────────────────────────────────────────────
-        self._sanitize_patterns = self._build_sanitize_patterns()
-
-        # ── Embedding API 配置(从 vector_retrieval 子配置读取)────────────────
-        vr = self._get_vector_retrieval_config()
-        self.embed_base_url = str(vr.get("embedding_base_url", "")).strip()
-        self.embed_api_key = str(vr.get("embedding_api_key", "")).strip()
-
-        # ── Reranker API 配置 ─────────────────────────────────────────────────
-        self.rerank_base_url = str(self.config.get("rerank_base_url", "")).strip()
-
-        # ── 触发门控与批处理效率 ──────────────────────────────────────────────
-        # capture_min_content_len: 有效字符低于此值的消息跳过采集(0=不限)
-        self.capture_min_content_len = max(
-            0, self._safe_int(self.config.get("capture_min_content_len", 5), 5, label="capture_min_content_len")
-        )
-        # capture_dedup_window: 在同用户最近 N 条未蒸馏缓存中去重(0=不去重)
-        self.capture_dedup_window = max(
-            0, self._safe_int(self.config.get("capture_dedup_window", 10), 10, label="capture_dedup_window")
-        )
-        # distill_user_throttle_sec: 单用户蒸馏后的冷却时间(0=不启用)
-        self.distill_user_throttle_sec = max(
-            0, self._safe_int(self.config.get("distill_user_throttle_sec", 0), 0, label="distill_user_throttle_sec")
-        )
+    def _get_vector_retrieval_config_from_cfg(self) -> Dict:
+        """从 self._cfg 返回 vector_retrieval 字典用于传递给 VectorManager"""
+        return {
+            "enable_vector_search": self._cfg.enable_vector_search,
+            "embedding_provider": self._cfg.embed_provider_id,
+            "embedding_api_key": self._cfg.embed_api_key,
+            "embedding_model": self._cfg.embed_model_id,
+            "embedding_base_url": self._cfg.embed_base_url,
+            "vector_dim": self._cfg.embed_dim,
+        }
 
     def _safe_load_web_server(self):
         """安全加载 WebUI 服务器，失败时降级为 _NullWebServer。"""
@@ -530,10 +298,10 @@ class TMemoryPlugin(Star):
         self._migrate_schema()
 
         # 初始化 VectorManager(如果向量检索启用)
-        if self.enable_vector_search:
+        if self._cfg.enable_vector_search:
             try:
                 from .vector_manager import VectorManager
-                vr = self._get_vector_retrieval_config()
+                vr = self._get_vector_retrieval_config_from_cfg()
                 self._vector_manager = VectorManager(self.db_path, vr)
                 await self._vector_manager.initialize()
                 logger.info("[tmemory] VectorManager initialized")
@@ -554,9 +322,9 @@ class TMemoryPlugin(Star):
         logger.info(
             "[tmemory] initialized, db=%s, auto_capture=%s, memory_injection=%s, distill_interval=%ss",
             self.db_path,
-            self.enable_auto_capture,
-            self.enable_memory_injection,
-            self.distill_interval_sec,
+            self._cfg.enable_auto_capture,
+            self._cfg.enable_memory_injection,
+            self._cfg.distill_interval_sec,
         )
 
     async def terminate(self):
@@ -596,7 +364,7 @@ class TMemoryPlugin(Star):
     @filter.event_message_type(filter.EventMessageType.ALL)
     async def on_any_message(self, event: AstrMessageEvent):
         """自动采集每条用户消息，仅写入 conversation_cache，不实时蒸馏。"""
-        if not self.enable_auto_capture:
+        if not self._cfg.enable_auto_capture:
             return
 
         text = self._normalize_text(getattr(event, "message_str", "") or "")
@@ -613,7 +381,7 @@ class TMemoryPlugin(Star):
 
         canonical_id, adapter, adapter_user = self._resolve_current_identity(event)
         umo = self._safe_get_unified_msg_origin(event)
-        self._insert_conversation(
+        await self._insert_conversation(
             canonical_id=canonical_id,
             role="user",
             content=self._sanitize_text(text),
@@ -627,7 +395,7 @@ class TMemoryPlugin(Star):
     @filter.on_llm_response()
     async def on_llm_response(self, event: AstrMessageEvent, resp: LLMResponse):
         """可选采集模型回复，作为后续批量蒸馏素材。"""
-        if not self.enable_auto_capture or not self.capture_assistant_reply:
+        if not self._cfg.enable_auto_capture or not self._cfg.capture_assistant_reply:
             return
 
         text = self._normalize_text(getattr(resp, "completion_text", "") or "")
@@ -641,7 +409,7 @@ class TMemoryPlugin(Star):
         try:
             canonical_id, adapter, adapter_user = self._resolve_current_identity(event)
             umo = self._safe_get_unified_msg_origin(event)
-            self._insert_conversation(
+            await self._insert_conversation(
                 canonical_id=canonical_id,
                 role="assistant",
                 content=text,
@@ -658,7 +426,7 @@ class TMemoryPlugin(Star):
 
         只追加到 system prompt 尾部，不替换原有内容，确保 persona 等配置不受影响。
         """
-        if not self.enable_memory_injection:
+        if not self._cfg.enable_memory_injection:
             return
 
         try:
@@ -671,27 +439,27 @@ class TMemoryPlugin(Star):
             memory_block = await self._build_injection_block(
                 canonical_id,
                 query,
-                self.inject_memory_limit,
+                self._cfg.inject_memory_limit,
                 scope=scope,
                 persona_id=persona_id,
-                exclude_private=(is_group and not self.private_memory_in_group),
+                exclude_private=(is_group and not self._cfg.private_memory_in_group),
             )
             if not memory_block:
                 return
 
             # 注入位置控制
-            if self.inject_position == "slot":
+            if self._cfg.inject_position == "slot":
                 existing = getattr(req, "system_prompt", "") or ""
-                if self.inject_slot_marker in existing:
+                if self._cfg.inject_slot_marker in existing:
                     req.system_prompt = existing.replace(
-                        self.inject_slot_marker, memory_block, 1
+                        self._cfg.inject_slot_marker, memory_block, 1
                     )
                 else:
                     # 占位符不存在时降级到 system_prompt 追加
                     req.system_prompt = (
                         existing + ("\n\n" if existing else "") + memory_block
                     )
-            elif self.inject_position == "user_message_before":
+            elif self._cfg.inject_position == "user_message_before":
                 # 作为用户消息前缀:在 req.prompt 前面拼接
                 original_prompt = getattr(req, "prompt", "") or ""
                 req.prompt = (
@@ -699,7 +467,7 @@ class TMemoryPlugin(Star):
                     if original_prompt
                     else memory_block
                 )
-            elif self.inject_position == "user_message_after":
+            elif self._cfg.inject_position == "user_message_after":
                 # 作为用户消息后缀:在 req.prompt 后面拼接
                 original_prompt = getattr(req, "prompt", "") or ""
                 req.prompt = (
@@ -736,17 +504,17 @@ class TMemoryPlugin(Star):
         pending_rows = self._count_pending_rows()
         lines = [
             f"worker_running={self._worker_running}",
-            f"distill_interval_sec={self.distill_interval_sec}",
-            f"distill_min_batch_count={self.distill_min_batch_count}",
-            f"distill_batch_limit={self.distill_batch_limit}",
+            f"distill_interval_sec={self._cfg.distill_interval_sec}",
+            f"distill_min_batch_count={self._cfg.distill_min_batch_count}",
+            f"distill_batch_limit={self._cfg.distill_batch_limit}",
             f"pending_users={pending_users}",
             f"pending_rows={pending_rows}",
             f"--- gate stats ---",
-            f"capture_min_content_len={self.capture_min_content_len}",
-            f"capture_dedup_window={self.capture_dedup_window}",
-            f"distill_user_throttle_sec={self.distill_user_throttle_sec}",
+            f"capture_min_content_len={self._cfg.capture_min_content_len}",
+            f"capture_dedup_window={self._cfg.capture_dedup_window}",
+            f"distill_user_throttle_sec={self._cfg.distill_user_throttle_sec}",
             f"distill_skipped_rows(lifetime)={self._distill_skipped_rows}",
-            f"throttled_users={sum(1 for ts in self._user_last_distilled_ts.values() if time.time() - ts < self.distill_user_throttle_sec) if self.distill_user_throttle_sec > 0 else 'N/A'}",
+            f"throttled_users={sum(1 for ts in self._user_last_distilled_ts.values() if time.time() - ts < self._cfg.distill_user_throttle_sec) if self._cfg.distill_user_throttle_sec > 0 else 'N/A'}",
         ]
         yield event.plain_result("\n".join(lines))
 
@@ -863,7 +631,7 @@ class TMemoryPlugin(Star):
             lines.append(f"vector_hit_rate: {hit_rate}")
             if self._embed_last_error:
                 lines.append(f"embed_last_error: {self._embed_last_error[:80]}")
-        elif self.enable_vector_search:
+        elif self._cfg.enable_vector_search:
             lines.append("vector_search: enabled but sqlite-vec not installed")
 
         # 最近 10 轮蒸馏 token 累计
@@ -935,7 +703,7 @@ class TMemoryPlugin(Star):
                 "请先安装:pip install sqlite-vec，并在配置中开启 enable_vector_search。"
             )
             return
-        if not self.embed_provider_id:
+        if not self._cfg.embed_provider_id:
             yield event.plain_result("未配置 embed_provider_id，无法生成向量。")
             return
 
@@ -975,8 +743,8 @@ class TMemoryPlugin(Star):
         body = re.sub(r"^/tm_refine\s*", "", raw, flags=re.IGNORECASE).strip()
 
         opts = {
-            "mode": self.manual_purify_default_mode,
-            "limit": str(self.manual_purify_default_limit),
+            "mode": self._cfg.manual_purify_default_mode,
+            "limit": str(self._cfg.manual_purify_default_limit),
             "dry_run": "false",
             "include_pinned": "false",
         }
@@ -1151,7 +919,7 @@ class TMemoryPlugin(Star):
         """后台定时蒸馏循环。"""
         await asyncio.sleep(8)
         while self._worker_running:
-            if not self.distill_pause:
+            if not self._cfg.distill_pause:
                 try:
                     users, memories = await self._run_distill_cycle(
                         force=False, trigger="auto"
@@ -1180,9 +948,9 @@ class TMemoryPlugin(Star):
                 self._merge_needs_vector_rebuild = False
 
             # 提纯调度:每隔 purify_interval_days 天对全部记忆做质量重评
-            if self.purify_interval_days > 0:
+            if self._cfg.purify_interval_days > 0:
                 now_ts = time.time()
-                interval_sec = self.purify_interval_days * 86400
+                interval_sec = self._cfg.purify_interval_days * 86400
                 if now_ts - self._last_purify_ts >= interval_sec:
                     try:
                         pruned, kept = await self._run_memory_purify()
@@ -1195,7 +963,7 @@ class TMemoryPlugin(Star):
                     except Exception as _qe:
                         logger.warning("[tmemory] memory purify error: %s", _qe)
 
-            await asyncio.sleep(max(3600, self.distill_interval_sec))
+            await asyncio.sleep(max(3600, self._cfg.distill_interval_sec))
 
     async def _run_distill_cycle(
         self, force: bool = False, trigger: str = "manual"
@@ -1203,7 +971,7 @@ class TMemoryPlugin(Star):
         """执行一轮蒸馏，记录历史，单用户失败不中断整轮。"""
         started_at = self._now()
         t0 = time.time()
-        min_required = 1 if force else self.distill_min_batch_count
+        min_required = 1 if force else self._cfg.distill_min_batch_count
         pending_users = self._pending_distill_users(
             limit=(100 if force else 20), min_batch_count=min_required
         )
@@ -1219,13 +987,13 @@ class TMemoryPlugin(Star):
         for canonical_id in pending_users:
             try:
                 # 用户级节流：force 模式跳过冷却检查
-                if (not force) and self.distill_user_throttle_sec > 0:
+                if (not force) and self._cfg.distill_user_throttle_sec > 0:
                     last_ts = self._user_last_distilled_ts.get(canonical_id, 0.0)
-                    if now_ts - last_ts < self.distill_user_throttle_sec:
+                    if now_ts - last_ts < self._cfg.distill_user_throttle_sec:
                         continue  # 冷却中，跳过本用户
 
-                rows = self._fetch_pending_rows(canonical_id, self.distill_batch_limit)
-                if (not force) and len(rows) < self.distill_min_batch_count:
+                rows = self._fetch_pending_rows(canonical_id, self._cfg.distill_batch_limit)
+                if (not force) and len(rows) < self._cfg.distill_min_batch_count:
                     continue
 
                 # 预过滤：在送入 LLM 前过滤掉低信息量行，减少 token 消耗
@@ -1481,13 +1249,13 @@ class TMemoryPlugin(Star):
         3. distill_provider_id (旧配置) 
         4. 消息来源推断
         """
-        if self.use_independent_distill_model and self.distill_provider_id:
-            return self.distill_provider_id
+        if self._cfg.use_independent_distill_model and self._cfg.distill_provider_id:
+            return self._cfg.distill_provider_id
 
-        if self.distill_model_id:
-            return self.distill_model_id
-        if self.distill_provider_id:
-            return self.distill_provider_id
+        if self._cfg.distill_model_id:
+            return self._cfg.distill_model_id
+        if self._cfg.distill_provider_id:
+            return self._cfg.distill_provider_id
 
         umo = ""
         for row in rows:
@@ -1520,11 +1288,11 @@ class TMemoryPlugin(Star):
         2. distill_model_id (旧配置)
         3. 消息来源推断
         """
-        if self.use_independent_distill_model and self.distill_model_id:
-            return self.distill_model_id
+        if self._cfg.use_independent_distill_model and self._cfg.distill_model_id:
+            return self._cfg.distill_model_id
 
-        if self.distill_model_id:
-            return self.distill_model_id
+        if self._cfg.distill_model_id:
+            return self._cfg.distill_model_id
 
         return ""
 
@@ -1622,8 +1390,8 @@ class TMemoryPlugin(Star):
             lines.append(f"- ({mtype}) {mem}")
 
         block = "\n".join(lines)
-        if self.inject_max_chars > 0 and len(block) > self.inject_max_chars:
-            block = block[: self.inject_max_chars] + "…"
+        if self._cfg.inject_max_chars > 0 and len(block) > self._cfg.inject_max_chars:
+            block = block[: self._cfg.inject_max_chars] + "…"
         return block
 
     async def build_memory_context(
@@ -1682,141 +1450,32 @@ class TMemoryPlugin(Star):
         fallback_dir = os.path.dirname(os.path.abspath(__file__))
         return os.path.join(fallback_dir, "tmemory.db")
 
-    def _migrate_fts5_to_content_sync(self, conn: sqlite3.Connection) -> None:
-        """将旧的独立 FTS5 表迁移到 content-sync 模式。
 
-        独立 FTS5 表不支持 'delete' 命令(SQLite 3.51+)，
-        需要改用 content='memories' 的外部内容模式。
-        迁移后自动 rebuild 以从 memories 表重建索引。
-        """
-        try:
-            row = conn.execute(
-                "SELECT sql FROM sqlite_master WHERE type='table' AND name='memories_fts'"
-            ).fetchone()
-            if row is None:
-                return  # 表不存在，无需迁移
-            create_sql = str(row[0] or row["sql"] if isinstance(row, sqlite3.Row) else row[0])
-            if "content=" in create_sql or "content =" in create_sql:
-                return  # 已是 content-sync 模式
-            # 旧的独立 FTS5 表:需要删除并重建
-            logger.info("[tmemory] 正在将 FTS5 表迁移到 content-sync 模式...")
-            conn.execute("DROP TRIGGER IF EXISTS t_memories_ai")
-            conn.execute("DROP TRIGGER IF EXISTS t_memories_ad")
-            conn.execute("DROP TRIGGER IF EXISTS t_memories_au")
-            conn.execute("DROP TABLE IF EXISTS memories_fts")
-            self._fts5_needs_rebuild = True
-            logger.info("[tmemory] FTS5 迁移完成，将重建 content-sync FTS5 表。")
-        except Exception as e:
-            logger.warning("[tmemory] FTS5 迁移检测失败: %s", e)
 
     def _init_db(self):
-        with self._db() as conn:
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS identity_bindings (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    adapter TEXT NOT NULL,
-                    adapter_user_id TEXT NOT NULL,
-                    canonical_user_id TEXT NOT NULL,
-                    updated_at TEXT NOT NULL,
-                    UNIQUE(adapter, adapter_user_id)
-                )
-                """
-            )
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS memories (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    canonical_user_id TEXT NOT NULL,
-                    source_adapter TEXT NOT NULL,
-                    source_user_id TEXT NOT NULL,
-                    source_channel TEXT NOT NULL DEFAULT 'default',
-                    memory_type TEXT NOT NULL DEFAULT 'fact',
-                    memory TEXT NOT NULL,
-                    tokenized_memory TEXT NOT NULL DEFAULT '',
-                    memory_hash TEXT NOT NULL,
-                    score REAL NOT NULL DEFAULT 0.5,
-                    importance REAL NOT NULL DEFAULT 0.5,
-                    confidence REAL NOT NULL DEFAULT 0.5,
-                    reinforce_count INTEGER NOT NULL DEFAULT 0,
-                    last_seen_at TEXT NOT NULL,
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL,
-                    is_active INTEGER NOT NULL DEFAULT 1,
-                    is_pinned INTEGER NOT NULL DEFAULT 0,
-                    persona_id TEXT NOT NULL DEFAULT '',
-                    scope TEXT NOT NULL DEFAULT 'user',
-                    UNIQUE(canonical_user_id, memory_hash, persona_id, scope)
-                )
-                """
-            )
-            
-            # FTS5 表 (content-sync 模式，关联 memories 表)
-            # 检查是否需要从旧的独立 FTS5 表迁移到 content-sync 模式
-            self._migrate_fts5_to_content_sync(conn)
-            conn.execute(_DDL_FTS5)
+        self._db_mgr.init_db(self._vec_available, getattr(self, "embed_dim", 768))
 
-            # 同步触发器
-            conn.execute(_DDL_TRIGGER_AI)
-            conn.execute(_DDL_TRIGGER_AD)
-            conn.execute(_DDL_TRIGGER_AU)
+    def _migrate_schema(self, conn: Optional[sqlite3.Connection] = None):
+        if conn is None:
+            # For backward compatibility with tests calling this manually
+            with self._db() as _conn:
+                self._db_mgr.migrate_schema(_conn)
+        else:
+            self._db_mgr.migrate_schema(conn)
 
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS conversation_cache (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    canonical_user_id TEXT NOT NULL,
-                    role TEXT NOT NULL,
-                    content TEXT NOT NULL,
-                    source_adapter TEXT NOT NULL DEFAULT 'unknown',
-                    source_user_id TEXT NOT NULL DEFAULT 'unknown',
-                    unified_msg_origin TEXT NOT NULL DEFAULT '',
-                    distilled INTEGER NOT NULL DEFAULT 0,
-                    distilled_at TEXT NOT NULL DEFAULT '',
-                    created_at TEXT NOT NULL,
-                    scope TEXT NOT NULL DEFAULT 'user',
-                    persona_id TEXT NOT NULL DEFAULT ''
-                )
-                """
-            )
-            conn.execute(_DDL_MEMORY_EVENTS)
-            conn.execute(_DDL_DISTILL_HISTORY)
-            # ── 向量表(仅当 sqlite-vec 可用时创建)──────────────────────────
-            if self._vec_available:
-                try:
-                    conn.execute(
-                        f"CREATE VIRTUAL TABLE IF NOT EXISTS memory_vectors "
-                        f"USING vec0(memory_id INTEGER PRIMARY KEY, embedding float[{self.embed_dim}])"
-                    )
-                except Exception as _ve:
-                    logger.warning("[tmemory] failed to create memory_vectors: %s", _ve)
+    def _ensure_columns(
+        self,
+        table_name: str,
+        wanted_columns: Dict[str, str],
+    ) -> None:
+        pass
 
-            # FTS5 迁移后需要 rebuild 以从 memories 表重建索引
-            if self._fts5_needs_rebuild:
-                try:
-                    conn.execute("INSERT INTO memories_fts(memories_fts) VALUES('rebuild')")
-                    self._fts5_needs_rebuild = False
-                    logger.info("[tmemory] FTS5 索引重建完成。")
-                except Exception as e:
-                    logger.warning("[tmemory] FTS5 rebuild 失败: %s", e)
-
-    def _migrate_schema(self):
-        self._ensure_columns(
-            "memories",
-            {
-                "source_channel": "TEXT NOT NULL DEFAULT 'default'",
-                "memory_type": "TEXT NOT NULL DEFAULT 'fact'",
-                "importance": "REAL NOT NULL DEFAULT 0.5",
-                "confidence": "REAL NOT NULL DEFAULT 0.5",
-                "reinforce_count": "INTEGER NOT NULL DEFAULT 0",
-                "last_seen_at": "TEXT NOT NULL DEFAULT ''",
-                "is_active": "INTEGER NOT NULL DEFAULT 1",
-                "is_pinned": "INTEGER NOT NULL DEFAULT 0",
-                "persona_id": "TEXT NOT NULL DEFAULT ''",
-                "scope": "TEXT NOT NULL DEFAULT 'user'",
-                "tokenized_memory": "TEXT NOT NULL DEFAULT ''",
-            },
-        )
+    def _ensure_columns(
+        self,
+        table_name: str,
+        wanted_columns: Dict[str, str],
+    ) -> None:
+        pass
         self._ensure_columns(
             "conversation_cache",
             {
@@ -1942,39 +1601,11 @@ class TMemoryPlugin(Star):
         def executemany(self, *args, **kwargs):
             return self._conn.executemany(*args, **kwargs)
 
-    def _db(self) -> "_LockedConnection":
-        """获取持久 DB 连接(线程安全、单连接复用)。
+    def _db(self) -> _LockedConnection:
+        return self._db_mgr.db()
 
-        使用上下文管理器模式: with self._db() as conn:
-        退出 with 块时自动 commit(异常时 rollback) 并释放锁, 但**不**关闭连接。
-        连接在插件 terminate() 时统一关闭。
-        """
-        with self._conn_lock:
-            if self._conn is None:
-                conn = sqlite3.connect(self.db_path, check_same_thread=False)
-                conn.row_factory = sqlite3.Row
-                conn.execute("PRAGMA journal_mode=WAL")
-                conn.execute("PRAGMA synchronous=NORMAL")
-                conn.execute("PRAGMA busy_timeout=5000")
-                if self._vec_available:
-                    try:
-                        conn.enable_load_extension(True)
-                        self._sqlite_vec.load(conn)
-                        conn.enable_load_extension(False)
-                    except Exception:
-                        pass
-                self._conn = conn
-        return self._LockedConnection(self._conn_lock, self._conn)
-
-    def _close_db(self):
-        """关闭持久连接。仅在 terminate() 中调用。"""
-        with self._conn_lock:
-            if self._conn is not None:
-                try:
-                    self._conn.close()
-                except Exception:
-                    pass
-                self._conn = None
+    def _close_db(self) -> None:
+        self._db_mgr.close()
 
     # =========================================================================
     # 向量检索辅助方法
@@ -2003,14 +1634,14 @@ class TMemoryPlugin(Star):
                 # 回退到旧方法
         
         # 回退到旧方法
-        if not self._vec_available or not self.embed_base_url:
+        if not self._vec_available or not self._cfg.embed_base_url:
             return None
 
-        url = self.embed_base_url.rstrip("/") + "/v1/embeddings"
+        url = self._cfg.embed_base_url.rstrip("/") + "/v1/embeddings"
         payload = {"model": self.embed_model, "input": text[:2000]}
         headers: Dict[str, str] = {}
-        if self.embed_api_key:
-            headers["Authorization"] = f"Bearer {self.embed_api_key}"
+        if self._cfg.embed_api_key:
+            headers["Authorization"] = f"Bearer {self._cfg.embed_api_key}"
 
         max_retries = 2
         async with self._embed_semaphore:
@@ -2040,15 +1671,15 @@ class TMemoryPlugin(Star):
                             return None
                         data = await resp.json()
                         vec = data["data"][0]["embedding"]
-                        if len(vec) != self.embed_dim:
+                        if len(vec) != self._cfg.embed_dim:
                             logger.warning(
                                 "[tmemory] embed dim mismatch: got %d, expected %d",
                                 len(vec),
-                                self.embed_dim,
+                                self._cfg.embed_dim,
                             )
                             self._embed_fail_count += 1
                             self._embed_last_error = (
-                                f"dim mismatch {len(vec)} vs {self.embed_dim}"
+                                f"dim mismatch {len(vec)} vs {self._cfg.embed_dim}"
                             )
                             return None
                         self._embed_ok_count += 1
@@ -2240,7 +1871,7 @@ class TMemoryPlugin(Star):
 
     def _get_memory_scope(self, event: AstrMessageEvent) -> str:
         """根据 memory_scope 配置和消息类型确定本次的 scope 标签。"""
-        if self.memory_scope == "session":
+        if self._cfg.memory_scope == "session":
             try:
                 from astrbot.core.platform import MessageType  # type: ignore
 
@@ -2591,110 +2222,123 @@ class TMemoryPlugin(Star):
             query_vec = await self._embed_text(query)
 
         # 步骤 2:打开 DB 连接并使用 HybridMemorySystem
-        scope_cond = ""
-        scope_params: list = []
-        if self.memory_scope == "session":
-            scope_cond = "AND (scope=? OR scope='user')"
-            scope_params = [scope]
-        persona_cond = "AND (persona_id=? OR persona_id='')"
-        persona_params = [persona_id]
-        private_cond = "AND scope != 'private'" if exclude_private else ""
+        def _sync_db_ops():
+            scope_cond = ""
+            scope_params: list = []
+            if self._cfg.memory_scope == "session":
+                scope_cond = "AND (scope=? OR scope='user')"
+                scope_params = [scope]
+            persona_cond = "AND (persona_id=? OR persona_id='')"
+            persona_params = [persona_id]
+            private_cond = "AND scope != 'private'" if exclude_private else ""
 
-        with self._db() as conn:
-            hybrid_system = HybridMemorySystem(conn, self.embed_dim)
-            
-            # 使用混合检索获得粗排结果
-            fused_results = hybrid_system.hybrid_search(
-                query=query, 
-                query_vector=query_vec, 
-                canonical_user_id=canonical_id, 
-                top_k=80
-            )
-            
-            # 如果没有查询，或者查询有词但 FTS+向量均未命中，则回退到按时间/重要性获取最近的 active 记忆
-            if not query or not fused_results:
-                rows = conn.execute(
-                    f"""
-                    SELECT id, memory_type, memory, score, importance, confidence, reinforce_count,
-                           last_seen_at, scope, persona_id
-                    FROM memories
-                    WHERE canonical_user_id=? AND is_active=1
-                    {scope_cond} {persona_cond} {private_cond}
-                    ORDER BY updated_at DESC
-                    LIMIT 80
-                    """,
-                    [canonical_id, *scope_params, *persona_params],
-                ).fetchall()
-                candidates = {int(r["id"]): dict(r) for r in rows}
-                rrf_scores = {}
-            else:
+            with self._db() as conn:
+                hybrid_system = HybridMemorySystem(conn, self._cfg.embed_dim)
+                
+                # 使用混合检索获得粗排结果
+                fused_results = hybrid_system.hybrid_search(
+                    query=query, 
+                    query_vector=query_vec, 
+                    canonical_user_id=canonical_id, 
+                    top_k=80
+                )
+                
+                # 如果没有查询，或者查询有词但 FTS+向量均未命中，则回退到按时间/重要性获取最近的 active 记忆
+                if not query or not fused_results:
+                    rows = conn.execute(
+                        f"""
+                        SELECT id, memory_type, memory, score, importance, confidence, reinforce_count,
+                               last_seen_at, scope, persona_id
+                        FROM memories
+                        WHERE canonical_user_id=? AND is_active=1 {scope_cond} {persona_cond} {private_cond}
+                        ORDER BY score DESC, updated_at DESC
+                        LIMIT ?
+                        """,
+                        (canonical_id, *scope_params, *persona_params, limit * 3),
+                    ).fetchall()
+                    # 转换 sqlite3.Row 到 dict 并加上检索分数（默认权重）
+                    return [dict(r) | {"_retrieval_score": r["score"]} for r in rows], []
+
                 # 基于 fused_results 查询有效记忆
                 # 记录RRF分数
                 rrf_scores = {item["id"]: item["rrf_score"] for item in fused_results}
                 
-                placeholders = ",".join(["?"] * len(rrf_scores))
-                params = [canonical_id, *scope_params, *persona_params, *rrf_scores.keys()]
-                rows = conn.execute(
-                    f"""
+                hit_ids = [str(r["id"]) for r in fused_results]
+                placeholders = ",".join("?" * len(hit_ids))
+                
+                query_sql = f"""
                     SELECT id, memory_type, memory, score, importance, confidence, reinforce_count,
                            last_seen_at, scope, persona_id
-                    FROM memories
-                    WHERE canonical_user_id=? AND is_active=1
+                    FROM memories 
+                    WHERE id IN ({placeholders}) AND is_active=1
                     {scope_cond} {persona_cond} {private_cond}
-                    AND id IN ({placeholders})
-                    """,
-                    params,
-                ).fetchall()
+                """
+                rows = conn.execute(query_sql, [*hit_ids, *scope_params, *persona_params]).fetchall()
                 candidates = {int(r["id"]): dict(r) for r in rows}
+                
+                return candidates, rrf_scores
+                
+        fallback_rows, rrf_scores_or_fused = await asyncio.to_thread(_sync_db_ops)
 
-        scored = []
-        for row_id, row in candidates.items():
-            recency_bonus = 0.0
-            last_seen = str(row["last_seen_at"])
-            try:
-                last_ts = int(
-                    time.mktime(time.strptime(last_seen, "%Y-%m-%d %H:%M:%S"))
-                )
-                age_hours = max(1.0, (now_ts - last_ts) / 3600)
-                recency_bonus = min(0.15, 0.15 / age_hours)
-            except Exception:
-                pass
-
-            search_relevance = rrf_scores.get(row_id, 0.0)
+        if isinstance(fallback_rows, list):
+            # 走到回退路径
+            rows = fallback_rows
+            scored = []
+            for row in rows:
+                scored.append(dict(row))
+        else:
+            candidates = fallback_rows
+            rrf_scores = rrf_scores_or_fused
             
-            if query:
-                final_score = (
-                    0.20 * float(row["score"])
-                    + 0.15 * float(row["importance"])
-                    + 0.15 * float(row["confidence"])
-                    + 0.40 * search_relevance
-                    + 0.05 * min(1.0, float(row["reinforce_count"]) / 10.0)
-                    + recency_bonus
-                )
-            else:
-                final_score = (
-                    0.35 * float(row["score"])
-                    + 0.25 * float(row["importance"])
-                    + 0.20 * float(row["confidence"])
-                    + 0.05 * min(1.0, float(row["reinforce_count"]) / 10.0)
-                    + recency_bonus
+            # ...下面接着原来的重排序代码
+            scored = []
+            for row_id, row in candidates.items():
+                recency_bonus = 0.0
+                last_seen = str(row["last_seen_at"])
+                try:
+                    last_ts = int(
+                        time.mktime(time.strptime(last_seen, "%Y-%m-%d %H:%M:%S"))
+                    )
+                    age_hours = max(1.0, (now_ts - last_ts) / 3600)
+                    recency_bonus = min(0.15, 0.15 / age_hours)
+                except Exception:
+                    pass
+
+                search_relevance = rrf_scores.get(row_id, 0.0)
+                
+                if query:
+                    final_score = (
+                        0.20 * float(row["score"])
+                        + 0.15 * float(row["importance"])
+                        + 0.15 * float(row["confidence"])
+                        + 0.40 * search_relevance
+                        + 0.05 * min(1.0, float(row["reinforce_count"]) / 10.0)
+                        + recency_bonus
+                    )
+                else:
+                    final_score = (
+                        0.35 * float(row["score"])
+                        + 0.25 * float(row["importance"])
+                        + 0.20 * float(row["confidence"])
+                        + 0.05 * min(1.0, float(row["reinforce_count"]) / 10.0)
+                        + recency_bonus
+                    )
+
+                scored.append(
+                    {
+                        "id": row_id,
+                        "memory_type": str(row["memory_type"]),
+                        "memory": str(row["memory"]),
+                        "final_score": float(final_score),
+                    }
                 )
 
-            scored.append(
-                {
-                    "id": row_id,
-                    "memory_type": str(row["memory_type"]),
-                    "memory": str(row["memory"]),
-                    "final_score": float(final_score),
-                }
-            )
-
-        scored.sort(key=lambda x: float(x["final_score"]), reverse=True)
+        scored.sort(key=lambda x: float(x.get("final_score", x.get("_retrieval_score", 0.0))), reverse=True)
         # 去重:高语义重叠的记忆只保留分数最高的那条
         deduped = self._deduplicate_results(scored, limit * 2)
 
         # 可选 Reranker:对候选结果做精排
-        if self.enable_reranker and self.rerank_base_url and query and len(deduped) > 1:
+        if self._cfg.enable_reranker and self._cfg.rerank_base_url and query and len(deduped) > 1:
             top_result = await self._rerank_results(query, deduped, limit)
         else:
             top_result = deduped[:limit]
@@ -2850,7 +2494,7 @@ class TMemoryPlugin(Star):
                 umo=self._safe_get_unified_msg_origin(event)
             )
         except Exception:
-            provider_id = self.distill_provider_id
+            provider_id = self._cfg.distill_provider_id
 
         if not provider_id:
             return {"updates": [], "adds": [], "deletes": [], "note": "no provider"}
@@ -2907,7 +2551,7 @@ class TMemoryPlugin(Star):
                 umo=self._safe_get_unified_msg_origin(event)
             )
         except Exception:
-            provider_id = self.distill_provider_id
+            provider_id = self._cfg.distill_provider_id
 
         if not provider_id:
             return [
@@ -3104,7 +2748,7 @@ class TMemoryPlugin(Star):
         headers: Dict[str, str] = {}
         if self.rerank_api_key:
             headers["Authorization"] = f"Bearer {self.rerank_api_key}"
-        url = self.rerank_base_url.rstrip("/") + "/v1/rerank"
+        url = self._cfg.rerank_base_url.rstrip("/") + "/v1/rerank"
         try:
             session = await self._get_http_session()
             async with session.post(url, json=payload, headers=headers) as resp:
@@ -3133,7 +2777,30 @@ class TMemoryPlugin(Star):
     # 对话缓存
     # =========================================================================
 
-    def _insert_conversation(
+    async def _insert_conversation(
+        self,
+        canonical_id: str,
+        role: str,
+        content: str,
+        source_adapter: str,
+        source_user_id: str,
+        unified_msg_origin: str,
+        scope: str = "user",
+        persona_id: str = "",
+    ):
+        await asyncio.to_thread(
+            self._insert_conversation_sync,
+            canonical_id,
+            role,
+            content,
+            source_adapter,
+            source_user_id,
+            unified_msg_origin,
+            scope,
+            persona_id,
+        )
+
+    def _insert_conversation_sync(
         self,
         canonical_id: str,
         role: str,
@@ -3148,7 +2815,7 @@ class TMemoryPlugin(Star):
 
         try:
             # 内容哈希去重：同用户最近 capture_dedup_window 条未蒸馏缓存中有相同内容时跳过
-            if self.capture_dedup_window > 0:
+            if self._cfg.capture_dedup_window > 0:
                 content_hash = hashlib.md5(truncated.encode("utf-8", errors="replace")).hexdigest()
                 with self._db() as conn:
                     exists = conn.execute(
@@ -3163,7 +2830,7 @@ class TMemoryPlugin(Star):
                         AND content=?
                         LIMIT 1
                         """,
-                        (canonical_id, canonical_id, self.capture_dedup_window, truncated),
+                        (canonical_id, canonical_id, self._cfg.capture_dedup_window, truncated),
                     ).fetchone()
                     if exists:
                         return  # 重复内容，跳过写入
@@ -3211,7 +2878,7 @@ class TMemoryPlugin(Star):
         self, limit: int, min_batch_count: Optional[int] = None
     ) -> List[str]:
         min_required = (
-            self.distill_min_batch_count
+            self._cfg.distill_min_batch_count
             if min_batch_count is None
             else max(1, int(min_batch_count))
         )
@@ -3293,10 +2960,10 @@ class TMemoryPlugin(Star):
     def _optimize_context(self, canonical_id: str):
         """对超出阈值的历史做轻量规则摘要压缩，不触发 LLM，以节省 token。"""
         rows = self._fetch_recent_conversation(canonical_id, limit=200)
-        if len(rows) <= self.cache_max_rows:
+        if len(rows) <= self._cfg.cache_max_rows:
             return
 
-        joined = " ".join([c for _, c in rows[: -self.cache_max_rows]])
+        joined = " ".join([c for _, c in rows[: -self._cfg.cache_max_rows]])
         summary = self._distill_text(joined)
         now = self._now()
 
@@ -3320,7 +2987,7 @@ class TMemoryPlugin(Star):
                 ),
             )
 
-        self._trim_conversation(canonical_id, keep_last=self.cache_max_rows)
+        self._trim_conversation(canonical_id, keep_last=self._cfg.cache_max_rows)
 
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("tm_pin")
@@ -3389,7 +3056,7 @@ class TMemoryPlugin(Star):
         """
         # ── 规则层:直接失活低综合分记忆 ──────────────────────────────────
         pruned_rule = 0
-        if self.purify_min_score > 0:
+        if self._cfg.purify_min_score > 0:
             with self._db() as conn:
                 rows = conn.execute(
                     "SELECT id, score, importance, confidence FROM memories WHERE is_active=1 AND is_pinned=0"
@@ -3400,7 +3067,7 @@ class TMemoryPlugin(Star):
                         + 0.4 * float(row["importance"])
                         + 0.3 * float(row["confidence"])
                     )
-                    if quality < self.purify_min_score:
+                    if quality < self._cfg.purify_min_score:
                         conn.execute(
                             "UPDATE memories SET is_active=0 WHERE id=?",
                             (int(row["id"]),),
@@ -3411,7 +3078,7 @@ class TMemoryPlugin(Star):
         pruned_llm = 0
         kept = 0
         provider_id = (
-            self.purify_model_id or self.distill_model_id or self.distill_provider_id
+            self._cfg.purify_model_id or self._cfg.distill_model_id or self._cfg.distill_provider_id
         )
         if not provider_id:
             # 无可用 provider，只执行规则层
@@ -3830,7 +3497,7 @@ class TMemoryPlugin(Star):
 
         注：capture_min_content_len ≤ 0 时整个门控关闭，直接返回 False。
         """
-        if self.capture_min_content_len <= 0:
+        if self._cfg.capture_min_content_len <= 0:
             return False
         # 步骤 1：计算实义词（≥2 字符、非噪声词、非颜文字）
         words = [
@@ -3845,33 +3512,22 @@ class TMemoryPlugin(Star):
             return False
         # 步骤 3：无实义词时，再用字符长度兜底
         stripped = re.sub(r"[\s\W]+", "", text, flags=re.UNICODE)
-        return len(stripped) < self.capture_min_content_len
+        return len(stripped) < self._cfg.capture_min_content_len
 
     def _should_skip_capture(self, text: str) -> bool:
-        """四层过滤器:判断消息是否应跳过采集。
+        if self._cfg.no_memory_marker in text:
+            return True
 
-        层 1 - 协议标记(最高优先级):
-            兼容 ASTRBOT_NO_MEMORY 跨插件协议，任何插件均可在消息里
-            嵌入 \x00[astrbot:no-memory]\x00 标记来请求跳过采集。
+        if any(text.startswith(p) for p in self._cfg.capture_skip_prefixes):
+            return True
 
-        层 2 - 文本前缀:
-            匹配 capture_skip_prefixes 配置中的前缀列表，内置兼容
-            tschedule 旧版格式(无 marker 时)。
-
-        层 3 - 正则表达式:
-            匹配 capture_skip_regex 配置中的正则，适用于复杂过滤场景。
-
-        层 4 - 低信息量门控（新增）:
-            文本长度/实义词不足时跳过，减少无效行进入 conversation_cache。
-        """
-        # 层 1:协议标记(不可见字符，不依赖文本内容)
-        if self._NO_MEMORY_MARKER in text:
+        if self._cfg.capture_skip_regex and self._cfg.capture_skip_regex.search(text):
             return True
         # 层 2:前缀匹配
-        if any(text.startswith(p) for p in self.capture_skip_prefixes):
+        if any(text.startswith(p) for p in self._cfg.capture_skip_prefixes):
             return True
         # 层 3:正则匹配
-        if self._capture_skip_re and self._capture_skip_re.search(text):
+        if self._cfg.capture_skip_regex and self._cfg.capture_skip_regex.search(text):
             return True
         # 层 4:低信息量门控
         if self._is_low_info_content(text):
@@ -3981,7 +3637,7 @@ class TMemoryPlugin(Star):
 
         top = [w for w, _ in Counter(words).most_common(5)]
         prefix = f"关键词: {'/'.join(top)}; " if top else ""
-        short = normalized[: self.memory_max_chars]
+        short = normalized[: self._cfg.memory_max_chars]
         return f"{prefix}记忆: {short}"
 
     def _infer_memory_type(self, text: str) -> str:

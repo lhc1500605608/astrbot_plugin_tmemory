@@ -161,12 +161,13 @@ class TestCaptureInsertion:
         ("爱喝绿茶",   "preference"),
         ("不要辣",     "restriction"),
     ])
-    def test_critical_message_stored_in_cache(self, plugin, text, category):
+    @pytest.mark.asyncio
+    async def test_critical_message_stored_in_cache(self, plugin, text, category):
         """关键短消息应写入 conversation_cache，不被采集层拦截。"""
         plugin.capture_min_content_len = 5
         plugin.capture_dedup_window = 0  # 关闭去重，确保每次独立测试
         uid = f"test-{category}-{hash(text) & 0xFFFF}"
-        plugin._insert_conversation(
+        await plugin._insert_conversation(
             canonical_id=uid,
             role="user",
             content=text,
