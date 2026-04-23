@@ -64,7 +64,7 @@ class MemoryOps:
             new_words = set(self.plugin._retrieval_mgr.tokenize(normalized))
             candidate_rows = conn.execute(
                 """
-                SELECT id, memory, confidence FROM memories
+                SELECT id, memory FROM memories
                 WHERE canonical_user_id=? AND memory_type=? AND is_active=1 AND is_pinned=0
                 ORDER BY created_at DESC
                 LIMIT 15
@@ -77,15 +77,13 @@ class MemoryOps:
                 cand_words = set(self.plugin._retrieval_mgr.tokenize(str(cand["memory"])))
                 overlap = len(new_words.intersection(cand_words))
                 if overlap >= max(1, min(len(new_words), len(cand_words)) * 0.5):
-                    cand_conf = float(cand.get("confidence", 0.0) if hasattr(cand, "get") else cand["confidence"])
-                    if confidence >= cand_conf:
-                        conn.execute(
-                            """
-                            UPDATE memories SET is_active=0, updated_at=? WHERE id=?
-                            """,
-                            (now, int(cand["id"])),
-                        )
-                        deactivated += 1
+                    conn.execute(
+                        """
+                        UPDATE memories SET is_active=0, updated_at=? WHERE id=?
+                        """,
+                        (now, int(cand["id"])),
+                    )
+                    deactivated += 1
 
             cur = conn.execute(
                 """
@@ -142,6 +140,200 @@ class MemoryOps:
 
             return new_id
 
+    async def distill_rows_with_llm(
+        self, rows: list
+    ) -> tuple:
+        """用 LLM 对一批对话行进行结构化蒸馏，失败时回退到规则蒸馏。"""
+        transcript_lines = []
+        for row in rows:
+            role = str(row["role"])
+            content = str(row["content"])
+            transcript_lines.append(f"{role}: {content}")
+
+        transcript = "\n".join(transcript_lines)
+        prompt = self.plugin._distill_mgr.build_distill_prompt(transcript)
+
+        chat_provider_id = await self.plugin._distill_mgr.resolve_distill_provider_id(rows, self.plugin.context)
+        chat_model_id = await self.plugin._distill_mgr.resolve_distill_model_id(rows)
+        if not chat_provider_id:
+            # 无法确定 provider 时，回退到规则蒸馏。
+            return (
+                [
+                    {
+                        "memory": self.plugin._distill_mgr.distill_text(transcript),
+                        "memory_type": "fact",
+                        "importance": 0.55,
+                        "confidence": 0.50,
+                        "score": 0.60,
+                    }
+                ],
+                -1,
+                -1,
+            )
+
+        try:
+            llm_generate_kwargs = {
+                "chat_provider_id": chat_provider_id,
+                "prompt": prompt,
+            }
+            if chat_model_id:
+                llm_generate_kwargs["model_id"] = chat_model_id
+
+            llm_resp = await self.plugin.context.llm_generate(**llm_generate_kwargs)
+            completion_text = self.plugin._normalize_text(
+                getattr(llm_resp, "completion_text", "") or ""
+            )
+            completion_text = self.plugin._strip_think_tags(completion_text)
+            parsed = self.plugin._parse_llm_json_memories(completion_text)
+
+            usage = getattr(llm_resp, "usage", None)
+            if usage is not None:
+                tok_in = int(getattr(usage, "input_other", 0) or 0) + int(
+                    getattr(usage, "input_cached", 0) or 0
+                )
+                tok_out = int(getattr(usage, "output", 0) or 0)
+            else:
+                tok_in, tok_out = -1, -1
+
+            if parsed:
+                return parsed, tok_in, tok_out
+        except Exception as e:
+            logger.warning("[tmemory] llm distill failed, fallback to rule: %s", e)
+
+        return (
+            [
+                {
+                    "memory": self.plugin._distill_mgr.distill_text(transcript),
+                    "memory_type": "fact",
+                    "importance": 0.55,
+                    "confidence": 0.50,
+                    "score": 0.60,
+                }
+            ],
+            -1,
+            -1,
+        )
+
+    async def run_distill_cycle(
+        self,
+        force: bool = False,
+        trigger: str = "manual"
+    ) -> tuple[int, int]:
+        """执行一轮蒸馏，记录历史，单用户失败不中断整轮。"""
+        import time
+        started_at = self.plugin._now()
+        t0 = time.time()
+        min_required = 1 if force else self.plugin._cfg.distill_min_batch_count
+        pending_users = self.plugin._pending_distill_users(
+            limit=(100 if force else 20), min_batch_count=min_required
+        )
+        processed_users = 0
+        total_memories = 0
+        failed_users = 0
+        errors = []
+        cycle_tok_in = -1
+        cycle_tok_out = -1
+
+        now_ts = time.time()
+        for canonical_id in pending_users:
+            try:
+                # 用户级节流：force 模式跳过冷却检查
+                if (not force) and self.plugin._cfg.distill_user_throttle_sec > 0:
+                    last_ts = self.plugin._user_last_distilled_ts.get(canonical_id, 0.0)
+                    if now_ts - last_ts < self.plugin._cfg.distill_user_throttle_sec:
+                        continue  # 冷却中，跳过本用户
+
+                rows = self.plugin._fetch_pending_rows(canonical_id, self.plugin._cfg.distill_batch_limit)
+                if (not force) and len(rows) < self.plugin._cfg.distill_min_batch_count:
+                    continue
+
+                # 预过滤：在送入 LLM 前过滤掉低信息量行，减少 token 消耗
+                rows_for_llm = self.plugin._prefilter_distill_rows(rows)
+                if not rows_for_llm:
+                    # 所有行均为低信息量，直接标记为已蒸馏跳过
+                    self.plugin._mark_rows_distilled([int(r["id"]) for r in rows])
+                    self.plugin._distill_skipped_rows += len(rows)
+                    processed_users += 1
+                    self.plugin._user_last_distilled_ts[canonical_id] = now_ts
+                    continue
+
+                skipped = len(rows) - len(rows_for_llm)
+                self.plugin._distill_skipped_rows += skipped
+
+                llm_items, tok_in, tok_out = await self.plugin._distill_rows_with_llm(rows_for_llm)
+
+                # 累加 token 计数（-1 表示 provider 未返回，跳过累加）
+                if tok_in >= 0:
+                    cycle_tok_in = max(cycle_tok_in, 0) + tok_in
+                if tok_out >= 0:
+                    cycle_tok_out = max(cycle_tok_out, 0) + tok_out
+
+                if not llm_items:
+                    self.plugin._mark_rows_distilled([int(r["id"]) for r in rows])
+                    self.plugin._user_last_distilled_ts[canonical_id] = now_ts
+                    continue
+
+                valid_items = self.plugin._validate_distill_output(llm_items)
+                for item in valid_items:
+                    mem_text = self.plugin._sanitize_text(
+                        self.plugin._normalize_text(str(item.get("memory", "")))
+                    )
+                    if not mem_text:
+                        continue
+                    row_scope = str(rows[0].get("scope", "user"))
+                    row_persona = str(rows[0].get("persona_id", ""))
+                    new_id = self.plugin._insert_memory(
+                        canonical_id=canonical_id,
+                        adapter=str(rows[0]["source_adapter"]),
+                        adapter_user=str(rows[0]["source_user_id"]),
+                        memory=mem_text,
+                        score=self.plugin._clamp01(item.get("score", 0.7)),
+                        memory_type=str(item.get("memory_type", "fact")),
+                        importance=self.plugin._clamp01(item.get("importance", 0.6)),
+                        confidence=self.plugin._clamp01(item.get("confidence", 0.7)),
+                        source_channel="scheduled_distill",
+                        scope=row_scope,
+                        persona_id=row_persona,
+                    )
+                    if self.plugin._vec_available and new_id:
+                        await self.plugin._upsert_vector(new_id, mem_text)
+                    total_memories += 1
+
+                self.plugin._mark_rows_distilled([int(r["id"]) for r in rows])
+                self.plugin._optimize_context(canonical_id)
+                processed_users += 1
+                self.plugin._user_last_distilled_ts[canonical_id] = now_ts
+            except Exception as e:
+                failed_users += 1
+                errors.append(f"{canonical_id}: {type(e).__name__}: {e}")
+                logger.warning(
+                    "[tmemory] distill failed for user %s: %s", canonical_id, e
+                )
+
+        # 记录蒸馏历史
+        duration = round(time.time() - t0, 2)
+        cycle_tok_total = (
+            cycle_tok_in + cycle_tok_out
+            if cycle_tok_in >= 0 and cycle_tok_out >= 0
+            else -1
+        )
+        self.plugin._record_distill_history(
+            started_at=started_at,
+            trigger=trigger,
+            users_processed=processed_users,
+            memories_created=total_memories,
+            users_failed=failed_users,
+            errors=errors,
+            duration=duration,
+            tokens_input=cycle_tok_in,
+            tokens_output=cycle_tok_out,
+            tokens_total=cycle_tok_total,
+        )
+
+        # 顺便执行记忆衰减
+        self.plugin._decay_stale_memories()
+
+        return processed_users, total_memories
     async def manual_purify_memories(
         self,
         event,
@@ -164,92 +356,135 @@ class MemoryOps:
         updates = operations.get("updates", []) if isinstance(operations, dict) else []
         adds = operations.get("adds", []) if isinstance(operations, dict) else []
         deletes = operations.get("deletes", []) if isinstance(operations, dict) else []
+        note = str(operations.get("note", "")) if isinstance(operations, dict) else ""
 
-        valid_ids = {int(r["id"]) for r in rows}
-        updates = [u for u in updates if int(u.get("id", -1)) in valid_ids]
-        deletes = [d for d in deletes if int(d) in valid_ids]
+        pinned_ids = {int(r["id"]) for r in rows if int(r["is_pinned"]) == 1}
+        if not include_pinned:
+            updates = [u for u in updates if int(u.get("id", 0)) not in pinned_ids]
+            deletes = [d for d in deletes if int(d) not in pinned_ids]
 
         if dry_run:
             return {
                 "updates": len(updates),
                 "adds": len(adds),
                 "deletes": len(deletes),
-                "note": "dry-run: no db changes",
-                "ops": {"updates": updates, "adds": adds, "deletes": deletes},
+                "note": f"dry_run preview. {note}",
             }
 
-        now = self.plugin._now()
-        up_count = 0
-        add_count = 0
-        del_count = 0
+        applied_updates = applied_adds = applied_deletes = 0
 
-        with self.plugin._db() as conn:
-            for u in updates:
-                mem_id = int(u["id"])
-                new_mem = str(u.get("memory", ""))
-                if not new_mem:
+        for upd in updates:
+            try:
+                mem_id = int(upd.get("id", 0))
+                if not mem_id:
                     continue
-                score = self.plugin._clamp01(u.get("score", 0.5))
-                mtype = self.plugin._safe_memory_type(u.get("memory_type", "fact"))
-                imp = self.plugin._clamp01(u.get("importance", 0.5))
-                conf = self.plugin._clamp01(u.get("confidence", 0.5))
-                mhash = hashlib.sha256(self.plugin._normalize_text(new_mem).encode("utf-8")).hexdigest()
-                tokenized = " ".join(jieba.cut_for_search(new_mem))
-                conn.execute(
-                    """
-                    UPDATE memories 
-                    SET memory=?, tokenized_memory=?, memory_hash=?, memory_type=?, score=?, importance=?, confidence=?, updated_at=?
-                    WHERE id=?
-                    """,
-                    (new_mem, tokenized, mhash, mtype, score, imp, conf, now, mem_id),
+                memory = self.plugin._sanitize_text(
+                    self.plugin._normalize_text(str(upd.get("memory", "")))
                 )
-                up_count += 1
-
-            for a in adds:
-                new_mem = str(a.get("memory", ""))
-                if not new_mem:
+                if not memory:
                     continue
-                score = self.plugin._clamp01(a.get("score", 0.5))
-                mtype = self.plugin._safe_memory_type(a.get("memory_type", "fact"))
-                imp = self.plugin._clamp01(a.get("importance", 0.5))
-                conf = self.plugin._clamp01(a.get("confidence", 0.5))
-                mhash = hashlib.sha256(self.plugin._normalize_text(new_mem).encode("utf-8")).hexdigest()
-                tokenized = " ".join(jieba.cut_for_search(new_mem))
-                conn.execute(
-                    """
-                    INSERT INTO memories(
-                        canonical_user_id, source_adapter, source_user_id, source_channel, memory_type,
-                        memory, tokenized_memory, memory_hash, score, importance, confidence, reinforce_count, is_active,
-                        last_seen_at, created_at, updated_at, persona_id, scope
-                    ) VALUES(?, 'system', 'purify', 'purify', ?, ?, ?, ?, ?, ?, ?, 1, 1, ?, ?, ?, '', 'user')
-                    """,
-                    (canonical_id, mtype, new_mem, tokenized, mhash, score, imp, conf, now, now, now),
+                self.plugin._update_memory_full(
+                    mem_id,
+                    memory=memory,
+                    memory_type=self.plugin._safe_memory_type(upd.get("memory_type", "fact")),
+                    score=self.plugin._clamp01(upd.get("score", 0.7)),
+                    importance=self.plugin._clamp01(upd.get("importance", 0.6)),
+                    confidence=self.plugin._clamp01(upd.get("confidence", 0.7)),
                 )
-                add_count += 1
+                if self.plugin._vec_available:
+                    await self.plugin._upsert_vector(mem_id, memory)
+                applied_updates += 1
+            except Exception as e:
+                logger.debug("[tmemory] apply update failed: %s", e)
 
-            if deletes:
-                placeholders = ",".join("?" * len(deletes))
-                conn.execute(
-                    f"UPDATE memories SET is_active=0, updated_at=? WHERE id IN ({placeholders})",
-                    [now] + deletes,
+        for add in adds:
+            try:
+                memory = self.plugin._sanitize_text(
+                    self.plugin._normalize_text(str(add.get("memory", "")))
                 )
-                del_count = len(deletes)
+                if not memory:
+                    continue
+                new_id = self.plugin._insert_memory(
+                    canonical_id=canonical_id,
+                    adapter="manual_purify",
+                    adapter_user=canonical_id,
+                    memory=memory,
+                    score=self.plugin._clamp01(add.get("score", 0.7)),
+                    memory_type=self.plugin._safe_memory_type(add.get("memory_type", "fact")),
+                    importance=self.plugin._clamp01(add.get("importance", 0.6)),
+                    confidence=self.plugin._clamp01(add.get("confidence", 0.7)),
+                    source_channel="manual_purify",
+                )
+                if self.plugin._vec_available and new_id:
+                    await self.plugin._upsert_vector(new_id, memory)
+                applied_adds += 1
+            except Exception as e:
+                logger.debug("[tmemory] apply add failed: %s", e)
 
-            conn.execute(
-                "DELETE FROM conversation_cache WHERE canonical_user_id=?",
-                (canonical_id,),
-            )
-
-        if up_count or add_count or del_count:
-            self.plugin._memory_logger.log_memory_event(
-                canonical_user_id=canonical_id,
-                event_type="purify",
-                payload={"updates": up_count, "adds": add_count, "deletes": del_count},
-            )
+        for d in deletes:
+            try:
+                mem_id = int(d)
+                if self.plugin._delete_memory(mem_id):
+                    applied_deletes += 1
+            except Exception as e:
+                logger.debug("[tmemory] apply delete failed: %s", e)
 
         return {
-            "updates": up_count,
-            "adds": add_count,
-            "deletes": del_count,
-            "note": "success",
+            "updates": applied_updates,
+            "adds": applied_adds,
+            "deletes": applied_deletes,
+            "note": note,
         }
+
+
+# =========================================================================
+# Standalone helpers (called as module-level functions, not MemoryOps methods)
+# =========================================================================
+
+def log_memory_event(
+    plugin,
+    canonical_user_id: str,
+    event_type: str,
+    payload: Dict[str, object],
+    conn=None,
+):
+    """记录记忆相关事件到审计日志 memory_events。"""
+    row = (
+        canonical_user_id,
+        event_type,
+        json.dumps(payload, ensure_ascii=False),
+        plugin._now(),
+    )
+    sql = (
+        "INSERT INTO memory_events(canonical_user_id, event_type, payload_json, created_at)"
+        " VALUES(?, ?, ?, ?)"
+    )
+    if conn is not None:
+        conn.execute(sql, row)
+    else:
+        with plugin._db() as _conn:
+            _conn.execute(sql, row)
+
+
+def update_memory_full(
+    plugin,
+    memory_id: int,
+    memory: str,
+    memory_type: str,
+    score: float,
+    importance: float,
+    confidence: float,
+) -> None:
+    """更新记忆全字段(memory/tokenized_memory/hash/type/scores)。"""
+    now = plugin._now()
+    mhash = hashlib.sha256(plugin._normalize_text(memory).encode("utf-8")).hexdigest()
+    tokenized_memory = " ".join(jieba.cut_for_search(memory))
+    with plugin._db() as conn:
+        conn.execute(
+            """
+            UPDATE memories
+            SET memory=?, tokenized_memory=?, memory_hash=?, memory_type=?, score=?, importance=?, confidence=?, updated_at=?
+            WHERE id=?
+            """,
+            (memory, tokenized_memory, mhash, memory_type, score, importance, confidence, now, memory_id),
+        )
