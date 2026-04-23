@@ -1158,62 +1158,17 @@ class TMemoryPlugin(Star):
         r"<think(?:ing)?>.*?</think(?:ing)?>", re.DOTALL | re.IGNORECASE
     )
 
-    def _strip_think_tags(self, text: str) -> str:
-        """剥离 认为的思维链块，只保留最终 JSON 输出。"""
-        # 匹配 认为的思维链块
-        stripped = re.sub(
-            r"<th(?:ink(?:ing)?|ought)>.*?</th(?:ink(?:ing)?|ought)>",
-            "",
-            text,
-            flags=re.DOTALL | re.IGNORECASE,
-        ).strip()
-        return stripped if stripped else text
+
 
     def _parse_llm_json_memories(self, raw_text: str) -> List[Dict[str, object]]:
-        if not raw_text:
-            return []
+        from .core.llm_helpers import LLMHelpers
+        return LLMHelpers.parse_llm_json_memories(
+            raw_text, self._normalize_text, self._safe_memory_type, self._clamp01
+        )
 
-        # 先剥离思维链(Gemma / Claude extended thinking 等模型会输出 <thought>/认为)
-        raw_text = self._strip_think_tags(raw_text)
-
-        data = None
-        try:
-            data = json.loads(raw_text)
-        except json.JSONDecodeError:
-            # 从文本中提取第一个完整 JSON 对象
-            start = raw_text.find("{")
-            end = raw_text.rfind("}")
-            if start != -1 and end != -1 and end > start:
-                try:
-                    data = json.loads(raw_text[start:end+1])
-                except Exception:
-                    return []
-            else:
-                return []
-
-        items = data.get("memories") if isinstance(data, dict) else None
-        if not isinstance(items, list):
-            return []
-
-        result = []
-        for item in items[:6]:
-            if not isinstance(item, dict):
-                continue
-            mem = self._normalize_text(str(item.get("memory", "")))
-            if not mem:
-                continue
-            result.append(
-                {
-                    "memory": mem,
-                    "memory_type": self._safe_memory_type(
-                        item.get("memory_type", "fact")
-                    ),
-                    "importance": self._clamp01(item.get("importance", 0.6)),
-                    "confidence": self._clamp01(item.get("confidence", 0.7)),
-                    "score": self._clamp01(item.get("score", 0.7)),
-                }
-            )
-        return result
+    def _strip_think_tags(self, text: str) -> str:
+        from .core.llm_helpers import LLMHelpers
+        return LLMHelpers.strip_think_tags(text)
 
     # =========================================================================
     # 记忆召回与上下文构建
@@ -2951,9 +2906,7 @@ class TMemoryPlugin(Star):
         """对文本进行敏感信息脱敏。"""
         for pattern, replacement in self._sanitize_patterns:
             text = pattern.sub(replacement, text)
-            if getattr(self, "_distill_mgr", None):
-                text = self._distill_mgr.normalize_text(text)
-            return text
+        return text
 
 
 
@@ -2969,15 +2922,13 @@ class TMemoryPlugin(Star):
         r"^(user|assistant|summary)\s*:\s*", re.IGNORECASE | re.MULTILINE
     )
     def _normalize_text(self, text: str) -> str:
-        if getattr(self, "_distill_mgr", None):
-            return self._distill_mgr.normalize_text(text)
         return re.sub(r"\s+", " ", (text or "").strip())
 
     def _safe_memory_type(self, value: object) -> str:
         s = str(value or "fact").strip().lower()
         if s in {"preference", "fact", "task", "restriction", "style"}:
             return s
-        return self._distill_mgr.infer_memory_type(s)
+        return "fact"
 
     def _clamp01(self, value: object) -> float:  # type: ignore[arg-type]
         try:
