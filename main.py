@@ -98,77 +98,12 @@ class TMemoryPlugin(Star):
         self._web_server = self._safe_load_web_server()
 
     def _set_safe_defaults(self):
-        """设置所有配置属性的安全默认值，确保任何配置解析失败都不会导致 AttributeError。"""
-        self._cfg.cache_max_rows = 20
-        self._cfg.memory_max_chars = 220
-        self._cfg.enable_auto_capture = True
-        self._cfg.capture_assistant_reply = True
-        self._cfg.no_memory_marker = "\x00[astrbot:no-memory]\x00"
-        self._cfg.capture_skip_prefixes: List[str] = ["提醒 #"]
-        self._cfg.capture_skip_regex: Optional[re.Pattern] = None
-        self._cfg.distill_interval_sec = 17280
-        self._cfg.distill_min_batch_count = 20
-        self._cfg.distill_batch_limit = 80
-        self._cfg.distill_model_id = ""
-        self._cfg.distill_provider_id = ""
-        self._cfg.enable_memory_injection = True
-        self._cfg.manual_purify_default_mode = "both"
-        self._cfg.manual_purify_default_limit = 20
-        self.manual_refine_default_mode = "both"
-        self.manual_refine_default_limit = 20
-        self._cfg.distill_pause = False
-        self._cfg.purify_interval_days = 0
-        self._cfg.purify_model_id = ""
-        self._cfg.purify_min_score = 0.0
-        # ── 向量检索管理器 ──────────────────────────────────────────
-        self._vector_manager: Optional["VectorManager"] = None
-        self._cfg.embed_provider_id = ""
-        self._cfg.embed_model_id = ""
-        self.embed_model = ""
-        self._cfg.embed_dim = 1536
-        self.vector_weight = 0.4
-        self.min_vector_sim = 0.15
-        self._sqlite_vec = None
-        self._vec_available = False
-        self._cfg.embed_base_url = ""
-        self._cfg.embed_api_key = ""
-        self._cfg.enable_reranker = False
-        self._cfg.rerank_provider_id = ""
-        self._cfg.rerank_model_id = ""
-        self.rerank_model = ""
-        self._cfg.rerank_top_n = 5
-        self._cfg.rerank_base_url = ""
-        self._cfg.memory_scope = "user"
-        self._cfg.private_memory_in_group = False
-        self._cfg.inject_position = "system_prompt"
-        self._cfg.inject_slot_marker = "{{tmemory}}"
-        self._cfg.inject_memory_limit = 5
-        self._cfg.inject_max_chars = 0
-        self._sanitize_patterns = []
-        self._distill_task: Optional[asyncio.Task] = None
-        self._worker_running = False
-        self._merge_needs_vector_rebuild = False
-        self._fts5_needs_rebuild = False
-        self._last_purify_ts = 0.0
-        self._embed_ok_count = 0
-        self._embed_fail_count = 0
-        self._embed_last_error = ""
-        self._vec_query_count = 0
-        self._vec_hit_count = 0
-        self._embed_semaphore = asyncio.Semaphore(4)
-        self._http_session = None
-        # ── 触发门控与批处理效率 ──────────────────────────────────────────────
-        # capture_min_content_len: 用户消息/助手回复中有效字符低于此值时跳过采集
-        # capture_dedup_window: 同用户在最近 N 条未蒸馏缓存中出现相同内容哈希时跳过
-        # distill_user_throttle_sec: 单用户最近一次蒸馏完成后的冷却时间(秒)，
-        #     冷却内再次出现于 pending_users 列表时跳过，防止高频用户每轮都被处理
-        self._cfg.capture_min_content_len = 5
-        self._cfg.capture_dedup_window = 10
-        self._cfg.distill_user_throttle_sec = 0
-        # 运行时统计：每次蒸馏周期中因门控被跳过的行数
-        self._distill_skipped_rows: int = 0
-        # 内存缓存：per-user 最近蒸馏完成时间戳（用于节流）
-        self._user_last_distilled_ts: Dict[str, float] = {}
+        """设置所有配置属性的安全默认值，确保任何配置解析失败都不会导致 AttributeError。
+        
+        实现细节见 core.config.apply_safe_defaults。
+        """
+        from .core.config import apply_safe_defaults
+        apply_safe_defaults(self)
 
     def _get_vector_retrieval_config(self) -> Dict:
         """兼容旧平铺配置和新嵌套配置的向量检索配置读取。"""
@@ -920,121 +855,8 @@ class TMemoryPlugin(Star):
     async def _run_distill_cycle(
         self, force: bool = False, trigger: str = "manual"
     ) -> Tuple[int, int]:
-        """执行一轮蒸馏，记录历史，单用户失败不中断整轮。"""
-        started_at = self._now()
-        t0 = time.time()
-        min_required = 1 if force else self._cfg.distill_min_batch_count
-        pending_users = self._pending_distill_users(
-            limit=(100 if force else 20), min_batch_count=min_required
-        )
-        processed_users = 0
-        total_memories = 0
-        failed_users = 0
-        errors: list = []
-        # token 累计；-1 表示本轮无任何有效 usage 数据
-        cycle_tok_in: int = -1
-        cycle_tok_out: int = -1
-
-        now_ts = time.time()
-        for canonical_id in pending_users:
-            try:
-                # 用户级节流：force 模式跳过冷却检查
-                if (not force) and self._cfg.distill_user_throttle_sec > 0:
-                    last_ts = self._user_last_distilled_ts.get(canonical_id, 0.0)
-                    if now_ts - last_ts < self._cfg.distill_user_throttle_sec:
-                        continue  # 冷却中，跳过本用户
-
-                rows = self._fetch_pending_rows(canonical_id, self._cfg.distill_batch_limit)
-                if (not force) and len(rows) < self._cfg.distill_min_batch_count:
-                    continue
-
-                # 预过滤：在送入 LLM 前过滤掉低信息量行，减少 token 消耗
-                rows_for_llm = self._prefilter_distill_rows(rows)
-                if not rows_for_llm:
-                    # 所有行均为低信息量，直接标记为已蒸馏跳过
-                    self._mark_rows_distilled([int(r["id"]) for r in rows])
-                    self._distill_skipped_rows += len(rows)
-                    processed_users += 1
-                    self._user_last_distilled_ts[canonical_id] = now_ts
-                    continue
-
-                skipped = len(rows) - len(rows_for_llm)
-                self._distill_skipped_rows += skipped
-
-                llm_items, tok_in, tok_out = await self._distill_rows_with_llm(rows_for_llm)
-
-                # 累加 token 计数（-1 表示 provider 未返回，跳过累加）
-                if tok_in >= 0:
-                    cycle_tok_in = max(cycle_tok_in, 0) + tok_in
-                if tok_out >= 0:
-                    cycle_tok_out = max(cycle_tok_out, 0) + tok_out
-
-                if not llm_items:
-                    self._mark_rows_distilled([int(r["id"]) for r in rows])
-                    self._user_last_distilled_ts[canonical_id] = now_ts
-                    continue
-
-                valid_items = self._validate_distill_output(llm_items)
-                for item in valid_items:
-                    mem_text = self._sanitize_text(
-                        self._normalize_text(str(item.get("memory", "")))
-                    )
-                    if not mem_text:
-                        continue
-                    row_scope = str(rows[0].get("scope", "user"))
-                    row_persona = str(rows[0].get("persona_id", ""))
-                    new_id = self._insert_memory(
-                        canonical_id=canonical_id,
-                        adapter=str(rows[0]["source_adapter"]),
-                        adapter_user=str(rows[0]["source_user_id"]),
-                        memory=mem_text,
-                        score=self._clamp01(item.get("score", 0.7)),
-                        memory_type=str(item.get("memory_type", "fact")),
-                        importance=self._clamp01(item.get("importance", 0.6)),
-                        confidence=self._clamp01(item.get("confidence", 0.7)),
-                        source_channel="scheduled_distill",
-                        scope=row_scope,
-                        persona_id=row_persona,
-                    )
-                    if self._vec_available and new_id:
-                        await self._upsert_vector(new_id, mem_text)
-                    total_memories += 1
-
-                self._mark_rows_distilled([int(r["id"]) for r in rows])
-                self._optimize_context(canonical_id)
-                processed_users += 1
-                self._user_last_distilled_ts[canonical_id] = now_ts
-            except Exception as e:
-                failed_users += 1
-                errors.append(f"{canonical_id}: {type(e).__name__}: {e}")
-                logger.warning(
-                    "[tmemory] distill failed for user %s: %s", canonical_id, e
-                )
-
-        # 记录蒸馏历史
-        duration = round(time.time() - t0, 2)
-        cycle_tok_total = (
-            cycle_tok_in + cycle_tok_out
-            if cycle_tok_in >= 0 and cycle_tok_out >= 0
-            else -1
-        )
-        self._record_distill_history(
-            started_at=started_at,
-            trigger=trigger,
-            users_processed=processed_users,
-            memories_created=total_memories,
-            users_failed=failed_users,
-            errors=errors,
-            duration=duration,
-            tokens_input=cycle_tok_in,
-            tokens_output=cycle_tok_out,
-            tokens_total=cycle_tok_total,
-        )
-
-        # 顺便执行记忆衰减
-        self._decay_stale_memories()
-
-        return processed_users, total_memories
+        from .core.memory_ops import MemoryOps
+        return await MemoryOps(self).run_distill_cycle(force, trigger)
 
     # =========================================================================
     # LLM 蒸馏
@@ -1075,83 +897,8 @@ class TMemoryPlugin(Star):
     async def _distill_rows_with_llm(
         self, rows: List[Dict]
     ) -> Tuple[List[Dict[str, object]], int, int]:
-        """用 LLM 对一批对话行进行结构化蒸馏，失败时回退到规则蒸馏。
-
-        Returns:
-            (items, tokens_input, tokens_output)
-            tokens_input / tokens_output 为 -1 表示 provider 未返回 usage。
-        """
-        transcript_lines = []
-        for row in rows:
-            role = str(row["role"])
-            content = str(row["content"])
-            transcript_lines.append(f"{role}: {content}")
-
-        transcript = "\n".join(transcript_lines)
-        prompt = self._distill_mgr.build_distill_prompt(transcript)
-
-        chat_provider_id = await self._distill_mgr.resolve_distill_provider_id(rows, self.context)
-        chat_model_id = await self._distill_mgr.resolve_distill_model_id(rows)
-        if not chat_provider_id:
-            # 无法确定 provider 时，回退到规则蒸馏。
-            return (
-                [
-                    {
-                        "memory": self._distill_mgr.distill_text(transcript),
-                        "memory_type": "fact",
-                        "importance": 0.55,
-                        "confidence": 0.50,
-                        "score": 0.60,
-                    }
-                ],
-                -1,
-                -1,
-            )
-
-        try:
-            llm_generate_kwargs = {
-                "chat_provider_id": chat_provider_id,
-                "prompt": prompt,
-            }
-            if chat_model_id:
-                llm_generate_kwargs["model_id"] = chat_model_id
-
-            llm_resp = await self.context.llm_generate(**llm_generate_kwargs)
-            completion_text = self._normalize_text(
-                getattr(llm_resp, "completion_text", "") or ""
-            )
-            # 剥离思维链后再解析(兼容 Gemma / Claude extended thinking 等)
-            completion_text = self._strip_think_tags(completion_text)
-            parsed = self._parse_llm_json_memories(completion_text)
-
-            # 提取 token usage（provider 不支持时为 None）
-            usage = getattr(llm_resp, "usage", None)
-            if usage is not None:
-                tok_in = int(getattr(usage, "input_other", 0) or 0) + int(
-                    getattr(usage, "input_cached", 0) or 0
-                )
-                tok_out = int(getattr(usage, "output", 0) or 0)
-            else:
-                tok_in, tok_out = -1, -1
-
-            if parsed:
-                return parsed, tok_in, tok_out
-        except Exception as e:
-            logger.warning("[tmemory] llm distill failed, fallback to rule: %s", e)
-
-        return (
-            [
-                {
-                    "memory": self._distill_mgr.distill_text(transcript),
-                    "memory_type": "fact",
-                    "importance": 0.55,
-                    "confidence": 0.50,
-                    "score": 0.60,
-                }
-            ],
-            -1,
-            -1,
-        )
+        from .core.memory_ops import MemoryOps
+        return await MemoryOps(self).distill_rows_with_llm(rows)
 
     # 匹配 thinking 模型的推理块(Gemma / Claude extended thinking 等)
     _THINK_RE = re.compile(
@@ -1282,197 +1029,40 @@ class TMemoryPlugin(Star):
         self._db_mgr.close()
 
     # =========================================================================
-    # 向量检索辅助方法
+    # 向量检索辅助方法（实现见 core.vector）
     # =========================================================================
 
     async def _get_http_session(self):
-        """获取或创建复用的 aiohttp.ClientSession。"""
-        if self._http_session is None or self._http_session.closed:
-            import aiohttp  # type: ignore[import-not-found]
-
-            timeout = aiohttp.ClientTimeout(total=15)
-            self._http_session = aiohttp.ClientSession(timeout=timeout)
-        return self._http_session
+        from .core import vector as _vec
+        return await _vec.get_http_session(self)
 
     async def _embed_text(self, text: str) -> Optional[List[float]]:
-        """生成文本向量。优先使用 VectorManager，如果不可用则回退到旧方法。
-
-        包含:并发限流(semaphore)、429/5xx 重试(最多 2 次)、可观测计数。
-        """
-        # 优先使用 VectorManager
-        if self._vector_manager and self._vector_manager.embedding_provider:
-            try:
-                return await self._vector_manager.embedding_provider.embed_text(text)
-            except Exception as e:
-                logger.warning("[tmemory] VectorManager embed_text failed: %s", e)
-                # 回退到旧方法
-        
-        # 回退到旧方法
-        if not self._vec_available or not self._cfg.embed_base_url:
-            return None
-
-        url = self._cfg.embed_base_url.rstrip("/") + "/v1/embeddings"
-        payload = {"model": self.embed_model, "input": text[:2000]}
-        headers: Dict[str, str] = {}
-        if self._cfg.embed_api_key:
-            headers["Authorization"] = f"Bearer {self._cfg.embed_api_key}"
-
-        max_retries = 2
-        async with self._embed_semaphore:
-            for attempt in range(1, max_retries + 1):
-                try:
-                    session = await self._get_http_session()
-                    async with session.post(url, json=payload, headers=headers) as resp:
-                        if resp.status == 429 or resp.status >= 500:
-                            # 可重试的错误
-                            if attempt < max_retries:
-                                wait = min(2.0 * attempt, 5.0)
-                                logger.debug(
-                                    "[tmemory] embed API %d, retry %d after %.1fs",
-                                    resp.status,
-                                    attempt,
-                                    wait,
-                                )
-                                await asyncio.sleep(wait)
-                                continue
-                            self._embed_fail_count += 1
-                            self._embed_last_error = f"HTTP {resp.status}"
-                            return None
-                        if resp.status != 200:
-                            self._embed_fail_count += 1
-                            self._embed_last_error = f"HTTP {resp.status}"
-                            logger.debug("[tmemory] embed API status=%s", resp.status)
-                            return None
-                        data = await resp.json()
-                        vec = data["data"][0]["embedding"]
-                        if len(vec) != self._cfg.embed_dim:
-                            logger.warning(
-                                "[tmemory] embed dim mismatch: got %d, expected %d",
-                                len(vec),
-                                self._cfg.embed_dim,
-                            )
-                            self._embed_fail_count += 1
-                            self._embed_last_error = (
-                                f"dim mismatch {len(vec)} vs {self._cfg.embed_dim}"
-                            )
-                            return None
-                        self._embed_ok_count += 1
-                        return vec
-                except Exception as e:
-                    if attempt < max_retries:
-                        await asyncio.sleep(1.0 * attempt)
-                        continue
-                    self._embed_fail_count += 1
-                    self._embed_last_error = str(e)[:200]
-                    logger.debug("[tmemory] _embed_text failed: %s", e)
-                    return None
-        return None
+        from .core import vector as _vec
+        return await _vec.embed_text(self, text)
 
     async def _upsert_vector(self, memory_id: int, text: str) -> bool:
-        """为一条记忆生成并写入向量。成功返回 True，失败返回 False。"""
-        if not self._vec_available:
-            return False
-        vec = await self._embed_text(text)
-        if vec is None:
-            return False
-        try:
-            blob = self._sqlite_vec.serialize_float32(vec)
-            with self._db() as conn:
-                conn.execute(
-                    "INSERT OR REPLACE INTO memory_vectors(memory_id, embedding) VALUES(?, ?)",
-                    (memory_id, blob),
-                )
-            return True
-        except Exception as e:
-            logger.debug("[tmemory] _upsert_vector failed for id=%s: %s", memory_id, e)
-            return False
+        from .core import vector as _vec
+        return await _vec.upsert_vector(self, memory_id, text)
 
     def _delete_vector(self, memory_id: int, conn=None) -> None:
-        """删除单条记忆的向量行。"""
-        if not self._vec_available:
-            return
-        try:
-            if conn is not None:
-                conn.execute(
-                    "DELETE FROM memory_vectors WHERE memory_id = ?", (memory_id,)
-                )
-            else:
-                with self._db() as _conn:
-                    _conn.execute(
-                        "DELETE FROM memory_vectors WHERE memory_id = ?", (memory_id,)
-                    )
-        except Exception as e:
-            logger.debug("[tmemory] _delete_vector failed: %s", e)
+        from .core import vector as _vec
+        _vec.delete_vector(self, memory_id, conn)
 
     def _delete_vectors_for_user(self, canonical_id: str, conn=None) -> None:
-        """删除某用户所有记忆的向量行。"""
-        if not self._vec_available:
-            return
-        try:
-            sql = (
-                "DELETE FROM memory_vectors WHERE memory_id IN "
-                "(SELECT id FROM memories WHERE canonical_user_id = ?)"
-            )
-            if conn is not None:
-                conn.execute(sql, (canonical_id,))
-            else:
-                with self._db() as _conn:
-                    _conn.execute(sql, (canonical_id,))
-        except Exception as e:
-            logger.debug("[tmemory] _delete_vectors_for_user failed: %s", e)
+        from .core import vector as _vec
+        _vec.delete_vectors_for_user(self, canonical_id, conn)
 
     async def _rebuild_vector_index(self) -> Tuple[int, int]:
-        """为所有 is_active=1 的记忆补全向量索引(跳过已有向量的)。"""
-        with self._db() as conn:
-            rows = conn.execute(
-                """
-                SELECT m.id, m.memory FROM memories m
-                LEFT JOIN memory_vectors v ON m.id = v.memory_id
-                WHERE m.is_active = 1 AND v.memory_id IS NULL
-                ORDER BY m.id ASC
-                """
-            ).fetchall()
-            pending = [(int(r["id"]), str(r["memory"])) for r in rows]
-
-        ok = fail = 0
-        for mem_id, mem_text in pending:
-            try:
-                if await self._upsert_vector(mem_id, mem_text):
-                    ok += 1
-                else:
-                    fail += 1
-            except Exception as e:
-                logger.debug("[tmemory] rebuild vector failed id=%s: %s", mem_id, e)
-                fail += 1
-        return ok, fail
+        from .core import vector as _vec
+        return await _vec.rebuild_vector_index(self)
 
     def _log_memory_event(
-        self,
-        canonical_user_id: str,
-        event_type: str,
-        payload: Dict[str, object],
-        conn: Optional[sqlite3.Connection] = None,
+        self, canonical_user_id: str, event_type: str,
+        payload: Dict[str, object], conn: Optional[sqlite3.Connection] = None,
     ):
-        """记录记忆相关事件到审计日志 memory_events。
-
-        当已在一个 with self._db() 块内时，传入 conn 以复用连接，
-        避免嵌套打开第二个写事务导致 database is locked。
-        """
-        row = (
-            canonical_user_id,
-            event_type,
-            json.dumps(payload, ensure_ascii=False),
-            self._now(),
-        )
-        sql = (
-            "INSERT INTO memory_events(canonical_user_id, event_type, payload_json, created_at)"
-            " VALUES(?, ?, ?, ?)"
-        )
-        if conn is not None:
-            conn.execute(sql, row)
-        else:
-            with self._db() as _conn:
-                _conn.execute(sql, row)
+        """记录记忆相关事件到审计日志 memory_events。"""
+        from .core import memory_ops as _mo
+        _mo.log_memory_event(self, canonical_user_id, event_type, payload, conn)
 
     # =========================================================================
     # 身份管理
@@ -1596,122 +1186,20 @@ class TMemoryPlugin(Star):
         persona_id: str = "",
         scope: str = "user",
     ) -> int:
-        normalized = self._normalize_text(memory)
-        mhash = hashlib.sha256(
-            f"{persona_id}:{scope}:{normalized}".encode("utf-8")
-        ).hexdigest()
-        now = self._now()
-        memory_type_safe = self._safe_memory_type(memory_type)
-        tokenized_memory = " ".join(jieba.cut_for_search(memory))
-        with self._db() as conn:
-            row = conn.execute(
-                "SELECT id, reinforce_count FROM memories WHERE canonical_user_id=? AND memory_hash=?",
-                (canonical_id, mhash),
-            ).fetchone()
-            if row:
-                conn.execute(
-                    """
-                    UPDATE memories
-                    SET score=?, memory_type=?, importance=MAX(importance, ?), confidence=MAX(confidence, ?),
-                        reinforce_count=?, last_seen_at=?, updated_at=?, tokenized_memory=?
-                    WHERE id=?
-                    """,
-                    (
-                        self._clamp01(score),
-                        memory_type_safe,
-                        self._clamp01(importance),
-                        self._clamp01(confidence),
-                        int(row["reinforce_count"]) + 1,
-                        now,
-                        now,
-                        tokenized_memory,
-                        int(row["id"]),
-                    ),
-                )
-                return int(row["id"])
-
-            # ── 冲突检测 ─────────────────────────────────────────────────────
-            # 同一类型下，如果已有记忆和新记忆有高重叠，说明这是更新旧信息，标记旧记忆失效。
-            new_words = set(self._retrieval_mgr.tokenize(normalized))
-            candidate_rows = conn.execute(
-                """
-                SELECT id, memory FROM memories
-                WHERE canonical_user_id=? AND memory_type=? AND is_active=1 AND is_pinned=0
-                ORDER BY created_at DESC
-                LIMIT 15
-                """,
-                (canonical_id, memory_type_safe),
-            ).fetchall()
-
-            deactivated = 0
-            for cand in candidate_rows:
-                cand_words = set(self._retrieval_mgr.tokenize(str(cand["memory"])))
-                overlap = len(new_words.intersection(cand_words))
-                # 当超过一半关键词重叠，且新记忆 confidence >= 旧记忆时，标记旧记忆失效
-                if overlap >= max(1, min(len(new_words), len(cand_words)) * 0.5):
-                    conn.execute(
-                        """
-                        UPDATE memories SET is_active=0, updated_at=? WHERE id=?
-                        """,
-                        (now, int(cand["id"])),
-                    )
-                    deactivated += 1
-
-            cur = conn.execute(
-                """
-                INSERT INTO memories(
-                    canonical_user_id, source_adapter, source_user_id, source_channel, memory_type,
-                    memory, tokenized_memory, memory_hash, score, importance, confidence, reinforce_count, is_active,
-                    last_seen_at, created_at, updated_at, persona_id, scope
-                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    canonical_id,
-                    adapter,
-                    adapter_user,
-                    source_channel,
-                    memory_type_safe,
-                    memory,
-                    tokenized_memory,
-                    mhash,
-                    self._clamp01(score),
-                    self._clamp01(importance),
-                    self._clamp01(confidence),
-                    1,
-                    1,
-                    now,
-                    now,
-                    now,
-                    persona_id,
-                    scope,
-                ),
-            )
-            new_id = int(cur.lastrowid or 0)
-
-            # 记录蒸馏创建事件，传入 conn 避免嵌套打开第二个写事务
-            if deactivated > 0:
-                self._memory_logger.log_memory_event(
-                    canonical_user_id=canonical_id,
-                    event_type="create_with_conflict",
-                    payload={
-                        "new_memory_id": new_id,
-                        "memory_type": memory_type_safe,
-                        "deactivated_count": deactivated,
-                    },
-                    conn=conn,
-                )
-            else:
-                self._memory_logger.log_memory_event(
-                    canonical_user_id=canonical_id,
-                    event_type="create",
-                    payload={
-                        "memory_id": new_id,
-                        "memory_type": memory_type_safe,
-                    },
-                    conn=conn,
-                )
-
-            return new_id
+        from .core.memory_ops import MemoryOps
+        return MemoryOps(self).insert_memory(
+            canonical_id=canonical_id,
+            adapter=adapter,
+            adapter_user=adapter_user,
+            memory=memory,
+            score=score,
+            memory_type=memory_type,
+            importance=importance,
+            confidence=confidence,
+            source_channel=source_channel,
+            persona_id=persona_id,
+            scope=scope,
+        )
 
     def _delete_memory(self, memory_id: int) -> bool:
         with self._db() as conn:
@@ -1819,97 +1307,16 @@ class TMemoryPlugin(Star):
         include_pinned: bool,
         extra_instruction: str,
     ) -> Dict[str, object]:
-        rows = self._list_memories_for_purify(
-            canonical_id, limit=limit, include_pinned=include_pinned
+        from .core.memory_ops import MemoryOps
+        return await MemoryOps(self).manual_purify_memories(
+            event=event,
+            canonical_id=canonical_id,
+            mode=mode,
+            limit=limit,
+            dry_run=dry_run,
+            include_pinned=include_pinned,
+            extra_instruction=extra_instruction,
         )
-        if not rows:
-            return {"updates": 0, "adds": 0, "deletes": 0, "note": "no memories"}
-
-        operations = await self._llm_purify_operations(
-            event, rows, mode, extra_instruction
-        )
-        updates = operations.get("updates", []) if isinstance(operations, dict) else []
-        adds = operations.get("adds", []) if isinstance(operations, dict) else []
-        deletes = operations.get("deletes", []) if isinstance(operations, dict) else []
-        note = str(operations.get("note", "")) if isinstance(operations, dict) else ""
-
-        pinned_ids = {int(r["id"]) for r in rows if int(r["is_pinned"]) == 1}
-        if not include_pinned:
-            updates = [u for u in updates if int(u.get("id", 0)) not in pinned_ids]
-            deletes = [d for d in deletes if int(d) not in pinned_ids]
-
-        if dry_run:
-            return {
-                "updates": len(updates),
-                "adds": len(adds),
-                "deletes": len(deletes),
-                "note": f"dry_run preview. {note}",
-            }
-
-        applied_updates = applied_adds = applied_deletes = 0
-
-        for upd in updates:
-            try:
-                mem_id = int(upd.get("id", 0))
-                if not mem_id:
-                    continue
-                memory = self._sanitize_text(
-                    self._normalize_text(str(upd.get("memory", "")))
-                )
-                if not memory:
-                    continue
-                self._update_memory_full(
-                    mem_id,
-                    memory=memory,
-                    memory_type=self._safe_memory_type(upd.get("memory_type", "fact")),
-                    score=self._clamp01(upd.get("score", 0.7)),
-                    importance=self._clamp01(upd.get("importance", 0.6)),
-                    confidence=self._clamp01(upd.get("confidence", 0.7)),
-                )
-                if self._vec_available:
-                    await self._upsert_vector(mem_id, memory)
-                applied_updates += 1
-            except Exception as e:
-                logger.debug("[tmemory] apply update failed: %s", e)
-
-        for add in adds:
-            try:
-                memory = self._sanitize_text(
-                    self._normalize_text(str(add.get("memory", "")))
-                )
-                if not memory:
-                    continue
-                new_id = self._insert_memory(
-                    canonical_id=canonical_id,
-                    adapter="manual_purify",
-                    adapter_user=canonical_id,
-                    memory=memory,
-                    score=self._clamp01(add.get("score", 0.7)),
-                    memory_type=self._safe_memory_type(add.get("memory_type", "fact")),
-                    importance=self._clamp01(add.get("importance", 0.6)),
-                    confidence=self._clamp01(add.get("confidence", 0.7)),
-                    source_channel="manual_purify",
-                )
-                if self._vec_available and new_id:
-                    await self._upsert_vector(new_id, memory)
-                applied_adds += 1
-            except Exception as e:
-                logger.debug("[tmemory] apply add failed: %s", e)
-
-        for d in deletes:
-            try:
-                mem_id = int(d)
-                if self._delete_memory(mem_id):
-                    applied_deletes += 1
-            except Exception as e:
-                logger.debug("[tmemory] apply delete failed: %s", e)
-
-        return {
-            "updates": applied_updates,
-            "adds": applied_adds,
-            "deletes": applied_deletes,
-            "note": note,
-        }
 
     async def _llm_purify_operations(
         self,
@@ -1918,52 +1325,8 @@ class TMemoryPlugin(Star):
         mode: str,
         extra_instruction: str,
     ) -> Dict[str, object]:
-        """让 LLM 生成对已有记忆的手动提纯操作(更新/新增/删除)。"""
-        prompt = (
-            "你是记忆编辑器。请基于现有记忆做精炼优化。只输出 JSON，不要解释。\n"
-            "目标:去重、合并重复、拆分过长、删除无意义条目。\n"
-            f"模式: {mode}\n"
-            f"附加要求: {extra_instruction or '无'}\n\n"
-            "输出格式:\n"
-            "{\n"
-            '  "updates": [{"id": 1, "memory": "...", "memory_type": "...", "importance": 0.6, "confidence": 0.8, "score": 0.7}],\n'
-            '  "adds": [{"memory": "...", "memory_type": "...", "importance": 0.6, "confidence": 0.8, "score": 0.7}],\n'
-            '  "deletes": [3,4],\n'
-            '  "note": "可选说明"\n'
-            "}\n\n"
-            "规则:\n"
-            "1) updates 只允许引用输入里存在的 id。\n"
-            "2) memory 必须以‘用户’为主语，避免废话。\n"
-            "3) 删除明显重复/低价值/噪声记忆。\n"
-            "4) mode=merge 时优先减少条目;mode=split 时优先拆分复合记忆;both 两者都可。\n"
-            "5) 不要引入输入中不存在的新事实。\n\n"
-            f"输入记忆:{json.dumps(rows, ensure_ascii=False)}"
-        )
-
-        provider_id = ""
-        try:
-            provider_id = await self.context.get_current_chat_provider_id(
-                umo=self._safe_get_unified_msg_origin(event)
-            )
-        except Exception:
-            provider_id = self._cfg.distill_provider_id
-
-        if not provider_id:
-            return {"updates": [], "adds": [], "deletes": [], "note": "no provider"}
-
-        try:
-            resp = await self.context.llm_generate(
-                chat_provider_id=str(provider_id), prompt=prompt
-            )
-            txt = self._strip_think_tags(
-                self._normalize_text(getattr(resp, "completion_text", "") or "")
-            )
-            obj = self._parse_json_object(txt)
-            if isinstance(obj, dict):
-                return obj
-        except Exception as e:
-            logger.warning("[tmemory] _llm_purify_operations failed: %s", e)
-        return {"updates": [], "adds": [], "deletes": [], "note": "llm failed"}
+        from .core import maintenance as _m
+        return await _m.llm_purify_operations(self, event, rows, mode, extra_instruction)
 
     async def _manual_refine_memories(
         self,
@@ -1989,51 +1352,8 @@ class TMemoryPlugin(Star):
     async def _llm_split_memory(
         self, event: AstrMessageEvent, memory_text: str
     ) -> List[str]:
-        """使用 LLM 将一条复合记忆拆分为多条。"""
-        prompt = (
-            "将以下一条用户记忆拆分为 2~5 条更原子化的记忆。\n"
-            '只输出 JSON:{"segments":["用户...","用户..."]}\n'
-            "每条必须以‘用户’开头，避免废话。\n"
-            f"原记忆: {memory_text}"
-        )
-
-        provider_id = ""
-        try:
-            provider_id = await self.context.get_current_chat_provider_id(
-                umo=self._safe_get_unified_msg_origin(event)
-            )
-        except Exception:
-            provider_id = self._cfg.distill_provider_id
-
-        if not provider_id:
-            return [
-                x.strip()
-                for x in re.split(r"[;;，,]", memory_text)
-                if len(x.strip()) >= 6
-            ]
-
-        try:
-            resp = await self.context.llm_generate(
-                chat_provider_id=str(provider_id), prompt=prompt
-            )
-            txt = self._strip_think_tags(
-                self._normalize_text(getattr(resp, "completion_text", "") or "")
-            )
-            obj = self._parse_json_object(txt)
-            if isinstance(obj, dict) and isinstance(obj.get("segments"), list):
-                segs = [
-                    self._normalize_text(str(s))
-                    for s in obj["segments"]
-                    if self._normalize_text(str(s))
-                ]
-                if len(segs) >= 2:
-                    return segs[:5]
-        except Exception as e:
-            logger.debug("[tmemory] _llm_split_memory failed: %s", e)
-
-        return [
-            x.strip() for x in re.split(r"[;;，,]", memory_text) if len(x.strip()) >= 6
-        ]
+        from .core import maintenance as _m
+        return await _m.llm_split_memory(self, event, memory_text)
 
     def _parse_json_object(self, text: str) -> Optional[Dict[str, object]]:
         """从文本中提取 JSON 对象。"""
@@ -2102,36 +1422,11 @@ class TMemoryPlugin(Star):
             )
 
     def _update_memory_full(
-        self,
-        memory_id: int,
-        memory: str,
-        memory_type: str,
-        score: float,
-        importance: float,
-        confidence: float,
+        self, memory_id: int, memory: str, memory_type: str,
+        score: float, importance: float, confidence: float,
     ) -> None:
-        now = self._now()
-        mhash = hashlib.sha256(self._normalize_text(memory).encode("utf-8")).hexdigest()
-        tokenized_memory = " ".join(jieba.cut_for_search(memory))
-        with self._db() as conn:
-            conn.execute(
-                """
-                UPDATE memories
-                SET memory=?, tokenized_memory=?, memory_hash=?, memory_type=?, score=?, importance=?, confidence=?, updated_at=?
-                WHERE id=?
-                """,
-                (
-                    memory,
-                    tokenized_memory,
-                    mhash,
-                    memory_type,
-                    score,
-                    importance,
-                    confidence,
-                    now,
-                    memory_id,
-                ),
-            )
+        from .core import memory_ops as _mo
+        _mo.update_memory_full(self, memory_id, memory, memory_type, score, importance, confidence)
 
     def _auto_merge_memory_text(self, memories: List[str]) -> str:
         """无 LLM 时的简单合并策略:去重后拼接。"""
@@ -2154,49 +1449,8 @@ class TMemoryPlugin(Star):
     async def _rerank_results(
         self, query: str, candidates: List[Dict[str, object]], top_n: int
     ) -> List[Dict[str, object]]:
-        """调用 Reranker API 对候选记忆精排。
-
-        兼容 /v1/rerank 接口(Jina、Cohere、混元、本地 rerank 服务)。
-        Request: {"model":"...","query":"...","documents":["..."],"top_n":n}
-        Response: {"results":[{"index":i,"relevance_score":0.9},...]}
-        """
-        if not candidates:
-            return candidates[:top_n]
-        documents = [str(c["memory"]) for c in candidates]
-        payload: Dict[str, object] = {
-            "query": query,
-            "documents": documents,
-            "top_n": min(top_n, len(documents)),
-        }
-        if self.rerank_model:
-            payload["model"] = self.rerank_model
-        headers: Dict[str, str] = {}
-        if self.rerank_api_key:
-            headers["Authorization"] = f"Bearer {self.rerank_api_key}"
-        url = self._cfg.rerank_base_url.rstrip("/") + "/v1/rerank"
-        try:
-            session = await self._get_http_session()
-            async with session.post(url, json=payload, headers=headers) as resp:
-                if resp.status != 200:
-                    logger.debug(
-                        "[tmemory] rerank API %s, fallback to score order", resp.status
-                    )
-                    return candidates[:top_n]
-                data = await resp.json()
-                results = data.get("results", [])
-                if not results:
-                    return candidates[:top_n]
-                reranked = []
-                for r in results:
-                    idx = int(r.get("index", -1))
-                    if 0 <= idx < len(candidates):
-                        item = dict(candidates[idx])
-                        item["rerank_score"] = float(r.get("relevance_score", 0.0))
-                        reranked.append(item)
-                return reranked[:top_n]
-        except Exception as e:
-            logger.debug("[tmemory] rerank failed, fallback: %s", e)
-            return candidates[:top_n]
+        from .core import vector as _vec
+        return await _vec.rerank_results(self, query, candidates, top_n)
 
     # =========================================================================
     # 对话缓存
@@ -2226,62 +1480,14 @@ class TMemoryPlugin(Star):
         )
 
     def _insert_conversation_sync(
-        self,
-        canonical_id: str,
-        role: str,
-        content: str,
-        source_adapter: str,
-        source_user_id: str,
-        unified_msg_origin: str,
-        scope: str = "user",
-        persona_id: str = "",
+        self, canonical_id: str, role: str, content: str, source_adapter: str,
+        source_user_id: str, unified_msg_origin: str, scope: str = "user", persona_id: str = "",
     ):
-        truncated = content[:1000]
-
-        try:
-            # 内容哈希去重：同用户最近 capture_dedup_window 条未蒸馏缓存中有相同内容时跳过
-            if self._cfg.capture_dedup_window > 0:
-                content_hash = hashlib.md5(truncated.encode("utf-8", errors="replace")).hexdigest()
-                with self._db() as conn:
-                    exists = conn.execute(
-                        """
-                        SELECT 1 FROM conversation_cache
-                        WHERE canonical_user_id=? AND distilled=0
-                        AND id IN (
-                            SELECT id FROM conversation_cache
-                            WHERE canonical_user_id=? AND distilled=0
-                            ORDER BY id DESC LIMIT ?
-                        )
-                        AND content=?
-                        LIMIT 1
-                        """,
-                        (canonical_id, canonical_id, self._cfg.capture_dedup_window, truncated),
-                    ).fetchone()
-                    if exists:
-                        return  # 重复内容，跳过写入
-
-            with self._db() as conn:
-                conn.execute(
-                    """
-                    INSERT INTO conversation_cache(
-                        canonical_user_id, role, content, source_adapter, source_user_id,
-                        unified_msg_origin, distilled, distilled_at, created_at, scope, persona_id
-                    ) VALUES(?, ?, ?, ?, ?, ?, 0, '', ?, ?, ?)
-                    """,
-                    (
-                        canonical_id,
-                        role,
-                        truncated,
-                        source_adapter,
-                        source_user_id,
-                        unified_msg_origin,
-                        self._now(),
-                        scope,
-                        persona_id,
-                    ),
-                )
-        except Exception as e:
-            logger.warning("[tmemory] _insert_conversation failed for user %s: %s", canonical_id, e)
+        from .core import maintenance as _m
+        _m.insert_conversation_sync(
+            self, canonical_id, role, content, source_adapter,
+            source_user_id, unified_msg_origin, scope, persona_id,
+        )
 
     def _fetch_recent_conversation(
         self, canonical_id: str, limit: int = 20
@@ -2384,35 +1590,8 @@ class TMemoryPlugin(Star):
 
     def _optimize_context(self, canonical_id: str):
         """对超出阈值的历史做轻量规则摘要压缩，不触发 LLM，以节省 token。"""
-        rows = self._fetch_recent_conversation(canonical_id, limit=200)
-        if len(rows) <= self._cfg.cache_max_rows:
-            return
-
-        joined = " ".join([c for _, c in rows[: -self._cfg.cache_max_rows]])
-        summary = self._distill_mgr.distill_text(joined)
-        now = self._now()
-
-        with self._db() as conn:
-            conn.execute(
-                """
-                INSERT INTO conversation_cache(
-                    canonical_user_id, role, content, source_adapter, source_user_id,
-                    unified_msg_origin, distilled, distilled_at, created_at
-                ) VALUES(?, ?, ?, ?, ?, ?, 1, ?, ?)
-                """,
-                (
-                    canonical_id,
-                    "summary",
-                    f"[auto-summary] {summary}",
-                    "system",
-                    canonical_id,
-                    "",
-                    now,
-                    now,
-                ),
-            )
-
-        self._trim_conversation(canonical_id, keep_last=self._cfg.cache_max_rows)
+        from .core import maintenance as _m
+        _m.optimize_context(self, canonical_id)
 
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("tm_pin")
@@ -2474,420 +1653,73 @@ class TMemoryPlugin(Star):
     # =========================================================================
 
     async def _run_memory_purify(self) -> tuple[int, int]:
-        """对全量已蒸馏记忆进行提纯。
-
-        使用 LLM 对每批记忆做综合评估，标注不值得保留的记忆为失活(is_active=0)。
-        同时执行规则层兜底:低于 purify_min_score 的记忆直接失活。
-        """
-        # ── 规则层:直接失活低综合分记忆 ──────────────────────────────────
-        pruned_rule = 0
-        if self._cfg.purify_min_score > 0:
-            with self._db() as conn:
-                rows = conn.execute(
-                    "SELECT id, score, importance, confidence FROM memories WHERE is_active=1 AND is_pinned=0"
-                ).fetchall()
-                for row in rows:
-                    quality = (
-                        0.3 * float(row["score"])
-                        + 0.4 * float(row["importance"])
-                        + 0.3 * float(row["confidence"])
-                    )
-                    if quality < self._cfg.purify_min_score:
-                        conn.execute(
-                            "UPDATE memories SET is_active=0 WHERE id=?",
-                            (int(row["id"]),),
-                        )
-                        pruned_rule += 1
-
-        # ── LLM 层:批量质量重评 ──────────────────────────────────────────
-        pruned_llm = 0
-        kept = 0
-        provider_id = (
-            self._cfg.purify_model_id or self._cfg.distill_model_id or self._cfg.distill_provider_id
-        )
-        if not provider_id:
-            # 无可用 provider，只执行规则层
-            with self._db() as conn:
-                kept = conn.execute(
-                    "SELECT COUNT(*) FROM memories WHERE is_active=1"
-                ).fetchone()[0]
-            return pruned_rule, int(kept)
-
-        # 按用户批量处理
-        with self._db() as conn:
-            user_rows = conn.execute(
-                "SELECT DISTINCT canonical_user_id FROM memories WHERE is_active=1 AND is_pinned=0"
-            ).fetchall()
-
-        for user_row in user_rows:
-            uid = str(user_row["canonical_user_id"])
-            try:
-                with self._db() as conn:
-                    mems = conn.execute(
-                        "SELECT id, memory, memory_type, score, importance, confidence, reinforce_count "
-                        "FROM memories WHERE canonical_user_id=? AND is_active=1 AND is_pinned=0 "
-                        "ORDER BY importance ASC LIMIT 50",
-                        (uid,),
-                    ).fetchall()
-                    mem_list = [dict(r) for r in mems]
-
-                if not mem_list:
-                    continue
-
-                ids_to_deactivate = await self._llm_purify_judge(provider_id, mem_list)
-                if ids_to_deactivate:
-                    with self._db() as conn:
-                        for mid in ids_to_deactivate:
-                            conn.execute(
-                                "UPDATE memories SET is_active=0 WHERE id=?", (mid,)
-                            )
-                    pruned_llm += len(ids_to_deactivate)
-            except Exception as e:
-                logger.debug("[tmemory] memory_purify user=%s error: %s", uid, e)
-
-        with self._db() as conn:
-            kept = int(
-                conn.execute(
-                    "SELECT COUNT(*) FROM memories WHERE is_active=1"
-                ).fetchone()[0]
-            )
-
-        return pruned_rule + pruned_llm, kept
+        """对全量已蒸馏记忆进行提纯。见 core.maintenance.run_memory_purify。"""
+        from .core import maintenance as _m
+        return await _m.run_memory_purify(self)
 
     async def _llm_purify_judge(
         self, provider_id: str, memories: List[Dict]
     ) -> List[int]:
-        """让 LLM 评判一批记忆的质量，返回应该失活的记忆 ID 列表。"""
-        prompt = (
-            "你是记忆质量审核员。请对以下用户记忆进行质量评估，识别出不值得长期保留的记忆。\n"
-            "不值得保留的记忆特征:\n"
-            "- 内容模糊、无实质信息(如'用户说了一些话')\\n"
-            "- 一次性事件，不反映用户稳定特征\n"
-            "- 与其他记忆严重重复\n"
-            "- 置信度极低(< 0.3)\n"
-            "- 重要性极低且从未被强化召回\n\n"
-            '只输出 JSON，格式:{"deactivate": [id1, id2, ...]}\n'
-            '如果全部值得保留，返回:{"deactivate": []}\n\n'
-            f"待审核记忆:\n{json.dumps(memories, ensure_ascii=False)}"
-        )
-        try:
-            resp = await self.context.llm_generate(
-                chat_provider_id=provider_id,
-                prompt=prompt,
-            )
-            txt = self._strip_think_tags(
-                self._normalize_text(getattr(resp, "completion_text", "") or "")
-            )
-            obj = self._parse_json_object(txt)
-            if obj and isinstance(obj.get("deactivate"), list):
-                return [int(x) for x in obj["deactivate"] if str(x).isdigit()]
-        except Exception as e:
-            logger.debug("[tmemory] _llm_purify_judge failed: %s", e)
-        return []
+        from .core import maintenance as _m
+        return await _m.llm_purify_judge(self, provider_id, memories)
 
     async def _run_quality_refinement(self) -> tuple[int, int]:
         """兼容旧方法名，等价 _run_memory_purify。"""
         return await self._run_memory_purify()
 
-    def _record_distill_history(
-        self,
-        started_at: str,
-        trigger: str,
-        users_processed: int,
-        memories_created: int,
-        users_failed: int,
-        errors: list,
-        duration: float,
-        tokens_input: int = -1,
-        tokens_output: int = -1,
-        tokens_total: int = -1,
-    ):
-        with self._db() as conn:
-            conn.execute(
-                """
-                INSERT INTO distill_history(
-                    started_at, finished_at, trigger_type, users_processed,
-                    memories_created, users_failed, errors, duration_sec,
-                    tokens_input, tokens_output, tokens_total
-                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    started_at,
-                    self._now(),
-                    trigger,
-                    users_processed,
-                    memories_created,
-                    users_failed,
-                    json.dumps(errors, ensure_ascii=False),
-                    duration,
-                    tokens_input,
-                    tokens_output,
-                    tokens_total,
-                ),
-            )
+    def _record_distill_history(self, **kwargs):
+        from .core import distill_validator as _dv
+        _dv.record_distill_history(self, **kwargs)
 
     def _get_distill_history(self, limit: int = 20) -> List[Dict]:
-        with self._db() as conn:
-            rows = conn.execute(
-                "SELECT * FROM distill_history ORDER BY id DESC LIMIT ?", (limit,)
-            ).fetchall()
-        return [dict(r) for r in rows]
+        from .core import distill_validator as _dv
+        return _dv.get_distill_history(self, limit=limit)
 
     def _get_distill_cost_summary(self, last_n: int = 10) -> Dict:
-        """汇总最近 N 轮蒸馏的 token 消耗。
-
-        Returns dict with keys: runs, has_usage, tokens_input, tokens_output, tokens_total.
-        has_usage=False 时 tokens_* 无意义（provider 均未返回 usage）。
-        """
-        rows = self._get_distill_history(limit=last_n)
-        total_in = 0
-        total_out = 0
-        total_total = 0
-        has_usage = False
-        for r in rows:
-            ti = r.get("tokens_input", -1)
-            to_ = r.get("tokens_output", -1)
-            tt = r.get("tokens_total", -1)
-            if ti >= 0:
-                total_in += ti
-                has_usage = True
-            if to_ >= 0:
-                total_out += to_
-            if tt >= 0:
-                total_total += tt
-        return {
-            "runs": len(rows),
-            "has_usage": has_usage,
-            "tokens_input": total_in,
-            "tokens_output": total_out,
-            "tokens_total": total_total,
-        }
+        from .core import distill_validator as _dv
+        return _dv.get_distill_cost_summary(self, last_n=last_n)
 
     # =========================================================================
     # 蒸馏输出校验器
     # =========================================================================
 
-    # ── 废话/低质量关键词 ──
-    _JUNK_PATTERNS = [
-        re.compile(
-            r"^(你好|您好|嗨|hi|hello|hey|哈哈|嗯|哦|好的|ok|okay|谢谢|再见|拜拜)",
-            re.IGNORECASE,
-        ),
-        re.compile(r"^(用户说|用户问|用户发送|assistant|AI|助手)", re.IGNORECASE),
-        re.compile(r"^.{0,5}$"),  # 太短
-    ]
-    _UNSAFE_PATTERNS = [
-        re.compile(
-            r"(password|passwd|密码|secret|token|api.?key|bearer)", re.IGNORECASE
-        ),
-        re.compile(r"(杀|死|炸|毒|枪|赌博|色情|porn)", re.IGNORECASE),
-        re.compile(
-            r"(ignore.*(previous|above)|忽略.*(之前|以上)|system.?prompt|越狱|jailbreak)",
-            re.IGNORECASE,
-        ),
-    ]
-
     def _validate_distill_output(
         self, items: List[Dict[str, object]]
     ) -> List[Dict[str, object]]:
-        """校验 LLM 蒸馏输出:安全审计 + 废话过滤 + 低置信度剪枝。"""
-        valid = []
-        for item in items:
-            mem = str(item.get("memory", "")).strip()
-
-            # ── 基础校验 ──
-            if not mem or len(mem) < 6:
-                continue
-            if len(mem) > 300:
-                mem = mem[:300]
-                item["memory"] = mem
-
-            # ── 废话检测 ──
-            if self._is_junk_memory(mem):
-                logger.debug("[tmemory] junk memory filtered: %s", mem[:60])
-                continue
-
-            # ── 安全审计 ──
-            if self._is_unsafe_memory(mem):
-                logger.warning("[tmemory] unsafe memory blocked: %s", mem[:60])
-                continue
-
-            # ── 类型修正 ──
-            mtype = str(item.get("memory_type", ""))
-            if mtype not in {"preference", "fact", "task", "restriction", "style"}:
-                item["memory_type"] = self._distill_mgr.infer_memory_type(mem)
-
-            # ── 分数校正 ──
-            for field in ("score", "importance", "confidence"):
-                try:
-                    v = float(item.get(field, 0.5))
-                    item[field] = max(0.0, min(1.0, v))
-                except (TypeError, ValueError):
-                    item[field] = 0.5
-
-            # ── 低置信度剪枝:confidence < 0.4 直接丢弃 ──
-            if float(item.get("confidence", 0)) < 0.4:
-                logger.debug(
-                    "[tmemory] low confidence pruned: %.2f %s",
-                    item["confidence"],
-                    mem[:60],
-                )
-                continue
-
-            # ── 低重要度剪枝:importance < 0.3 直接丢弃 ──
-            if float(item.get("importance", 0)) < 0.3:
-                logger.debug(
-                    "[tmemory] low importance pruned: %.2f %s",
-                    item["importance"],
-                    mem[:60],
-                )
-                continue
-
-            valid.append(item)
-        return valid
+        from .core import distill_validator as _dv
+        return _dv.validate_distill_output(self, items)
 
     def _is_junk_memory(self, text: str) -> bool:
-        """检测废话记忆。"""
-        for pat in self._JUNK_PATTERNS:
-            if pat.search(text):
-                return True
-        # 纯重复字符
-        if len(set(text.replace(" ", ""))) <= 3:
-            return True
-        # 没有实质内容的短记忆
-        meaningful_chars = len(re.sub(r"[^\w一-鿿]", "", text))
-        if meaningful_chars < 5:
-            return True
-        return False
+        from .core import distill_validator as _dv
+        return _dv.is_junk_memory(text)
 
     def _is_unsafe_memory(self, text: str) -> bool:
-        """安全审计:检测不安全/有害/注入内容。"""
-        for pat in self._UNSAFE_PATTERNS:
-            if pat.search(text):
-                return True
-        return False
+        from .core import distill_validator as _dv
+        return _dv.is_unsafe_memory(text)
 
     # =========================================================================
     # 记忆生命周期衰减
     # =========================================================================
 
     def _decay_stale_memories(self):
-        """将长期未命中的记忆标记为 stale(is_active=2)，超久的归档(is_active=3)。"""
-        now_ts = int(time.time())
-        stale_threshold = 30 * 86400  # 30 天未命中 → stale
-        archive_threshold = 90 * 86400  # 90 天未命中 → archived
-
-        with self._db() as conn:
-            rows = conn.execute(
-                "SELECT id, last_seen_at FROM memories WHERE is_active = 1 AND is_pinned = 0"
-            ).fetchall()
-            for row in rows:
-                try:
-                    last_ts = int(
-                        time.mktime(
-                            time.strptime(str(row["last_seen_at"]), "%Y-%m-%d %H:%M:%S")
-                        )
-                    )
-                except Exception:
-                    continue
-                age = now_ts - last_ts
-                if age > archive_threshold:
-                    conn.execute(
-                        "UPDATE memories SET is_active = 3 WHERE id = ?",
-                        (int(row["id"]),),
-                    )
-                elif age > stale_threshold:
-                    conn.execute(
-                        "UPDATE memories SET is_active = 2 WHERE id = ?",
-                        (int(row["id"]),),
-                    )
-
-        # 自动剪枝:删除低质量记忆
-        self._auto_prune_low_quality()
+        from .core import maintenance as _m
+        _m.decay_stale_memories(self)
 
     def _auto_prune_low_quality(self):
-        """自动剪枝低质量记忆:低分 + 低强化次数 + 超过 7 天的记忆直接失效。"""
-        now_ts = int(time.time())
-        prune_age = 7 * 86400  # 至少存在 7 天才会被剪枝(给新记忆缓冲期)
-
-        with self._db() as conn:
-            rows = conn.execute(
-                """
-                SELECT id, score, importance, confidence, reinforce_count, created_at
-                FROM memories WHERE is_active = 1 AND is_pinned = 0
-                """
-            ).fetchall()
-
-            pruned = 0
-            for row in rows:
-                try:
-                    created_ts = int(
-                        time.mktime(
-                            time.strptime(str(row["created_at"]), "%Y-%m-%d %H:%M:%S")
-                        )
-                    )
-                except Exception:
-                    continue
-                age = now_ts - created_ts
-                if age < prune_age:
-                    continue
-
-                score = float(row["score"])
-                importance = float(row["importance"])
-                confidence = float(row["confidence"])
-                reinforce = int(row["reinforce_count"])
-
-                # 综合质量分低于阈值且从未被强化召回的记忆
-                quality = 0.3 * score + 0.4 * importance + 0.3 * confidence
-                if quality < 0.35 and reinforce <= 1:
-                    conn.execute(
-                        "UPDATE memories SET is_active = 0 WHERE id = ?",
-                        (int(row["id"]),),
-                    )
-                    pruned += 1
-
-            if pruned > 0:
-                logger.info("[tmemory] auto-pruned %d low-quality memories", pruned)
+        from .core import maintenance as _m
+        _m.auto_prune_low_quality(self)
 
     # =========================================================================
     # 数据导出与清除
     # =========================================================================
 
     def _export_user_data(self, canonical_id: str) -> Dict:
-        memories = self._list_memories(canonical_id, limit=500)
-        with self._db() as conn:
-            bindings = [
-                dict(r)
-                for r in conn.execute(
-                    "SELECT adapter, adapter_user_id FROM identity_bindings WHERE canonical_user_id = ?",
-                    (canonical_id,),
-                ).fetchall()
-            ]
-        return {
-            "canonical_user_id": canonical_id,
-            "memories": memories,
-            "bindings": bindings,
-            "exported_at": self._now(),
-        }
+        from .core import maintenance as _m
+        return _m.export_user_data(self, canonical_id)
 
     def _purge_user_data(self, canonical_id: str) -> Dict[str, int]:
-        with self._db() as conn:
-            self._delete_vectors_for_user(canonical_id, conn=conn)
-            m = conn.execute(
-                "DELETE FROM memories WHERE canonical_user_id = ?", (canonical_id,)
-            ).rowcount
-            c = conn.execute(
-                "DELETE FROM conversation_cache WHERE canonical_user_id = ?", (canonical_id,)
-            ).rowcount
-            conn.execute(
-                "DELETE FROM memory_events WHERE canonical_user_id = ?", (canonical_id,)
-            )
-        self._memory_logger.log_memory_event(
-            canonical_user_id=canonical_id,
-            event_type="purge",
-            payload={"memories_deleted": m, "cache_deleted": c},
-        )
-        return {"memories": m, "cache": c}
+        from .core import maintenance as _m
+        return _m.purge_user_data(self, canonical_id)
 
     # =========================================================================
     # 敏感信息脱敏
@@ -2939,36 +1771,5 @@ class TMemoryPlugin(Star):
 
     def _get_global_stats(self) -> Dict[str, int]:
         """获取全局统计信息。"""
-        with self._db() as conn:
-            total_users = conn.execute(
-                "SELECT COUNT(DISTINCT canonical_user_id) FROM memories"
-            ).fetchone()[0]
-            active_memories = conn.execute(
-                "SELECT COUNT(*) FROM memories WHERE is_active = 1"
-            ).fetchone()[0]
-            deactivated_memories = conn.execute(
-                "SELECT COUNT(*) FROM memories WHERE is_active = 0"
-            ).fetchone()[0]
-            pending_cached = conn.execute(
-                "SELECT COUNT(*) FROM conversation_cache WHERE distilled = 0"
-            ).fetchone()[0]
-            total_events = conn.execute(
-                "SELECT COUNT(*) FROM memory_events"
-            ).fetchone()[0]
-            vector_index_rows = 0
-            if self._vec_available:
-                try:
-                    vector_index_rows = conn.execute(
-                        "SELECT COUNT(*) FROM memory_vectors"
-                    ).fetchone()[0]
-                except Exception:
-                    pass
-
-        return {
-            "total_users": int(total_users),
-            "total_active_memories": int(active_memories),
-            "total_deactivated_memories": int(deactivated_memories),
-            "pending_cached_rows": int(pending_cached),
-            "total_events": int(total_events),
-            "vector_index_rows": int(vector_index_rows),
-        }
+        from .core import maintenance as _m
+        return _m.get_global_stats(self)

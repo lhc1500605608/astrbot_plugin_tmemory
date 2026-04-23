@@ -1,4 +1,5 @@
 import re
+import asyncio
 import logging
 from typing import List, Optional, Dict
 from dataclasses import dataclass, field
@@ -179,3 +180,78 @@ def parse_config(raw_config: dict) -> PluginConfig:
     c.inject_max_chars = _safe_int(raw_config.get("inject_max_chars", 0), 0, label="inject_max_chars")
     
     return c
+
+
+def apply_safe_defaults(plugin) -> None:
+    """为 plugin 实例应用所有配置与运行时属性的安全默认值。
+    
+    抽取自 main.TmemoryPlugin._set_safe_defaults，供主类在 __init__ 中调用。
+    保持原先语义，不改变任何字段默认值。
+    """
+    c = plugin._cfg
+    c.cache_max_rows = 20
+    c.memory_max_chars = 220
+    c.enable_auto_capture = True
+    c.capture_assistant_reply = True
+    c.no_memory_marker = "\x00[astrbot:no-memory]\x00"
+    c.capture_skip_prefixes = ["提醒 #"]
+    c.capture_skip_regex = None
+    c.distill_interval_sec = 17280
+    c.distill_min_batch_count = 20
+    c.distill_batch_limit = 80
+    c.distill_model_id = ""
+    c.distill_provider_id = ""
+    c.enable_memory_injection = True
+    c.manual_purify_default_mode = "both"
+    c.manual_purify_default_limit = 20
+    plugin.manual_refine_default_mode = "both"
+    plugin.manual_refine_default_limit = 20
+    c.distill_pause = False
+    c.purify_interval_days = 0
+    c.purify_model_id = ""
+    c.purify_min_score = 0.0
+    # ── 向量检索管理器 ──────────────────────────────────────────
+    plugin._vector_manager = None
+    c.embed_provider_id = ""
+    c.embed_model_id = ""
+    plugin.embed_model = ""
+    c.embed_dim = 1536
+    plugin.vector_weight = 0.4
+    plugin.min_vector_sim = 0.15
+    plugin._sqlite_vec = None
+    plugin._vec_available = False
+    c.embed_base_url = ""
+    c.embed_api_key = ""
+    c.enable_reranker = False
+    c.rerank_provider_id = ""
+    c.rerank_model_id = ""
+    plugin.rerank_model = ""
+    c.rerank_top_n = 5
+    c.rerank_base_url = ""
+    c.memory_scope = "user"
+    c.private_memory_in_group = False
+    c.inject_position = "system_prompt"
+    c.inject_slot_marker = "{{tmemory}}"
+    c.inject_memory_limit = 5
+    c.inject_max_chars = 0
+    plugin._sanitize_patterns = []
+    plugin._distill_task = None
+    plugin._worker_running = False
+    plugin._merge_needs_vector_rebuild = False
+    plugin._fts5_needs_rebuild = False
+    plugin._last_purify_ts = 0.0
+    plugin._embed_ok_count = 0
+    plugin._embed_fail_count = 0
+    plugin._embed_last_error = ""
+    plugin._vec_query_count = 0
+    plugin._vec_hit_count = 0
+    plugin._embed_semaphore = asyncio.Semaphore(4)
+    plugin._http_session = None
+    # ── 触发门控与批处理效率 ──────────────────────────────────────────────
+    c.capture_min_content_len = 5
+    c.capture_dedup_window = 10
+    c.distill_user_throttle_sec = 0
+    # 运行时统计：每次蒸馏周期中因门控被跳过的行数
+    plugin._distill_skipped_rows = 0
+    # 内存缓存：per-user 最近蒸馏完成时间戳（用于节流）
+    plugin._user_last_distilled_ts = {}
