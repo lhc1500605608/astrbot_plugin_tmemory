@@ -116,3 +116,50 @@ def test_plugin_is_discoverable_from_real_astrbot_plugin_directory(tmp_path):
     )
 
     assert result.returncode == 0, result.stderr or result.stdout
+
+
+def test_web_server_admin_import_works_from_real_astrbot_plugin_package(tmp_path):
+    astrbot_root = tmp_path / "astrbot-root"
+    script = textwrap.dedent(
+        f"""
+        import importlib
+        import os
+        import pathlib
+        import shutil
+        import sys
+
+        from astrbot.core.utils.astrbot_path import get_astrbot_plugin_path
+
+        repo_root = pathlib.Path(r"/Users/tango/Documents/paperclip/astrbot_plugin_tmemory")
+        astrbot_root = pathlib.Path(r"{astrbot_root}")
+        os.environ["ASTRBOT_ROOT"] = str(astrbot_root)
+
+        plugin_root = pathlib.Path(get_astrbot_plugin_path())
+        plugin_root.mkdir(parents=True, exist_ok=True)
+        installed_plugin = plugin_root / "astrbot_plugin_tmemory"
+        shutil.copytree(repo_root, installed_plugin, dirs_exist_ok=True)
+
+        sys.path.insert(0, str(astrbot_root))
+
+        main = importlib.import_module("data.plugins.astrbot_plugin_tmemory.main")
+        plugin = main.TMemoryPlugin(context=None, config={{"webui_enabled": False}})
+        web_server_cls = plugin._load_web_server_class()
+        web_server = web_server_cls(plugin, {{"webui_password": "secret"}})
+        admin = web_server._get_admin()
+
+        assert admin.__class__.__name__ == "AdminService"
+        """
+    )
+
+    env = os.environ.copy()
+    env.setdefault("PYTHONUTF8", "1")
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd="/Users/tango/Documents/paperclip/astrbot_plugin_tmemory",
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr or result.stdout

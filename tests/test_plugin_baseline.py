@@ -1,5 +1,6 @@
 import asyncio
 import sqlite3
+import sys
 import time
 
 import pytest
@@ -350,6 +351,52 @@ def test_safe_load_web_server_merges_nested_webui_settings(plugin_module, tmp_pa
     assert captured["config"]["webui_enabled"] is True
     assert captured["config"]["webui_password"] == "nested-secret"
     assert captured["config"]["webui_port"] == 9001
+
+
+def test_load_web_server_class_preserves_package_context_for_admin_import(
+    plugin_module, tmp_path, monkeypatch
+):
+    monkeypatch.chdir(tmp_path)
+
+    plugin = plugin_module.TMemoryPlugin(
+        context=None,
+        config={
+            "webui_enabled": True,
+            "webui_password": "secret",
+        },
+    )
+
+    web_server_cls = plugin._load_web_server_class()
+    web_server = web_server_cls(plugin, {"webui_password": "secret"})
+
+    admin = web_server._get_admin()
+
+    assert web_server_cls.__module__ == "astrbot_plugin_tmemory.web_server"
+    assert admin.__class__.__name__ == "AdminService"
+
+
+def test_load_web_server_class_recovers_package_without_sys_path_parent(
+    plugin_module, tmp_path, monkeypatch
+):
+    monkeypatch.chdir(tmp_path)
+
+    plugin = plugin_module.TMemoryPlugin(
+        context=None,
+        config={
+            "webui_enabled": True,
+            "webui_password": "secret",
+        },
+    )
+
+    sys.modules.pop("astrbot_plugin_tmemory.web_server", None)
+    sys.modules.pop("astrbot_plugin_tmemory", None)
+
+    web_server_cls = plugin._load_web_server_class()
+    web_server = web_server_cls(plugin, {"webui_password": "secret"})
+
+    admin = web_server._get_admin()
+
+    assert admin.__class__.__name__ == "AdminService"
 
 
 # =============================================================================

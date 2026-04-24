@@ -160,13 +160,15 @@ class TMemoryPlugin(Star):
         if not os.path.exists(web_server_path):
             raise ImportError(f"web_server.py not found: {web_server_path}")
 
-        spec = importlib.util.spec_from_file_location(
-            "tmemory_web_server", web_server_path
-        )
+        module_prefix = __name__.rsplit(".", 1)[0] if "." in __name__ else self.plugin_name
+        module_name = f"{module_prefix}.web_server"
+        spec = importlib.util.spec_from_file_location(module_name, web_server_path)
         if spec is None or spec.loader is None:
             raise ImportError("failed to create module spec for web_server.py")
 
         module = importlib.util.module_from_spec(spec)
+        sys_modules = __import__("sys").modules
+        sys_modules[module_name] = module
         spec.loader.exec_module(module)
 
         cls = getattr(module, "TMemoryWebServer", None)
