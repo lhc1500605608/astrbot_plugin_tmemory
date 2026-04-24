@@ -205,11 +205,12 @@ class TMemoryPlugin(Star):
             self._web_server = _NullWebServer()
 
         logger.info(
-            "[tmemory] initialized, db=%s, auto_capture=%s, memory_injection=%s, distill_interval=%ss",
+            "[tmemory] initialized, db=%s, auto_capture=%s, memory_injection=%s, distill_interval=%ss, memory_mode=%s",
             self.db_path,
             self._cfg.enable_auto_capture,
             self._cfg.enable_memory_injection,
             self._cfg.distill_interval_sec,
+            self._cfg.memory_mode,
         )
 
     async def terminate(self):
@@ -365,6 +366,103 @@ class TMemoryPlugin(Star):
                 )
         except Exception as e:
             logger.warning("[tmemory] on_llm_request inject failed: %s", e)
+
+    # =========================================================================
+    # AI 主动工具模式: remember / recall
+    # =========================================================================
+
+    @filter.llm_tool(name="remember")
+    async def tool_remember(
+        self, event: AstrMessageEvent, content: str, memory_type: str
+    ):
+        """记住用户的重要信息。当对话中出现值得长期记住的用户偏好、事实、任务、限制或风格时，主动调用此工具保存。
+
+        Args:
+            content(string): 要记住的内容，用简洁的陈述句描述
+            memory_type(string): 记忆类型，可选值：preference（偏好）、fact（事实）、task（任务）、restriction（限制）、style（风格）
+        """
+        if self._cfg.memory_mode == "distill_only":
+            return "记忆工具当前已禁用（模式为 distill_only）。"
+
+        content = self._normalize_text(content or "")
+        if not content or len(content) < 4:
+            return "内容过短，未保存。"
+
+        memory_type = self._safe_memory_type(memory_type)
+
+        # 安全审计
+        if self._is_unsafe_memory(content):
+            return "内容未通过安全审计，未保存。"
+        if self._is_junk_memory(content):
+            return "内容信息量过低，未保存。"
+
+        canonical_id, adapter, adapter_user = self._identity_mgr.resolve_current_identity(event)
+        scope = self._get_memory_scope(event)
+        persona_id = self._get_current_persona(event)
+
+        new_id = self._insert_memory(
+            canonical_id=canonical_id,
+            adapter=adapter,
+            adapter_user=adapter_user,
+            memory=self._sanitize_text(content),
+            score=0.80,
+            memory_type=memory_type,
+            importance=0.70,
+            confidence=0.85,
+            source_channel="active_tool",
+            persona_id=persona_id,
+            scope=scope,
+        )
+
+        if self._vec_available and new_id:
+            try:
+                await self._upsert_vector(new_id, content)
+            except Exception:
+                pass  # 向量写入失败不影响核心流程
+
+        return f"已记住（id={new_id}, type={memory_type}）。"
+
+    @filter.llm_tool(name="recall")
+    async def tool_recall(self, event: AstrMessageEvent, query: str):
+        """检索与查询相关的用户记忆。当需要回忆用户的偏好、历史信息或之前提到的内容时调用。
+
+        Args:
+            query(string): 查询文本，描述想要回忆的内容
+        """
+        if self._cfg.memory_mode == "distill_only":
+            return "记忆工具当前已禁用（模式为 distill_only）。"
+
+        query = self._normalize_text(query or "")
+        if not query:
+            return "查询内容为空。"
+
+        canonical_id, _, _ = self._identity_mgr.resolve_current_identity(event)
+        scope = self._get_memory_scope(event)
+        persona_id = self._get_current_persona(event)
+        is_group = self._is_group_event(event)
+
+        try:
+            rows = await self._retrieve_memories(
+                canonical_id,
+                query,
+                limit=self._cfg.inject_memory_limit,
+                scope=scope,
+                persona_id=persona_id,
+                exclude_private=(is_group and not self._cfg.private_memory_in_group),
+            )
+        except Exception as e:
+            logger.warning("[tmemory] recall tool retrieval failed: %s", e)
+            return "检索记忆时出现错误。"
+
+        if not rows:
+            return "未找到相关记忆。"
+
+        lines = []
+        for row in rows:
+            mtype = row["memory_type"]
+            mem = row["memory"]
+            lines.append(f"- ({mtype}) {mem}")
+        return "\n".join(lines)
 
     # =========================================================================
     # 管理指令
@@ -806,7 +904,7 @@ class TMemoryPlugin(Star):
         """后台定时蒸馏循环。"""
         await asyncio.sleep(8)
         while self._worker_running:
-            if not self._cfg.distill_pause:
+            if not self._cfg.distill_pause and self._cfg.memory_mode != "active_only":
                 try:
                     users, memories = await self._run_distill_cycle(
                         force=False, trigger="auto"
@@ -966,8 +1064,11 @@ class TMemoryPlugin(Star):
 
         memory_lines = []
         for row in rows:
+            display_score = float(
+                row.get("final_score", row.get("_retrieval_score", row.get("score", 0.0)))
+            )
             memory_lines.append(
-                f"- ({row['memory_type']}, score={row['final_score']:.3f}) {row['memory']}"
+                f"- ({row['memory_type']}, score={display_score:.3f}) {row['memory']}"
             )
 
         if not memory_lines:

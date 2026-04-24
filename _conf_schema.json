@@ -208,6 +208,13 @@
     "hint": "user=所有会话共用记忆（默认）；session=按会话隔离（群聊每个群独立）。",
     "default": "user"
   },
+  "memory_mode": {
+    "type": "string",
+    "description": "记忆模式",
+    "hint": "hybrid（默认）=蒸馏+主动工具并存；distill_only=仅定时蒸馏（原有模式）；active_only=仅 AI 主动工具（不自动蒸馏）。",
+    "default": "hybrid",
+    "options": ["hybrid", "distill_only", "active_only"]
+  },
   "inject_position": {
     "type": "string",
     "description": "记忆注入位置",

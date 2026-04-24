@@ -56,6 +56,9 @@ class PluginConfig:
     rerank_top_n: int = 5
     rerank_base_url: str = ""
     
+    # Active Tool Mode
+    memory_mode: str = "hybrid"  # distill_only | active_only | hybrid
+
     # Injection & Scope
     enable_memory_injection: bool = True
     memory_scope: str = "user"
@@ -165,6 +168,11 @@ def parse_config(raw_config: dict) -> PluginConfig:
     c.rerank_top_n = max(1, _safe_int(raw_config.get("rerank_top_n", 5), 5, label="rerank_top_n"))
     c.rerank_base_url = str(raw_config.get("rerank_base_url", "")).strip()
 
+    # ── 主动工具模式 ──
+    c.memory_mode = str(raw_config.get("memory_mode", "hybrid")).strip().lower()
+    if c.memory_mode not in {"distill_only", "active_only", "hybrid"}:
+        c.memory_mode = "hybrid"
+
     # ── 注入与隔离 ──
     c.enable_memory_injection = _safe_bool(raw_config.get("enable_memory_injection", True), True, label="enable_memory_injection")
     c.memory_scope = str(raw_config.get("memory_scope", "user")).strip().lower()
@@ -229,6 +237,7 @@ def apply_safe_defaults(plugin) -> None:
     c.rerank_top_n = 5
     c.rerank_base_url = ""
     c.memory_scope = "user"
+    c.memory_mode = "hybrid"
     c.private_memory_in_group = False
     c.inject_position = "system_prompt"
     c.inject_slot_marker = "{{tmemory}}"
