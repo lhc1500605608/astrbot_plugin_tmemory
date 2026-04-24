@@ -152,6 +152,11 @@ class TMemoryWebServer:
     def _setup_routes(self):
         app = self._app
         assert app is not None
+        # 静态资源路由（CSS / JS / icons / vendor）
+        static_dir = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "templates", "static"
+        )
+        app.router.add_static("/static", static_dir, name="static")
         app.router.add_get("/", self._handle_page)
         app.router.add_post("/api/login", self._handle_login)
         app.router.add_get("/api/users", self._handle_get_users)
@@ -188,8 +193,8 @@ class TMemoryWebServer:
 
         path = request.path
 
-        # 登录接口和首页不需要 token
-        if path in ("/", "/api/login"):
+        # 登录接口、首页和静态资源不需要 token
+        if path in ("/", "/api/login") or path.startswith("/static/"):
             try:
                 return await handler(request)
             except Exception as exc:
