@@ -116,7 +116,7 @@ class TMemoryWebServer:
     def _get_admin(self):
         """延迟构造 AdminService，确保插件 DB 已就绪。"""
         if self._admin is None:
-            from core.admin_service import AdminService
+            from .core.admin_service import AdminService
             self._admin = AdminService(self.plugin)
         return self._admin
 
