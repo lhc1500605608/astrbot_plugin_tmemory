@@ -110,6 +110,16 @@ class TMemoryWebServer:
         self._app: Optional[web.Application] = None
         self._runner: Optional[web.AppRunner] = None
 
+        # AdminService — 延迟初始化（插件可能还未完成 DB 初始化）
+        self._admin = None
+
+    def _get_admin(self):
+        """延迟构造 AdminService，确保插件 DB 已就绪。"""
+        if self._admin is None:
+            from core.admin_service import AdminService
+            self._admin = AdminService(self.plugin)
+        return self._admin
+
     # ── 生命周期 ──────────────────────────────────────────────────────────
 
     async def start(self):
@@ -256,95 +266,46 @@ class TMemoryWebServer:
 
         return web.json_response({"error": "用户名或密码错误"}, status=401)
 
+    # ── Batch 1.1: 只读查询 ──────────────────────────────────────────────
+
     async def _handle_get_users(self, request: web.Request):
-        """返回所有用户：合并 memories 和 conversation_cache 两张表。"""
-        with self.plugin._db() as conn:
-            # 已蒸馏记忆的用户
-            mem_rows = conn.execute(
-                "SELECT canonical_user_id, COUNT(*) as cnt "
-                "FROM memories WHERE is_active = 1 "
-                "GROUP BY canonical_user_id"
-            ).fetchall()
-            # 待蒸馏缓存的用户
-            cache_rows = conn.execute(
-                "SELECT canonical_user_id, COUNT(*) as cnt "
-                "FROM conversation_cache WHERE distilled = 0 "
-                "GROUP BY canonical_user_id"
-            ).fetchall()
-
-        merged: dict = {}
-        for r in mem_rows:
-            uid = str(r["canonical_user_id"])
-            merged[uid] = {"id": uid, "memory_count": int(r["cnt"]), "pending_count": 0}
-        for r in cache_rows:
-            uid = str(r["canonical_user_id"])
-            if uid in merged:
-                merged[uid]["pending_count"] = int(r["cnt"])
-            else:
-                merged[uid] = {"id": uid, "memory_count": 0, "pending_count": int(r["cnt"])}
-
-        users = sorted(merged.values(), key=lambda u: u["memory_count"] + u["pending_count"], reverse=True)
+        admin = self._get_admin()
+        users = admin.get_users()
         return web.json_response({"users": users})
 
     async def _handle_get_stats(self, request: web.Request):
-        stats = self.plugin._get_global_stats()
-        stats["pending_users"] = self.plugin._count_pending_users()
+        admin = self._get_admin()
+        stats = admin.get_global_stats()
         return web.json_response(stats)
 
     async def _handle_get_memories(self, request: web.Request):
+        admin = self._get_admin()
         user = request.query.get("user", "")
-        if not user:
-            return web.json_response({"memories": []})
-        with self.plugin._db() as conn:
-            rows = conn.execute(
-                """
-                SELECT id, memory_type, memory, score, importance, confidence,
-                       reinforce_count, is_active,
-                       COALESCE(is_pinned, 0) AS is_pinned,
-                       last_seen_at, created_at, updated_at
-                FROM memories WHERE canonical_user_id = ? AND is_active = 1
-                ORDER BY importance DESC, score DESC, updated_at DESC LIMIT 200
-                """,
-                (user,),
-            ).fetchall()
-        memories = [
-            {
-                "id": int(r["id"]),
-                "memory_type": str(r["memory_type"]),
-                "memory": str(r["memory"]),
-                "score": float(r["score"]),
-                "importance": float(r["importance"]),
-                "confidence": float(r["confidence"]),
-                "reinforce_count": int(r["reinforce_count"]),
-                "is_active": int(r["is_active"]),
-                "is_pinned": int(r["is_pinned"]),
-                "last_seen_at": str(r["last_seen_at"]),
-                "created_at": str(r["created_at"]),
-                "updated_at": str(r["updated_at"]),
-            }
-            for r in rows
-        ]
+        memories = admin.get_memories(user)
         return web.json_response({"memories": memories})
 
     async def _handle_get_events(self, request: web.Request):
+        admin = self._get_admin()
         user = request.query.get("user", "")
-        if not user:
-            return web.json_response({"events": []})
-        with self.plugin._db() as conn:
-            rows = conn.execute(
-                "SELECT id, event_type, payload_json, created_at FROM memory_events WHERE canonical_user_id = ? ORDER BY id DESC LIMIT 100",
-                (user,),
-            ).fetchall()
-        events = [
-            {
-                "id": int(r["id"]),
-                "event_type": str(r["event_type"]),
-                "payload_json": str(r["payload_json"]),
-                "created_at": str(r["created_at"]),
-            }
-            for r in rows
-        ]
+        events = admin.get_events(user)
         return web.json_response({"events": events})
+
+    async def _handle_get_pending(self, request: web.Request):
+        admin = self._get_admin()
+        pending = admin.get_pending()
+        return web.json_response({"pending": pending})
+
+    async def _handle_get_identities(self, request: web.Request):
+        admin = self._get_admin()
+        bindings = admin.get_identities()
+        return web.json_response({"bindings": bindings})
+
+    async def _handle_distill_history(self, request: web.Request):
+        admin = self._get_admin()
+        history = admin.get_distill_history(limit=30)
+        return web.json_response({"history": history})
+
+    # ── Batch 1.2: 低风险写操作 ──────────────────────────────────────────
 
     async def _handle_add_memory(self, request: web.Request):
         data = await request.json()
@@ -354,16 +315,14 @@ class TMemoryWebServer:
             return web.json_response(
                 {"error": "user and memory are required"}, status=400
             )
-        mem_id = self.plugin._insert_memory(
-            canonical_id=user,
-            adapter="webui",
-            adapter_user=user,
+        admin = self._get_admin()
+        mem_id = admin.add_memory(
+            user=user,
             memory=memory,
             score=float(data.get("score", 0.7)),
             memory_type=str(data.get("memory_type", "fact")),
             importance=float(data.get("importance", 0.6)),
             confidence=float(data.get("confidence", 0.7)),
-            source_channel="webui",
         )
         return web.json_response({"ok": True, "memory_id": mem_id})
 
@@ -372,47 +331,11 @@ class TMemoryWebServer:
         mem_id = int(data.get("id", 0))
         if not mem_id:
             return web.json_response({"error": "id is required"}, status=400)
-
-        now = self.plugin._now()
-        fields: list[str] = []
-        params: list = []
-
-        for col, key, conv in [
-            ("memory", "memory", str),
-            ("memory_type", "memory_type", lambda v: self.plugin._safe_memory_type(v)),
-            ("score", "score", lambda v: self.plugin._clamp01(v)),
-            ("importance", "importance", lambda v: self.plugin._clamp01(v)),
-            ("confidence", "confidence", lambda v: self.plugin._clamp01(v)),
-            ("is_pinned", "is_pinned", lambda v: 1 if v else 0),
-        ]:
-            if key in data:
-                fields.append(f"{col} = ?")
-                params.append(conv(data[key]))
-
-        if not fields:
-            return web.json_response({"error": "no fields to update"}, status=400)
-
-        if "memory" in data:
-            new_hash = hashlib.sha256(
-                self.plugin._normalize_text(str(data["memory"])).encode()
-            ).hexdigest()
-            fields.append("memory_hash = ?")
-            params.append(new_hash)
-
-        fields.append("updated_at = ?")
-        params.append(now)
-        params.append(mem_id)
-
-        with self.plugin._db() as conn:
-            conn.execute(
-                f"UPDATE memories SET {', '.join(fields)} WHERE id = ?", params
-            )
-
-        self.plugin._log_memory_event(
-            canonical_user_id=str(data.get("user", "")),
-            event_type="webui_update",
-            payload={"memory_id": mem_id, "updated_fields": list(data.keys())},
-        )
+        admin = self._get_admin()
+        try:
+            admin.update_memory(mem_id, data)
+        except ValueError as e:
+            return web.json_response({"error": str(e)}, status=400)
         return web.json_response({"ok": True})
 
     async def _handle_delete_memory(self, request: web.Request):
@@ -420,61 +343,35 @@ class TMemoryWebServer:
         mem_id = int(data.get("id", 0))
         if not mem_id:
             return web.json_response({"error": "id is required"}, status=400)
-        deleted = self.plugin._delete_memory(mem_id)
+        admin = self._get_admin()
+        deleted = admin.delete_memory(mem_id)
         return web.json_response({"ok": deleted})
 
+    async def _handle_pin_memory(self, request: web.Request):
+        data = await request.json()
+        mem_id = int(data.get("id", 0))
+        pinned = bool(data.get("pinned", True))
+        if not mem_id:
+            return web.json_response({"error": "id is required"}, status=400)
+        admin = self._get_admin()
+        ok = admin.set_pinned(mem_id, pinned)
+        return web.json_response({"ok": ok, "pinned": pinned})
+
+    # ── Batch 1.3: 高风险写操作 ──────────────────────────────────────────
+
     async def _handle_trigger_distill(self, request: web.Request):
-        processed_users, total_memories = await self.plugin._run_distill_cycle(force=True, trigger="manual_web")
-        return web.json_response(
-            {
-                "ok": True,
-                "processed_users": processed_users,
-                "total_memories": total_memories,
-            }
-        )
+        admin = self._get_admin()
+        result = await admin.trigger_distill()
+        return web.json_response({"ok": True, **result})
 
-    async def _handle_get_pending(self, request: web.Request):
-        """返回待蒸馏队列详情。"""
-        with self.plugin._db() as conn:
-            rows = conn.execute(
-                "SELECT canonical_user_id, COUNT(*) as cnt, "
-                "MIN(created_at) as oldest, MAX(created_at) as newest "
-                "FROM conversation_cache WHERE distilled = 0 "
-                "GROUP BY canonical_user_id ORDER BY cnt DESC LIMIT 100"
-            ).fetchall()
-        pending = [
-            {
-                "user": str(r["canonical_user_id"]),
-                "count": int(r["cnt"]),
-                "oldest": str(r["oldest"]),
-                "newest": str(r["newest"]),
-            }
-            for r in rows
-        ]
-        return web.json_response({"pending": pending})
-
-
-    async def _handle_get_identities(self, request: web.Request):
-        """返回所有身份绑定关系。"""
-        with self.plugin._db() as conn:
-            rows = conn.execute(
-                "SELECT id, adapter, adapter_user_id, canonical_user_id, updated_at "
-                "FROM identity_bindings ORDER BY canonical_user_id, adapter"
-            ).fetchall()
-        bindings = [
-            {
-                "id": int(r["id"]),
-                "adapter": str(r["adapter"]),
-                "adapter_user_id": str(r["adapter_user_id"]),
-                "canonical_user_id": str(r["canonical_user_id"]),
-                "updated_at": str(r["updated_at"]),
-            }
-            for r in rows
-        ]
-        return web.json_response({"bindings": bindings})
+    async def _handle_distill_pause(self, request: web.Request):
+        data = await request.json()
+        pause = bool(data.get("pause", True))
+        admin = self._get_admin()
+        admin.set_distill_pause(pause)
+        return web.json_response({"ok": True, "distill_pause": pause})
 
     async def _handle_merge_users(self, request: web.Request):
-        """合并两个用户：将 from_user 的所有记忆和绑定迁移到 to_user。"""
         data = await request.json()
         from_id = str(data.get("from_user", "")).strip()
         to_id = str(data.get("to_user", "")).strip()
@@ -482,108 +379,55 @@ class TMemoryWebServer:
             return web.json_response({"error": "from_user and to_user are required"}, status=400)
         if from_id == to_id:
             return web.json_response({"error": "两个用户 ID 相同，无需合并"}, status=400)
-
-        moved = self.plugin._merge_identity(from_id, to_id)
+        admin = self._get_admin()
+        moved = admin.merge_users(from_id, to_id)
         return web.json_response({"ok": True, "moved": moved, "from_user": from_id, "to_user": to_id})
 
     async def _handle_rebind_user(self, request: web.Request):
-        """将一个适配器账号改绑到新的统一用户 ID。"""
         data = await request.json()
         binding_id = int(data.get("binding_id", 0))
         new_canonical = str(data.get("new_canonical_user_id", "")).strip()
         if not binding_id or not new_canonical:
             return web.json_response({"error": "binding_id and new_canonical_user_id are required"}, status=400)
-
-        now = self.plugin._now()
-        with self.plugin._db() as conn:
-            row = conn.execute("SELECT adapter, adapter_user_id, canonical_user_id FROM identity_bindings WHERE id = ?", (binding_id,)).fetchone()
-            if not row:
-                return web.json_response({"error": "binding not found"}, status=404)
-            old_canonical = str(row["canonical_user_id"])
-            conn.execute(
-                "UPDATE identity_bindings SET canonical_user_id = ?, updated_at = ? WHERE id = ?",
-                (new_canonical, now, binding_id),
-            )
-
-        self.plugin._log_memory_event(
-            canonical_user_id=new_canonical,
-            event_type="rebind",
-            payload={
-                "binding_id": binding_id,
-                "adapter": str(row["adapter"]),
-                "adapter_user_id": str(row["adapter_user_id"]),
-                "old_canonical": old_canonical,
-                "new_canonical": new_canonical,
-            },
-        )
+        admin = self._get_admin()
+        try:
+            admin.rebind_user(binding_id, new_canonical)
+        except LookupError:
+            return web.json_response({"error": "binding not found"}, status=404)
         return web.json_response({"ok": True})
 
-
-    async def _handle_distill_history(self, request: web.Request):
-        """返回蒸馏历史记录。"""
-        history = self.plugin._get_distill_history(limit=30)
-        return web.json_response({"history": history})
-
-    async def _handle_distill_pause(self, request: web.Request):
-        """暂停或恢复自动蒸馏。"""
-        data = await request.json()
-        pause = bool(data.get("pause", True))
-        self.plugin.distill_pause = pause
-        return web.json_response({"ok": True, "distill_pause": pause})
-
     async def _handle_export_user(self, request: web.Request):
-        """导出用户数据。"""
         data = await request.json()
         user = str(data.get("user", "")).strip()
         if not user:
             return web.json_response({"error": "user is required"}, status=400)
-        export = self.plugin._export_user_data(user)
+        admin = self._get_admin()
+        export = admin.export_user(user)
         return web.json_response(export)
 
     async def _handle_purge_user(self, request: web.Request):
-        """清除用户全部数据。"""
         data = await request.json()
         user = str(data.get("user", "")).strip()
         if not user:
             return web.json_response({"error": "user is required"}, status=400)
-        result = self.plugin._purge_user_data(user)
+        admin = self._get_admin()
+        result = admin.purge_user(user)
         return web.json_response({"ok": True, **result})
-
-    async def _handle_pin_memory(self, request: web.Request):
-        """设置/取消记忆常驻。"""
-        data = await request.json()
-        mem_id = int(data.get("id", 0))
-        pinned = bool(data.get("pinned", True))
-        if not mem_id:
-            return web.json_response({"error": "id is required"}, status=400)
-        ok = self.plugin._set_pinned(mem_id, pinned)
-        return web.json_response({"ok": ok, "pinned": pinned})
-
 
     async def _handle_memory_refine(self, request: web.Request):
         data = await request.json()
         user = str(data.get("user", "")).strip()
         if not user:
             return web.json_response({"error": "user is required"}, status=400)
-
-        mode = str(data.get("mode", self.plugin.manual_refine_default_mode)).lower()
-        limit = max(1, min(200, int(data.get("limit", self.plugin.manual_refine_default_limit))))
-        dry_run = bool(data.get("dry_run", False))
-        include_pinned = bool(data.get("include_pinned", False))
-        extra = str(data.get("extra_instruction", "")).strip()
-
-        # 构造一个最小 event-like 对象以复用 provider 解析逻辑
-        class _Evt:
-            unified_msg_origin = str(data.get("unified_msg_origin", ""))
-
-        result = await self.plugin._manual_refine_memories(
-            event=_Evt(),
-            canonical_id=user,
-            mode=mode,
-            limit=limit,
-            dry_run=dry_run,
-            include_pinned=include_pinned,
-            extra_instruction=extra,
+        admin = self._get_admin()
+        result = await admin.refine_memories(
+            user=user,
+            mode=str(data.get("mode", "")).lower(),
+            limit=int(data.get("limit", 0)),
+            dry_run=bool(data.get("dry_run", False)),
+            include_pinned=bool(data.get("include_pinned", False)),
+            extra_instruction=str(data.get("extra_instruction", "")).strip(),
+            unified_msg_origin=str(data.get("unified_msg_origin", "")),
         )
         return web.json_response({"ok": True, **result})
 
@@ -594,25 +438,12 @@ class TMemoryWebServer:
         merged_text = str(data.get("memory", "")).strip()
         if not user or not isinstance(ids, list) or len(ids) < 2:
             return web.json_response({"error": "user and ids(>=2) are required"}, status=400)
-
-        safe_ids = [int(i) for i in ids if str(i).isdigit()]
-        rows = self.plugin._fetch_memories_by_ids(user, safe_ids)
-        if len(rows) < 2:
-            return web.json_response({"error": "not enough valid memory ids"}, status=400)
-
-        if not merged_text:
-            merged_text = self.plugin._auto_merge_memory_text([str(r["memory"]) for r in rows])
-
-        keep_id = int(rows[0]["id"])
-        self.plugin._update_memory_text(keep_id, merged_text)
-        if self.plugin._vec_available:
-            await self.plugin._upsert_vector(keep_id, merged_text)
-        deleted = 0
-        for r in rows[1:]:
-            if self.plugin._delete_memory(int(r["id"])):
-                deleted += 1
-
-        return web.json_response({"ok": True, "keep_id": keep_id, "deleted": deleted})
+        admin = self._get_admin()
+        try:
+            result = await admin.merge_memories(user, ids, merged_text)
+        except ValueError as e:
+            return web.json_response({"error": str(e)}, status=400)
+        return web.json_response({"ok": True, **result})
 
     async def _handle_memory_split(self, request: web.Request):
         data = await request.json()
@@ -621,40 +452,16 @@ class TMemoryWebServer:
         segments = data.get("segments", None)
         if not user or not memory_id:
             return web.json_response({"error": "user and id are required"}, status=400)
-
-        row = self.plugin._fetch_memory_by_id(user, memory_id)
-        if not row:
-            return web.json_response({"error": "memory not found"}, status=404)
-
-        if isinstance(segments, list):
-            segs = [self.plugin._normalize_text(str(s)) for s in segments if self.plugin._normalize_text(str(s))]
-        else:
-            class _Evt:
-                unified_msg_origin = str(data.get("unified_msg_origin", ""))
-            segs = await self.plugin._llm_split_memory(_Evt(), str(row["memory"]))
-
-        if len(segs) < 2:
-            return web.json_response({"error": "segments < 2"}, status=400)
-
-        self.plugin._update_memory_text(memory_id, segs[0])
-        if self.plugin._vec_available:
-            await self.plugin._upsert_vector(memory_id, segs[0])
-
-        added = []
-        for seg in segs[1:]:
-            new_id = self.plugin._insert_memory(
-                canonical_id=user,
-                adapter=str(row["source_adapter"]),
-                adapter_user=str(row["source_user_id"]),
-                memory=seg,
-                score=float(row["score"]),
-                memory_type=str(row["memory_type"]),
-                importance=float(row["importance"]),
-                confidence=float(row["confidence"]),
-                source_channel="manual_split",
+        admin = self._get_admin()
+        try:
+            result = await admin.split_memory(
+                user=user,
+                memory_id=memory_id,
+                segments=segments if isinstance(segments, list) else None,
+                unified_msg_origin=str(data.get("unified_msg_origin", "")),
             )
-            if self.plugin._vec_available and new_id:
-                await self.plugin._upsert_vector(new_id, seg)
-            added.append(new_id)
-
-        return web.json_response({"ok": True, "base_id": memory_id, "added_ids": added})
+        except LookupError:
+            return web.json_response({"error": "memory not found"}, status=404)
+        except ValueError as e:
+            return web.json_response({"error": str(e)}, status=400)
+        return web.json_response({"ok": True, **result})
