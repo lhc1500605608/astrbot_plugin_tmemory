@@ -151,7 +151,8 @@ class MemoryOps:
             transcript_lines.append(f"{role}: {content}")
 
         transcript = "\n".join(transcript_lines)
-        prompt = self.plugin._distill_mgr.build_distill_prompt(transcript)
+        persona_profile = self.plugin._cfg.persona_profile
+        prompt = self.plugin._distill_mgr.build_distill_prompt(transcript, persona_profile)
 
         chat_provider_id = await self.plugin._distill_mgr.resolve_distill_provider_id(rows, self.plugin.context)
         chat_model_id = await self.plugin._distill_mgr.resolve_distill_model_id(rows)
@@ -282,12 +283,16 @@ class MemoryOps:
                     continue
 
                 valid_items = self.plugin._validate_distill_output(llm_items)
+                has_style = False
                 for item in valid_items:
                     mem_text = self.plugin._sanitize_text(
                         self.plugin._normalize_text(str(item.get("memory", "")))
                     )
                     if not mem_text:
                         continue
+                    memory_type = str(item.get("memory_type", "fact"))
+                    if memory_type == "style":
+                        has_style = True
                     row_scope = str(rows[0].get("scope", "user"))
                     row_persona = str(rows[0].get("persona_id", ""))
                     new_id = self.plugin._insert_memory(
@@ -296,7 +301,7 @@ class MemoryOps:
                         adapter_user=str(rows[0]["source_user_id"]),
                         memory=mem_text,
                         score=self.plugin._clamp01(item.get("score", 0.7)),
-                        memory_type=str(item.get("memory_type", "fact")),
+                        memory_type=memory_type,
                         importance=self.plugin._clamp01(item.get("importance", 0.6)),
                         confidence=self.plugin._clamp01(item.get("confidence", 0.7)),
                         source_channel="scheduled_distill",
@@ -306,6 +311,16 @@ class MemoryOps:
                     if self.plugin._vec_available and new_id:
                         await self.plugin._upsert_vector(new_id, mem_text)
                     total_memories += 1
+
+                # 风格蒸馏 v3: 产出 style 记忆后自动创建人格档案
+                if has_style:
+                    try:
+                        source_adapter = str(rows[0].get("source_adapter", ""))
+                        self.plugin._style_mgr.auto_create_profile_if_ready(
+                            canonical_id, source_adapter
+                        )
+                    except Exception:
+                        pass
 
                 self.plugin._mark_rows_distilled([int(r["id"]) for r in rows])
                 self.plugin._optimize_context(canonical_id)

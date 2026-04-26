@@ -87,6 +87,32 @@ CREATE TABLE IF NOT EXISTS distill_history (
 )
 """
 
+_DDL_STYLE_PROFILES = """
+CREATE TABLE IF NOT EXISTS style_profiles (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    profile_name TEXT UNIQUE NOT NULL,
+    prompt_supplement TEXT NOT NULL DEFAULT '',
+    description TEXT NOT NULL DEFAULT '',
+    source_user TEXT NOT NULL DEFAULT '',
+    source_adapter TEXT NOT NULL DEFAULT '',
+    style_summary TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+)
+"""
+
+_DDL_STYLE_BINDINGS = """
+CREATE TABLE IF NOT EXISTS style_bindings (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    adapter_name TEXT NOT NULL,
+    conversation_id TEXT NOT NULL,
+    profile_id INTEGER DEFAULT NULL REFERENCES style_profiles(id),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(adapter_name, conversation_id)
+)
+"""
+
 _DDL_CONVERSATION_CACHE = """
 CREATE TABLE IF NOT EXISTS conversation_cache (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -175,9 +201,14 @@ class DatabaseManager:
                 self._conn = None
 
     def _ensure_columns(self, conn: sqlite3.Connection, table_name: str, wanted: Dict[str, str]) -> None:
+        exists = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name=?", (table_name,)
+        ).fetchone()
+        if not exists:
+            return
         existing = {
-            row["name"]
-            for row in conn.execute(f"PRAGMA table_info({table_name})").fetchall()
+            r["name"]
+            for r in conn.execute(f"PRAGMA table_info({table_name})").fetchall()
         }
         for col, ddl in wanted.items():
             if col in existing:
@@ -235,7 +266,17 @@ class DatabaseManager:
         )
 
         conn.execute("UPDATE memories SET last_seen_at=COALESCE(NULLIF(last_seen_at, ''), updated_at, created_at)")
-        
+
+        self._ensure_columns(
+            conn,
+            "style_profiles",
+            {
+                "source_user": "TEXT NOT NULL DEFAULT ''",
+                "source_adapter": "TEXT NOT NULL DEFAULT ''",
+                "style_summary": "TEXT NOT NULL DEFAULT ''",
+            }
+        )
+
         try:
             existing_dh = {
                 row["name"]
@@ -274,8 +315,11 @@ class DatabaseManager:
             conn.execute(_DDL_IDENTITY_MAPPINGS)
             conn.execute(_DDL_DISTILL_HISTORY)
             conn.execute(_DDL_CONVERSATION_CACHE)
+            conn.execute(_DDL_STYLE_PROFILES)
+            conn.execute(_DDL_STYLE_BINDINGS)
             
             conn.execute("CREATE INDEX IF NOT EXISTS idx_identity_bindings_canonical ON identity_bindings (canonical_user_id)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_style_bindings_lookup ON style_bindings (adapter_name, conversation_id)")
 
             self.migrate_schema(conn)
 

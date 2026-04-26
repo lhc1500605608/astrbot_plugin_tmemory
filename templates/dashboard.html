@@ -209,9 +209,14 @@
       <!-- Style View -->
       <div class="table-panel" id="panelStyle" style="display:none">
         <div style="margin-bottom:12px;padding:12px;background:var(--surface2);border-radius:var(--radius);display:flex;flex-wrap:wrap;gap:16px;align-items:center;">
+          <div style="display:flex;align-items:center;gap:6px;font-size:13px">
+            <span id="styleDistillStatus" style="font-weight:600">-</span>
+            <span style="color:var(--text2)">风格采集 ( /style_distill 控制)</span>
+          </div>
+          <div style="width:1px;height:24px;background:var(--border)"></div>
           <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer">
-            <input type="checkbox" id="styleEnableSwitch" onchange="toggleStyleDistill(this.checked)">
-            <strong>启用聊天风格蒸馏</strong>
+            <input type="checkbox" id="styleInjectionSwitch" onchange="toggleStyleInjection(this.checked)">
+            <strong>启用人格注入</strong>
           </label>
           <div style="width:1px;height:24px;background:var(--border)"></div>
           <div style="display:flex;align-items:center;gap:6px;font-size:13px">
@@ -232,6 +237,24 @@
           </div>
           <div style="flex:1"></div>
           <button class="btn btn-sm" onclick="forceStyleDistill()">🚀 强制当前用户风格蒸馏</button>
+        </div>
+        <!-- 人格档案管理 (v3) -->
+        <div style="margin-bottom:12px;padding:12px;background:var(--surface2);border-radius:var(--radius)">
+          <div style="display:flex;gap:8px;align-items:center;margin-bottom:10px">
+            <strong style="font-size:13px">人格档案</strong>
+            <span style="font-size:12px;color:var(--text2)">(可复用的人格补充提示词，绑定到具体会话)</span>
+            <div style="flex:1"></div>
+            <button class="btn btn-sm btn-primary" onclick="openProfileCreateModal()">+ 新建档案</button>
+          </div>
+          <div id="styleProfilesList" style="font-size:12px;color:var(--text2)">加载中…</div>
+        </div>
+        <!-- 会话绑定管理 (v3) -->
+        <div style="margin-bottom:12px;padding:12px;background:var(--surface2);border-radius:var(--radius)">
+          <div style="display:flex;gap:8px;align-items:center;margin-bottom:10px">
+            <strong style="font-size:13px">会话绑定</strong>
+            <span style="font-size:12px;color:var(--text2)">(adapter + conversation → 人格档案)</span>
+          </div>
+          <div id="styleBindingsList" style="font-size:12px;color:var(--text2)">加载中…</div>
         </div>
         <div style="margin-bottom:12px;display:flex;gap:8px;align-items:center;justify-content:space-between">
           <div style="display:flex;gap:8px;align-items:center">
@@ -320,6 +343,23 @@
     <div class="modal-footer">
       <button class="btn" onclick="closeModal('distillModal')">取消</button>
       <button class="btn btn-primary" onclick="triggerDistill()">确认蒸馏</button>
+    </div>
+  </div>
+</div>
+
+<!-- Profile Create Modal -->
+<div class="modal-backdrop" id="profileModal">
+  <div class="modal" style="width:480px">
+    <div class="modal-header"><h3>新建人格档案</h3><button class="btn btn-icon btn-sm" onclick="closeModal('profileModal')">✕</button></div>
+    <div class="modal-body">
+      <p style="font-size:12px;color:var(--text2);margin-bottom:14px">人格档案包含一段 prompt_supplement，绑定到具体会话后会被追加到 system_prompt 尾部。</p>
+      <div class="form-group"><label>档案名称</label><input id="profileName" type="text" placeholder="例如: 简洁风、客服风"></div>
+      <div class="form-group"><label>人格补充提示词 (prompt_supplement)</label><textarea id="profilePrompt" rows="4" placeholder="描述 Bot 应采用的人格风格，例如: 你是一个简洁高效的助手，回复不超过三句话。"></textarea></div>
+      <div class="form-group"><label>描述 (可选)</label><input id="profileDesc" type="text" placeholder="简短说明此档案的用途"></div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn" onclick="closeModal('profileModal')">取消</button>
+      <button class="btn btn-primary" onclick="createProfile()">确认创建</button>
     </div>
   </div>
 </div>

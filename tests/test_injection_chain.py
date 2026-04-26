@@ -25,6 +25,26 @@ def _insert_memory(plugin, canonical_id: str, memory: str, score: float = 0.8) -
     )
 
 
+class _StyleEvent:
+    adapter_name = "qq"
+    unified_msg_origin = "group:style"
+
+    def get_sender_id(self):
+        return "42"
+
+    def get_group_id(self):
+        return None
+
+
+class _ConversationManager:
+    async def get_curr_conversation_id(self, _umo):
+        return "conv-style"
+
+
+class _Context:
+    conversation_manager = _ConversationManager()
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Tests
 # ──────────────────────────────────────────────────────────────────────────────
@@ -72,14 +92,14 @@ async def test_retrieve_memories_fts_hit_returns_relevant_results(plugin):
 
 @pytest.mark.asyncio
 async def test_build_injection_block_fts_miss_still_produces_block(plugin):
-    """End-to-end: _build_injection_block must produce a non-empty string
+    """End-to-end: _build_knowledge_injection must produce a non-empty string
     even when FTS has no hits, so on_llm_request can inject memories.
     """
     _insert_memory(plugin, "u4", "用户是一名软件工程师")
 
-    block = await plugin._build_injection_block("u4", "XYZNOTFOUND", limit=5)
+    block = await plugin._build_knowledge_injection("u4", "XYZNOTFOUND", limit=5)
     assert block != "", (
-        "_build_injection_block returned empty string when memories exist "
+        "_build_knowledge_injection returned empty string when memories exist "
         "and FTS missed — injection would be silently skipped."
     )
     assert "用户是一名软件工程师" in block
@@ -100,3 +120,52 @@ async def test_retrieve_memories_respects_limit(plugin):
 
     results = await plugin._retrieve_memories("u5", "XYZNOTFOUND", limit=3)
     assert len(results) <= 3
+
+
+@pytest.mark.asyncio
+async def test_style_injection_returns_empty_without_binding(plugin):
+    plugin.context = _Context()
+    plugin._cfg.enable_style_injection = True
+
+    block = await plugin._build_style_injection(
+        "qq:42", "随便聊聊", _StyleEvent(), scope="user", persona_id=""
+    )
+
+    assert block == ""
+
+
+@pytest.mark.asyncio
+async def test_style_injection_uses_bound_prompt_supplement(plugin):
+    plugin.context = _Context()
+    plugin._cfg.enable_style_injection = True
+    profile_id = plugin._style_mgr.create_profile(
+        "concise-style", "请用简洁直接的语气回复。", "qa profile"
+    )
+    plugin._style_mgr.set_binding("qq", "conv-style", profile_id)
+
+    block = await plugin._build_style_injection(
+        "qq:42", "随便聊聊", _StyleEvent(), scope="user", persona_id=""
+    )
+
+    assert "[人格档案]" in block
+    assert "请用简洁直接的语气回复。" in block
+
+
+@pytest.mark.asyncio
+async def test_style_injection_off_keeps_default_persona(plugin):
+    plugin.context = _Context()
+    plugin._cfg.enable_memory_injection = False
+    plugin._cfg.enable_style_injection = False
+    profile_id = plugin._style_mgr.create_profile(
+        "bound-style", "这段不应注入。", "qa profile"
+    )
+    plugin._style_mgr.set_binding("qq", "conv-style", profile_id)
+
+    class _Request:
+        prompt = "你好"
+        system_prompt = "default persona"
+
+    req = _Request()
+    await plugin.on_llm_request(_StyleEvent(), req)
+
+    assert req.system_prompt == "default persona"

@@ -209,6 +209,42 @@ class TestSetPinned:
         assert unpinned[0]["is_pinned"] == 0
 
 
+class TestStyleProfiles:
+    def test_style_profile_crud_and_binding_roundtrip(self, admin):
+        created = admin.create_style_profile(
+            "qa-style", "请使用更有条理的语气。", "qa profile"
+        )
+
+        assert created["id"] > 0
+        assert admin.set_style_binding("qq", "conv-a", created["id"]) is True
+        binding = admin.get_style_binding("qq", "conv-a")
+        assert binding["profile_id"] == created["id"]
+        assert binding["prompt_supplement"] == "请使用更有条理的语气。"
+
+        assert admin.delete_style_profile(created["id"]) is True
+        binding = admin.get_style_binding("qq", "conv-a")
+        assert binding["profile_id"] is None
+
+    def test_auto_create_profile_after_three_style_memories(self, admin, plugin):
+        for i in range(3):
+            plugin._insert_memory(
+                canonical_id="style-user",
+                adapter="qq",
+                adapter_user="42",
+                memory=f"用户偏好简洁表达风格{i}",
+                score=0.8,
+                memory_type="style",
+                importance=0.7,
+                confidence=0.9,
+            )
+
+        profile_id = plugin._style_mgr.auto_create_profile_if_ready("style-user", "qq")
+        profile = admin.get_style_profile(profile_id)
+
+        assert profile["profile_name"] == "style-user-auto-style"
+        assert "用户偏好简洁表达风格" in profile["prompt_supplement"]
+
+
 # =========================================================================
 # Batch 1.3 — 高风险写操作
 # =========================================================================
