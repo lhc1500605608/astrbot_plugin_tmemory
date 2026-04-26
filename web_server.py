@@ -183,6 +183,14 @@ class TMemoryWebServer:
         app.router.add_get("/api/style/stats", self._handle_get_style_stats)
         app.router.add_get("/api/config", self._handle_get_config)
         app.router.add_patch("/api/config", self._handle_update_config)
+        # Style profiles & bindings (v3)
+        app.router.add_get("/api/style/profiles", self._handle_list_style_profiles)
+        app.router.add_post("/api/style/profile/create", self._handle_create_style_profile)
+        app.router.add_post("/api/style/profile/update", self._handle_update_style_profile)
+        app.router.add_post("/api/style/profile/delete", self._handle_delete_style_profile)
+        app.router.add_get("/api/style/bindings", self._handle_list_style_bindings)
+        app.router.add_post("/api/style/binding/set", self._handle_set_style_binding)
+        app.router.add_post("/api/style/binding/remove", self._handle_remove_style_binding)
 
     # ── 中间件：IP 白名单 + JWT 鉴权 ─────────────────────────────────────
 
@@ -512,15 +520,104 @@ class TMemoryWebServer:
                 return web.json_response({"error": "Plugin not initialized"}, status=500)
 
             current_config = ctx.get_config()
+
+            # 守卫: enable_style_distill 只能通过 /style_distill on|off 指令修改，
+            # 不允许通过 WebUI API 直接写入，防止前端/脚本绕过。
+            style_settings = data.get("style_distill_settings")
+            if isinstance(style_settings, dict) and "enable_style_distill" in style_settings:
+                existing = current_config.get("style_distill_settings", {})
+                if isinstance(existing, dict) and "enable_style_distill" in existing:
+                    style_settings["enable_style_distill"] = existing["enable_style_distill"]
+                else:
+                    style_settings.pop("enable_style_distill", None)
+                data["style_distill_settings"] = style_settings
+
             # update only provided keys
             for k, v in data.items():
                 current_config[k] = v
 
             ctx.save_config(current_config)
-            # Notify plugin to reload config
-            from core.config import parse_config
-            self.plugin.cfg = parse_config(current_config)
-            
+            from .core.config import parse_config
+            self.plugin._cfg = parse_config(current_config)
+
             return web.json_response({"status": "ok"})
         except Exception as e:
             return web.json_response({"error": str(e)}, status=400)
+
+    # ── 风格蒸馏 v3: Profiles & Bindings ────────────────────────────────
+
+    async def _handle_list_style_profiles(self, request: web.Request):
+        admin = self._get_admin()
+        profiles = admin.list_style_profiles()
+        return web.json_response({"profiles": profiles})
+
+    async def _handle_create_style_profile(self, request: web.Request):
+        data = await request.json()
+        name = str(data.get("name", "")).strip()
+        prompt_supplement = str(data.get("prompt_supplement", "")).strip()
+        description = str(data.get("description", "")).strip()
+        source_user = str(data.get("source_user", "")).strip()
+        source_adapter = str(data.get("source_adapter", "")).strip()
+        style_summary = str(data.get("style_summary", "")).strip()
+        if not name or not prompt_supplement:
+            return web.json_response({"error": "name and prompt_supplement are required"}, status=400)
+        admin = self._get_admin()
+        result = admin.create_style_profile(
+            name, prompt_supplement, description,
+            source_user, source_adapter, style_summary,
+        )
+        return web.json_response({"ok": True, **result})
+
+    async def _handle_update_style_profile(self, request: web.Request):
+        data = await request.json()
+        profile_id = int(data.get("id", 0))
+        if not profile_id:
+            return web.json_response({"error": "id is required"}, status=400)
+        admin = self._get_admin()
+        ok = admin.update_style_profile(profile_id, **{
+            k: v for k, v in data.items()
+            if k in ("profile_name", "prompt_supplement", "description",
+                      "source_user", "source_adapter", "style_summary")
+        })
+        return web.json_response({"ok": ok})
+
+    async def _handle_delete_style_profile(self, request: web.Request):
+        data = await request.json()
+        profile_id = int(data.get("id", 0))
+        if not profile_id:
+            return web.json_response({"error": "id is required"}, status=400)
+        admin = self._get_admin()
+        ok = admin.delete_style_profile(profile_id)
+        return web.json_response({"ok": ok})
+
+    async def _handle_list_style_bindings(self, request: web.Request):
+        admin = self._get_admin()
+        bindings = admin.list_style_bindings()
+        return web.json_response({"bindings": bindings})
+
+    async def _handle_set_style_binding(self, request: web.Request):
+        data = await request.json()
+        adapter_name = str(data.get("adapter_name", "")).strip()
+        conversation_id = str(data.get("conversation_id", "")).strip()
+        profile_id = int(data.get("profile_id", 0))
+        if not adapter_name or not conversation_id or not profile_id:
+            return web.json_response(
+                {"error": "adapter_name, conversation_id, and profile_id are required"},
+                status=400,
+            )
+        admin = self._get_admin()
+        admin.set_style_binding(adapter_name, conversation_id, profile_id)
+        return web.json_response({"ok": True})
+
+    async def _handle_remove_style_binding(self, request: web.Request):
+        data = await request.json()
+        adapter_name = str(data.get("adapter_name", "")).strip()
+        conversation_id = str(data.get("conversation_id", "")).strip()
+        if not adapter_name or not conversation_id:
+            return web.json_response(
+                {"error": "adapter_name and conversation_id are required"},
+                status=400,
+            )
+        admin = self._get_admin()
+        removed = admin.remove_style_binding(adapter_name, conversation_id)
+        return web.json_response({"ok": removed})

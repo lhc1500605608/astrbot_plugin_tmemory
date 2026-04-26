@@ -58,6 +58,8 @@ class PluginConfig:
     
     # Style Distill
     enable_style_distill: bool = True
+    enable_style_injection: bool = False
+    persona_profile: str = ""
     style_min_confidence: float = 0.55
     style_min_importance: float = 0.4
 
@@ -139,6 +141,8 @@ def parse_config(raw_config: dict) -> PluginConfig:
     if not isinstance(style_cfg, dict):
         style_cfg = {}
     c.enable_style_distill = _safe_bool(style_cfg.get("enable_style_distill", True), True, label="enable_style_distill")
+    c.enable_style_injection = _safe_bool(style_cfg.get("enable_style_injection", False), False, label="enable_style_injection")
+    c.persona_profile = str(style_cfg.get("persona_profile", "")).strip()
     c.style_min_confidence = max(0.0, min(1.0, _safe_float(style_cfg.get("style_min_confidence", 0.55), 0.55, label="style_min_confidence")))
     c.style_min_importance = max(0.0, min(1.0, _safe_float(style_cfg.get("style_min_importance", 0.4), 0.4, label="style_min_importance")))
 
@@ -230,6 +234,8 @@ def apply_safe_defaults(plugin) -> None:
     c.distill_pause = False
     c.purify_interval_days = 0
     c.enable_style_distill = True
+    c.enable_style_injection = False
+    c.persona_profile = ""
     c.style_min_confidence = 0.55
     c.style_min_importance = 0.4
     c.purify_model_id = ""

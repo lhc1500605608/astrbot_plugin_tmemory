@@ -1,4 +1,5 @@
 import asyncio
+import json
 
 from aiohttp import web
 
@@ -78,3 +79,55 @@ def test_web_middleware_enforces_ip_whitelist_and_authentication(web_module, plu
     assert blocked.status == 403
     assert unauthorized.status == 401
     assert authorized.status == 200
+
+
+def test_update_config_preserves_readonly_style_distill_switch(web_module, plugin):
+    saved = {}
+
+    class Context:
+        def get_config(self):
+            return {
+                "style_distill_settings": {
+                    "enable_style_distill": True,
+                    "enable_style_injection": False,
+                }
+            }
+
+        def save_config(self, config):
+            saved.update(config)
+
+    plugin.context = Context()
+    server = web_module.TMemoryWebServer(plugin, {"webui_enabled": True})
+
+    resp = asyncio.run(
+        server._handle_update_config(
+            JsonRequest({
+                "style_distill_settings": {
+                    "enable_style_distill": False,
+                    "enable_style_injection": True,
+                }
+            })
+        )
+    )
+
+    assert resp.status == 200
+    assert json.loads(resp.text)["status"] == "ok"
+    assert saved["style_distill_settings"]["enable_style_distill"] is True
+    assert saved["style_distill_settings"]["enable_style_injection"] is True
+
+
+def test_style_binding_api_rejects_default_null_profile(web_module, plugin):
+    server = web_module.TMemoryWebServer(plugin, {"webui_enabled": True})
+
+    resp = asyncio.run(
+        server._handle_set_style_binding(
+            JsonRequest({
+                "adapter_name": "qq",
+                "conversation_id": "conv-default",
+                "profile_id": 0,
+            })
+        )
+    )
+
+    assert resp.status == 400
+    assert "profile_id" in resp.text

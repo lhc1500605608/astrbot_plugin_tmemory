@@ -280,6 +280,51 @@ class AdminService:
         return get_distill_history(self._plugin, limit=limit)
 
     # =====================================================================
+    # Style Profiles & Bindings (v3)
+    # =====================================================================
+
+    def list_style_profiles(self) -> List[Dict[str, Any]]:
+        return self._plugin._style_mgr.list_profiles()
+
+    def get_style_profile(self, profile_id: int) -> Optional[Dict[str, Any]]:
+        return self._plugin._style_mgr.get_profile(profile_id)
+
+    def create_style_profile(
+        self, name: str, prompt_supplement: str, description: str = "",
+        source_user: str = "", source_adapter: str = "", style_summary: str = "",
+    ) -> Dict[str, Any]:
+        existing = self._plugin._style_mgr.get_profile_by_name(name)
+        if existing:
+            return {"error": f"profile '{name}' already exists", "id": existing["id"]}
+        pid = self._plugin._style_mgr.create_profile(
+            name, prompt_supplement, description,
+            source_user, source_adapter, style_summary,
+        )
+        return {"id": pid, "name": name}
+
+    def update_style_profile(self, profile_id: int, **kwargs) -> bool:
+        return self._plugin._style_mgr.update_profile(profile_id, **kwargs)
+
+    def delete_style_profile(self, profile_id: int) -> bool:
+        return self._plugin._style_mgr.delete_profile(profile_id)
+
+    def list_style_bindings(self) -> List[Dict[str, Any]]:
+        return self._plugin._style_mgr.list_bindings()
+
+    def get_style_binding(
+        self, adapter_name: str, conversation_id: str
+    ) -> Optional[Dict[str, Any]]:
+        return self._plugin._style_mgr.get_binding(adapter_name, conversation_id)
+
+    def set_style_binding(
+        self, adapter_name: str, conversation_id: str, profile_id: int
+    ) -> bool:
+        return self._plugin._style_mgr.set_binding(adapter_name, conversation_id, profile_id)
+
+    def remove_style_binding(self, adapter_name: str, conversation_id: str) -> bool:
+        return self._plugin._style_mgr.remove_binding(adapter_name, conversation_id)
+
+    # =====================================================================
     # Batch 1.2 — 低风险写操作
     # =====================================================================
 

@@ -39,6 +39,7 @@ from .core.capture import CaptureFilter
 from .core.distill import DistillManager
 from .core.utils import MemoryLogger
 from .core.identity import IdentityManager
+from .core.style_manager import StyleManager
 from .search.retrieval import RetrievalManager
 
 @register(
@@ -90,6 +91,7 @@ class TMemoryPlugin(Star):
         self._retrieval_mgr = RetrievalManager(self._cfg, self._db_mgr)
         self._memory_logger = MemoryLogger(self._db_mgr)
         self._identity_mgr = IdentityManager(self._db_mgr, self._cfg, self._memory_logger)
+        self._style_mgr = StyleManager(self._db_mgr)
 
         # ── 敏感信息脱敏 ──────────────────────────────────────────────────────
         self._sanitize_patterns = self._build_sanitize_patterns()
@@ -310,11 +312,12 @@ class TMemoryPlugin(Star):
 
     @filter.on_llm_request()
     async def on_llm_request(self, event: AstrMessageEvent, req: ProviderRequest):
-        """在 LLM 调用前，将召回的用户记忆注入 system prompt。
+        """在 LLM 调用前注入记忆与风格补充。
 
-        只追加到 system prompt 尾部，不替换原有内容，确保 persona 等配置不受影响。
+        风格补充（人格档案 + 对话风格）始终追加到 system_prompt 尾部，
+        不受 inject_position 配置影响。知识记忆按 inject_position 注入。
         """
-        if not self._cfg.enable_memory_injection:
+        if not self._cfg.enable_memory_injection and not self._cfg.enable_style_injection:
             return
 
         try:
@@ -323,49 +326,26 @@ class TMemoryPlugin(Star):
             scope = self._get_memory_scope(event)
             persona_id = await self._get_current_persona_async(event)
             is_group = self._is_group_event(event)
+            exclude_private = (is_group and not self._cfg.private_memory_in_group)
 
-            memory_block = await self._build_injection_block(
-                canonical_id,
-                query,
-                self._cfg.inject_memory_limit,
-                scope=scope,
-                persona_id=persona_id,
-                exclude_private=(is_group and not self._cfg.private_memory_in_group),
-            )
-            if not memory_block:
-                return
+            # ── 风格注入：始终追加到 system_prompt ──
+            if self._cfg.enable_style_injection:
+                style_block = await self._build_style_injection(
+                    canonical_id, query, event,
+                    scope=scope, persona_id=persona_id, exclude_private=exclude_private,
+                )
+                if style_block:
+                    existing = getattr(req, "system_prompt", "") or ""
+                    req.system_prompt = existing + ("\n\n" if existing else "") + style_block
 
-            # 注入位置控制
-            if self._cfg.inject_position == "slot":
-                existing = getattr(req, "system_prompt", "") or ""
-                if self._cfg.inject_slot_marker in existing:
-                    req.system_prompt = existing.replace(
-                        self._cfg.inject_slot_marker, memory_block, 1
-                    )
-                else:
-                    # 占位符不存在时降级到 system_prompt 追加
-                    req.system_prompt = (
-                        existing + ("\n\n" if existing else "") + memory_block
-                    )
-            elif self._cfg.inject_position == "user_message_before":
-                # 作为用户消息前缀:在 req.prompt 前面拼接
-                original_prompt = getattr(req, "prompt", "") or ""
-                req.prompt = (
-                    memory_block + "\n\n" + original_prompt
-                    if original_prompt
-                    else memory_block
+            # ── 知识记忆注入：遵循 inject_position ──
+            if self._cfg.enable_memory_injection:
+                knowledge_block = await self._build_knowledge_injection(
+                    canonical_id, query, self._cfg.inject_memory_limit,
+                    scope=scope, persona_id=persona_id, exclude_private=exclude_private,
                 )
-            elif self._cfg.inject_position == "user_message_after":
-                # 作为用户消息后缀:在 req.prompt 后面拼接
-                original_prompt = getattr(req, "prompt", "") or ""
-                req.prompt = (
-                    original_prompt + ("\n\n" if original_prompt else "") + memory_block
-                )
-            else:  # system_prompt(默认，追加到末尾)
-                existing = getattr(req, "system_prompt", "") or ""
-                req.system_prompt = (
-                    existing + ("\n\n" if existing else "") + memory_block
-                )
+                if knowledge_block:
+                    self._inject_block_by_position(req, knowledge_block)
         except Exception as e:
             logger.warning("[tmemory] on_llm_request inject failed: %s", e)
 
@@ -1021,7 +1001,7 @@ class TMemoryPlugin(Star):
     # 记忆召回与上下文构建
     # =========================================================================
 
-    async def _build_injection_block(
+    async def _build_knowledge_injection(
         self,
         canonical_user_id: str,
         query: str,
@@ -1030,7 +1010,7 @@ class TMemoryPlugin(Star):
         persona_id: str = "",
         exclude_private: bool = False,
     ) -> str:
-        """构建注入到 system_prompt 的记忆块。"""
+        """构建知识/偏好记忆注入块（不含 style 类型）。"""
         rows = await self._retrieve_memories(
             canonical_user_id,
             query,
@@ -1042,16 +1022,96 @@ class TMemoryPlugin(Star):
         if not rows:
             return ""
 
+        knowledge_rows = [r for r in rows if r["memory_type"] != "style"]
+        if not knowledge_rows:
+            return ""
+
         lines = ["[用户记忆]"]
-        for row in rows:
+        for row in knowledge_rows:
             mtype = row["memory_type"]
             mem = row["memory"]
             lines.append(f"- ({mtype}) {mem}")
-
         block = "\n".join(lines)
         if self._cfg.inject_max_chars > 0 and len(block) > self._cfg.inject_max_chars:
-            block = block[: self._cfg.inject_max_chars] + "…"
+            cutoff = max(self._cfg.inject_max_chars - 3, 1)
+            block = block[:cutoff] + "…"
         return block
+
+    async def _build_style_injection(
+        self,
+        canonical_user_id: str,
+        query: str,
+        event: AstrMessageEvent,
+        scope: str = "user",
+        persona_id: str = "",
+        exclude_private: bool = False,
+    ) -> str:
+        """构建风格注入块（人格档案 + 对话风格记忆），仅在命中绑定时注入。
+
+        风格蒸馏 v3 双开关逻辑:
+        - enable_style_injection=ON 且 adapter+conversation 命中 active profile → 注入
+        - 未绑定或 profile_id=NULL → 回退 AstrBot 默认人格，不注入任何风格内容
+        """
+        adapter_name = self._get_adapter_name(event)
+        conversation_id = await self._get_conversation_id(event)
+        if not adapter_name or not conversation_id:
+            return ""
+
+        binding = self._style_mgr.get_binding(adapter_name, conversation_id)
+        if not binding or binding.get("profile_id") is None:
+            # 未绑定或显式 NULL：回退 AstrBot 默认人格，不注入额外风格内容
+            return ""
+
+        prompt_supplement = binding.get("prompt_supplement", "")
+
+        rows = await self._retrieve_memories(
+            canonical_user_id,
+            query,
+            self._cfg.inject_memory_limit,
+            scope=scope,
+            persona_id=persona_id,
+            exclude_private=exclude_private,
+        )
+        style_memories = [r["memory"] for r in rows if r["memory_type"] == "style"]
+
+        return self._distill_mgr.build_style_injection_block(
+            persona_profile=prompt_supplement,
+            style_memories=style_memories,
+            inject_max_chars=self._cfg.inject_max_chars,
+        )
+
+    def _inject_block_by_position(self, req: ProviderRequest, block: str) -> None:
+        """按 inject_position 配置将知识记忆块注入到正确位置。"""
+        if self._cfg.inject_position == "slot":
+            existing = getattr(req, "system_prompt", "") or ""
+            if self._cfg.inject_slot_marker in existing:
+                req.system_prompt = existing.replace(
+                    self._cfg.inject_slot_marker, block, 1
+                )
+            else:
+                req.system_prompt = existing + ("\n\n" if existing else "") + block
+        elif self._cfg.inject_position == "user_message_before":
+            original_prompt = getattr(req, "prompt", "") or ""
+            req.prompt = block + "\n\n" + original_prompt if original_prompt else block
+        elif self._cfg.inject_position == "user_message_after":
+            original_prompt = getattr(req, "prompt", "") or ""
+            req.prompt = original_prompt + ("\n\n" if original_prompt else "") + block
+        else:  # system_prompt
+            existing = getattr(req, "system_prompt", "") or ""
+            req.system_prompt = existing + ("\n\n" if existing else "") + block
+
+    async def _get_conversation_id(self, event: AstrMessageEvent) -> str:
+        """获取当前会话的 conversation_id，用于 style_bindings 查询。"""
+        try:
+            umo = self._safe_get_unified_msg_origin(event)
+            conv_mgr = getattr(self.context, "conversation_manager", None)
+            if conv_mgr and umo:
+                cid = await conv_mgr.get_curr_conversation_id(umo)
+                if cid:
+                    return str(cid)
+        except Exception:
+            pass
+        return ""
 
     async def build_memory_context(
         self, canonical_user_id: str, query: str, limit: int = 6
@@ -1751,6 +1811,147 @@ class TMemoryPlugin(Star):
                 (1 if pinned else 0, memory_id),
             )
             return cur.rowcount > 0
+
+    # =========================================================================
+    # 风格蒸馏管理指令 (v3: style_profiles + style_bindings)
+    # =========================================================================
+
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @filter.command("style_distill")
+    async def style_distill(self, event: AstrMessageEvent):
+        """控制风格蒸馏采集开关: /style_distill on|off
+
+        on  — 启用风格蒸馏素材收集和档案更新
+        off — 停用风格蒸馏采集，不影响普通记忆整理
+        WebUI 中 enable_style_distill 为只读状态，唯一写入口即此命令。
+        """
+        raw = (event.message_str or "").strip()
+        arg = re.sub(r"^/style_distill\s*", "", raw, flags=re.IGNORECASE).strip().lower()
+        if arg not in ("on", "off"):
+            yield event.plain_result("用法: /style_distill on|off\n当前状态: " + ("开启" if self._cfg.enable_style_distill else "关闭"))
+            return
+
+        enabled = arg == "on"
+        if enabled == self._cfg.enable_style_distill:
+            yield event.plain_result(f"风格蒸馏采集已处于 {'开启' if enabled else '关闭'} 状态，无需重复设置。")
+            return
+
+        self._cfg.enable_style_distill = enabled
+        # 持久化到配置，确保重启后状态保留
+        try:
+            ctx = self.context
+            current = ctx.get_config() if ctx else {}
+            style_settings = current.get("style_distill_settings", {})
+            if not isinstance(style_settings, dict):
+                style_settings = {}
+            style_settings["enable_style_distill"] = enabled
+            current["style_distill_settings"] = style_settings
+            if ctx:
+                ctx.save_config(current)
+        except Exception:
+            pass
+        yield event.plain_result(f"风格蒸馏采集已{'开启' if enabled else '关闭'}（不影响普通记忆整理）。")
+
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @filter.command("style_profile_create")
+    async def style_profile_create(self, event: AstrMessageEvent):
+        """创建人格档案: /style_profile_create <name> | <prompt_supplement> [| description]"""
+        raw = (event.message_str or "").strip()
+        body = re.sub(r"^/style_profile_create\s*", "", raw, flags=re.IGNORECASE).strip()
+        parts = [p.strip() for p in body.split("|")]
+        if len(parts) < 2 or not parts[0] or not parts[1]:
+            yield event.plain_result("用法: /style_profile_create <名称> | <人格补充提示词> [| 描述]")
+            return
+
+        name = parts[0]
+        prompt_supplement = parts[1]
+        description = parts[2] if len(parts) > 2 else ""
+
+        existing = self._style_mgr.get_profile_by_name(name)
+        if existing:
+            yield event.plain_result(f"人格档案 '{name}' 已存在 (id={existing['id']})。")
+            return
+
+        pid = self._style_mgr.create_profile(name, prompt_supplement, description)
+        yield event.plain_result(f"人格档案已创建: id={pid}, name={name}")
+
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @filter.command("style_profile_delete")
+    async def style_profile_delete(self, event: AstrMessageEvent):
+        """删除人格档案: /style_profile_delete <name>"""
+        raw = (event.message_str or "").strip()
+        name = re.sub(r"^/style_profile_delete\s*", "", raw, flags=re.IGNORECASE).strip()
+        if not name:
+            yield event.plain_result("用法: /style_profile_delete <名称>")
+            return
+
+        profile = self._style_mgr.get_profile_by_name(name)
+        if not profile:
+            yield event.plain_result(f"未找到人格档案: {name}")
+            return
+
+        self._style_mgr.delete_profile(int(profile["id"]))
+        yield event.plain_result(f"人格档案 '{name}' 已删除（相关绑定已解绑）。")
+
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @filter.command("style_profile_list")
+    async def style_profile_list(self, event: AstrMessageEvent):
+        """列出所有人格档案: /style_profile_list"""
+        profiles = self._style_mgr.list_profiles()
+        if not profiles:
+            yield event.plain_result("暂无自定义人格档案。")
+            return
+        lines = [f"人格档案 ({len(profiles)} 个):"]
+        for p in profiles:
+            lines.append(
+                f"  [{p['id']}] {p['profile_name']}"
+                f" | supplement={p['prompt_supplement'][:40]}..."
+            )
+        yield event.plain_result("\n".join(lines))
+
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @filter.command("style_bind")
+    async def style_bind(self, event: AstrMessageEvent):
+        """绑定当前会话到人格档案: /style_bind <profile_name>"""
+        raw = (event.message_str or "").strip()
+        name = re.sub(r"^/style_bind\s*", "", raw, flags=re.IGNORECASE).strip()
+        if not name:
+            yield event.plain_result("用法: /style_bind <人格档案名称>")
+            return
+
+        profile = self._style_mgr.get_profile_by_name(name)
+        if not profile:
+            yield event.plain_result(f"未找到人格档案: {name}。请先 /style_profile_create")
+            return
+
+        adapter_name = self._get_adapter_name(event)
+        conversation_id = await self._get_conversation_id(event)
+        if not adapter_name or not conversation_id:
+            yield event.plain_result("无法获取当前会话信息。")
+            return
+
+        self._style_mgr.set_binding(adapter_name, conversation_id, int(profile["id"]))
+        yield event.plain_result(
+            f"已绑定: adapter={adapter_name}, conversation={conversation_id} -> profile={name}"
+        )
+
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @filter.command("style_unbind")
+    async def style_unbind(self, event: AstrMessageEvent):
+        """解除当前会话的人格档案绑定: /style_unbind"""
+        adapter_name = self._get_adapter_name(event)
+        conversation_id = await self._get_conversation_id(event)
+        if not adapter_name or not conversation_id:
+            yield event.plain_result("无法获取当前会话信息。")
+            return
+
+        removed = self._style_mgr.remove_binding(adapter_name, conversation_id)
+        if removed:
+            yield event.plain_result(
+                f"已解绑: adapter={adapter_name}, conversation={conversation_id}"
+            )
+        else:
+            yield event.plain_result("当前会话未绑定人格档案。")
 
     # =========================================================================
     # 蒸馏历史与健康监测
