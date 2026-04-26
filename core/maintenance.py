@@ -344,6 +344,14 @@ def purge_user_data(plugin, canonical_id: str) -> Dict[str, int]:
             "DELETE FROM memory_events WHERE canonical_user_id = ?",
             (canonical_id,),
         )
+        conn.execute(
+            "DELETE FROM conversations WHERE canonical_user_id = ?",
+            (canonical_id,),
+        )
+        conn.execute(
+            "DELETE FROM identity_bindings WHERE canonical_user_id = ?",
+            (canonical_id,),
+        )
     plugin._memory_logger.log_memory_event(
         canonical_user_id=canonical_id,
         event_type="purge",

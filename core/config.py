@@ -56,6 +56,11 @@ class PluginConfig:
     rerank_top_n: int = 5
     rerank_base_url: str = ""
     
+    # Style Distill
+    enable_style_distill: bool = True
+    style_min_confidence: float = 0.55
+    style_min_importance: float = 0.4
+
     # Active Tool Mode
     memory_mode: str = "hybrid"  # distill_only | active_only | hybrid
 
@@ -128,6 +133,14 @@ def parse_config(raw_config: dict) -> PluginConfig:
     c.distill_batch_limit = max(20, _safe_int(raw_config.get("distill_batch_limit", 80), 80, label="distill_batch_limit"))
     c.distill_pause = _safe_bool(raw_config.get("distill_pause", False), False, label="distill_pause")
     c.distill_user_throttle_sec = max(0, _safe_int(raw_config.get("distill_user_throttle_sec", 0), 0, label="distill_user_throttle_sec"))
+
+    # ── 聊天风格蒸馏 ──
+    style_cfg = raw_config.get("style_distill_settings", {})
+    if not isinstance(style_cfg, dict):
+        style_cfg = {}
+    c.enable_style_distill = _safe_bool(style_cfg.get("enable_style_distill", True), True, label="enable_style_distill")
+    c.style_min_confidence = max(0.0, min(1.0, _safe_float(style_cfg.get("style_min_confidence", 0.55), 0.55, label="style_min_confidence")))
+    c.style_min_importance = max(0.0, min(1.0, _safe_float(style_cfg.get("style_min_importance", 0.4), 0.4, label="style_min_importance")))
 
     distill_cfg = raw_config.get("distill_model_settings", {})
     c.use_independent_distill_model = _safe_bool(distill_cfg.get("use_independent_distill_model", False), False, label="use_independent_distill_model")
@@ -216,6 +229,9 @@ def apply_safe_defaults(plugin) -> None:
     plugin.manual_refine_default_limit = 20
     c.distill_pause = False
     c.purify_interval_days = 0
+    c.enable_style_distill = True
+    c.style_min_confidence = 0.55
+    c.style_min_importance = 0.4
     c.purify_model_id = ""
     c.purify_min_score = 0.0
     # ── 向量检索管理器 ──────────────────────────────────────────

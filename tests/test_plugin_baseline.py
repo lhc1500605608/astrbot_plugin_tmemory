@@ -537,6 +537,71 @@ def test_user_last_distilled_ts_throttle_dict_initialized(plugin):
 # =============================================================================
 
 
+def test_migrate_distill_history_old_to_new_schema(plugin_module, tmp_path, monkeypatch):
+    """旧 distill_history schema（run_at/status/messages_processed 等）应迁移为新 schema。"""
+    monkeypatch.chdir(tmp_path)
+    plugin = plugin_module.TMemoryPlugin(context=None, config={})
+    with sqlite3.connect(plugin.db_path) as conn:
+        conn.execute(
+            "CREATE TABLE memories (id INTEGER PRIMARY KEY, canonical_user_id TEXT, "
+            "source_adapter TEXT, source_user_id TEXT, memory TEXT, memory_hash TEXT, "
+            "score REAL, created_at TEXT, updated_at TEXT)"
+        )
+        conn.execute(
+            "CREATE TABLE conversation_cache (id INTEGER PRIMARY KEY, "
+            "canonical_user_id TEXT, role TEXT, content TEXT, created_at TEXT)"
+        )
+        conn.execute(
+            "CREATE TABLE distill_history ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "run_at DATETIME DEFAULT CURRENT_TIMESTAMP, "
+            "canonical_user_id TEXT NOT NULL, "
+            "persona_id TEXT NOT NULL DEFAULT '', "
+            "scope TEXT NOT NULL DEFAULT 'user', "
+            "status TEXT NOT NULL, "
+            "messages_processed INTEGER NOT NULL DEFAULT 0, "
+            "memories_generated INTEGER NOT NULL DEFAULT 0, "
+            "error_msg TEXT"
+            ")"
+        )
+        conn.execute(
+            "INSERT INTO distill_history(canonical_user_id, status, messages_processed, "
+            "memories_generated) VALUES('user-old', 'ok', 50, 3)"
+        )
+
+    plugin._migrate_schema()
+
+    with plugin._db() as conn:
+        tables = {
+            row["name"]
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+        new_columns = {
+            row["name"]
+            for row in conn.execute("PRAGMA table_info(distill_history)").fetchall()
+        }
+
+    assert "distill_history_old" in tables, "old table should be preserved"
+    assert "distill_history" in tables, "new table should exist"
+    assert "started_at" in new_columns, "new column missing"
+    assert "finished_at" in new_columns, "new column missing"
+    assert "trigger_type" in new_columns, "new column missing"
+    assert "users_processed" in new_columns, "new column missing"
+    assert "memories_created" in new_columns, "new column missing"
+    assert "users_failed" in new_columns, "new column missing"
+    assert "errors" in new_columns, "new column missing"
+    assert "duration_sec" in new_columns, "new column missing"
+    # old column names should NOT be in the new table
+    assert "status" not in new_columns
+    assert "run_at" not in new_columns
+    assert "messages_processed" not in new_columns
+    assert "error_msg" not in new_columns
+
+    plugin._close_db()
+
+
 # ── 场景 1: Schema 初始化 ──────────────────────────────────────────────────
 
 

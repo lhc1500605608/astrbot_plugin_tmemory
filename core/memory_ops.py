@@ -257,6 +257,14 @@ class MemoryOps:
                     self.plugin._user_last_distilled_ts[canonical_id] = now_ts
                     continue
 
+                if not any(str(r.get("role", "")) == "user" for r in rows_for_llm):
+                    # assistant-only 片段不能证明用户风格，避免误归因给用户。
+                    self.plugin._mark_rows_distilled([int(r["id"]) for r in rows])
+                    self.plugin._distill_skipped_rows += len(rows)
+                    processed_users += 1
+                    self.plugin._user_last_distilled_ts[canonical_id] = now_ts
+                    continue
+
                 skipped = len(rows) - len(rows_for_llm)
                 self.plugin._distill_skipped_rows += skipped
 

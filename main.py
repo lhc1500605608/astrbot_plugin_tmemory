@@ -1318,7 +1318,8 @@ class TMemoryPlugin(Star):
                     payload={"memory_id": memory_id},
                     conn=conn,
                 )
-                self._delete_vector(memory_id, conn=conn)
+                if self._vec_available:
+                    self._delete_vector(memory_id, conn=conn)
             return deleted
 
     def _list_memories(

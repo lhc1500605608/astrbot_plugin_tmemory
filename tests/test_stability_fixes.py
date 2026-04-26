@@ -84,6 +84,107 @@ async def test_distill_rows_with_llm_uses_mock_provider(plugin_with_ctx):
 
 
 @pytest.mark.asyncio
+async def test_distill_cycle_extracts_user_chat_style(plugin_with_ctx):
+    """蒸馏周期应能保存用户聊天风格，而不是只保存普通事实。"""
+    plugin, ctx = plugin_with_ctx
+
+    await plugin._insert_conversation(
+        canonical_id="style-user",
+        role="user",
+        content="我聊天喜欢先给结论，再用三条短句解释原因。",
+        source_adapter="qq",
+        source_user_id="42",
+        unified_msg_origin="group:1",
+    )
+
+    async def fake_llm_generate(**kwargs):
+        return types.SimpleNamespace(
+            completion_text=(
+                '{"memories": [{"memory": "用户聊天风格是先给结论再用三条短句解释原因", '
+                '"memory_type": "style", "importance": 0.8, "confidence": 0.9, "score": 0.85}]}'
+            ),
+            usage=types.SimpleNamespace(input_other=10, input_cached=0, output=8),
+        )
+
+    ctx.llm_generate = fake_llm_generate
+    plugin._cfg.distill_provider_id = "mock-provider"
+    plugin._cfg.use_independent_distill_model = True
+
+    processed_users, total_memories = await plugin._run_distill_cycle(
+        force=True, trigger="qa-style"
+    )
+
+    with plugin._db() as conn:
+        row = conn.execute(
+            "SELECT memory, memory_type FROM memories WHERE canonical_user_id=?",
+            ("style-user",),
+        ).fetchone()
+
+    assert processed_users == 1
+    assert total_memories == 1
+    assert row["memory_type"] == "style"
+    assert "先给结论" in row["memory"]
+
+
+@pytest.mark.asyncio
+async def test_distill_cycle_does_not_extract_assistant_style_without_user_rows(
+    plugin_with_ctx,
+):
+    """只有 assistant 聊天记录时不应产出用户风格记忆。"""
+    plugin, ctx = plugin_with_ctx
+
+    await plugin._insert_conversation(
+        canonical_id="assistant-only",
+        role="assistant",
+        content="我的回复风格是先给结论，然后用三条短句解释。",
+        source_adapter="qq",
+        source_user_id="42",
+        unified_msg_origin="group:1",
+    )
+
+    async def fake_llm_generate(**kwargs):
+        raise AssertionError("assistant-only rows must not be sent to LLM")
+
+    ctx.llm_generate = fake_llm_generate
+    plugin._cfg.distill_provider_id = "mock-provider"
+    plugin._cfg.use_independent_distill_model = True
+
+    processed_users, total_memories = await plugin._run_distill_cycle(
+        force=True, trigger="qa-assistant-only"
+    )
+
+    with plugin._db() as conn:
+        pending = conn.execute(
+            "SELECT COUNT(*) AS n FROM conversation_cache WHERE canonical_user_id=? AND distilled=0",
+            ("assistant-only",),
+        ).fetchone()["n"]
+        memory_count = conn.execute(
+            "SELECT COUNT(*) AS n FROM memories WHERE canonical_user_id=?",
+            ("assistant-only",),
+        ).fetchone()["n"]
+
+    assert processed_users == 1
+    assert total_memories == 0
+    assert pending == 0
+    assert memory_count == 0
+
+
+def test_validate_distill_output_blocks_assistant_style_attribution(plugin):
+    """校验器应拒绝把 assistant 说话风格保存成用户风格。"""
+    items = [
+        {
+            "memory": "用户聊天风格是像助手一样先给结论再分点说明",
+            "memory_type": "style",
+            "importance": 0.8,
+            "confidence": 0.9,
+            "score": 0.8,
+        }
+    ]
+
+    assert plugin._validate_distill_output(items) == []
+
+
+@pytest.mark.asyncio
 async def test_distill_rows_with_llm_fallback_on_llm_error(plugin_with_ctx):
     """LLM 调用抛出异常时，回退到规则蒸馏并返回非空结果。"""
     plugin, ctx = plugin_with_ctx
