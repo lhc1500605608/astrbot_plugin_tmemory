@@ -191,6 +191,13 @@ class TMemoryWebServer:
         app.router.add_get("/api/style/bindings", self._handle_list_style_bindings)
         app.router.add_post("/api/style/binding/set", self._handle_set_style_binding)
         app.router.add_post("/api/style/binding/remove", self._handle_remove_style_binding)
+        # Temporary style profiles (风格蒸馏临时档案)
+        app.router.add_get("/api/style/temp-profiles", self._handle_list_temp_profiles)
+        app.router.add_post("/api/style/temp-profile/merge", self._handle_merge_temp_profile)
+        app.router.add_post("/api/style/temp-profile/save", self._handle_save_temp_profile)
+        app.router.add_post("/api/style/temp-profile/delete", self._handle_delete_temp_profile)
+        # 测试对话模拟（受 JWT 保护）
+        app.router.add_post("/api/test/conversation", self._handle_test_conversation)
 
     # ── 中间件：IP 白名单 + JWT 鉴权 ─────────────────────────────────────
 
@@ -621,3 +628,78 @@ class TMemoryWebServer:
         admin = self._get_admin()
         removed = admin.remove_style_binding(adapter_name, conversation_id)
         return web.json_response({"ok": removed})
+
+    # ── 临时风格档案管理 ────────────────────────────────────────────
+
+    async def _handle_list_temp_profiles(self, request: web.Request):
+        admin = self._get_admin()
+        source_user = request.query.get("user", "")
+        profiles = admin.list_temp_profiles(source_user)
+        return web.json_response({"temp_profiles": profiles})
+
+    async def _handle_merge_temp_profile(self, request: web.Request):
+        data = await request.json()
+        temp_id = int(data.get("temp_id", 0))
+        target_profile_id = int(data.get("target_profile_id", 0))
+        if not temp_id or not target_profile_id:
+            return web.json_response(
+                {"error": "temp_id and target_profile_id are required"},
+                status=400,
+            )
+        admin = self._get_admin()
+        try:
+            result = admin.merge_temporary_style_profile(temp_id, target_profile_id)
+            return web.json_response({"ok": True, **result})
+        except LookupError as e:
+            return web.json_response({"error": str(e)}, status=404)
+
+    async def _handle_save_temp_profile(self, request: web.Request):
+        data = await request.json()
+        temp_id = int(data.get("temp_id", 0))
+        profile_name = str(data.get("profile_name", "")).strip()
+        if not temp_id:
+            return web.json_response({"error": "temp_id is required"}, status=400)
+        admin = self._get_admin()
+        try:
+            result = admin.save_temporary_style_profile(temp_id, profile_name)
+            return web.json_response({"ok": True, **result})
+        except LookupError as e:
+            return web.json_response({"error": str(e)}, status=404)
+
+    async def _handle_delete_temp_profile(self, request: web.Request):
+        data = await request.json()
+        temp_id = int(data.get("temp_id", 0))
+        if not temp_id:
+            return web.json_response({"error": "temp_id is required"}, status=400)
+        admin = self._get_admin()
+        ok = admin.delete_temp_profile(temp_id)
+        return web.json_response({"ok": ok})
+
+    # ── 测试对话模拟 ──────────────────────────────────────────────────
+
+    async def _handle_test_conversation(self, request: web.Request):
+        """插入一条测试对话到 conversation_cache。
+
+        POST /api/test/conversation
+        Body: {user_id, role, content, source_adapter?, source_user_id?,
+               unified_msg_origin?, scope?, persona_id?}
+        """
+        try:
+            data = await request.json()
+        except Exception:
+            return web.json_response({"error": "invalid json"}, status=400)
+
+        admin = self._get_admin()
+        result = await admin.insert_test_conversation(
+            user_id=str(data.get("user_id", "")).strip(),
+            role=str(data.get("role", "user")).strip().lower(),
+            content=str(data.get("content", "")).strip(),
+            source_adapter=str(data.get("source_adapter", "")).strip(),
+            source_user_id=str(data.get("source_user_id", "")).strip(),
+            unified_msg_origin=str(data.get("unified_msg_origin", "")).strip(),
+            scope=str(data.get("scope", "user")).strip(),
+            persona_id=str(data.get("persona_id", "")).strip(),
+        )
+        if result.get("ok"):
+            return web.json_response(result)
+        return web.json_response(result, status=400)

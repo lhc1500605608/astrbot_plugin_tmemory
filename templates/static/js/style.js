@@ -71,6 +71,7 @@ async function loadStyleData() {
   // v3: 加载人格档案与会话绑定
   loadProfiles();
   loadBindings();
+  loadTempProfiles();
 }
 
 async function toggleStyleInjection(enabled) {
@@ -270,4 +271,86 @@ async function doRemoveBinding(adapter_name, conversation_id) {
   });
   toast('绑定已解除');
   loadBindings();
+}
+
+// ── 临时风格档案管理 ─────────────────────────────────────────────
+
+async function loadTempProfiles() {
+  const user = currentUser || '';
+  const data = await api('/style/temp-profiles' + (user ? '?user=' + encodeURIComponent(user) : ''));
+  const list = document.getElementById('tempProfilesList');
+  if (!data || !data.temp_profiles || data.temp_profiles.length === 0) {
+    list.innerHTML = '<span style="color:var(--text2)">暂无待处理的临时风格档案。</span>';
+    // Load profile options for merge dropdown
+    await loadProfileSelectForTemp();
+    return;
+  }
+  let html = data.temp_profiles.map(p => `
+    <div style="display:flex;align-items:center;gap:8px;padding:4px 0;border-bottom:1px solid var(--border)">
+      <span style="font-size:11px;color:var(--text2)">#${p.id}</span>
+      <span style="font-size:12px">${escHtml((p.memory_text || '').substring(0, 50))}...</span>
+      <span style="font-size:11px;color:var(--text2)">s:${Number(p.score||0).toFixed(1)}</span>
+      <div style="flex:1"></div>
+      <select id="tempMergeSelect${p.id}" class="search-box" style="width:110px;font-size:11px"></select>
+      <button class="btn btn-sm btn-primary" onclick="doMergeTemp(${p.id})">合并</button>
+      <button class="btn btn-sm" onclick="doSaveTemp(${p.id})">另存</button>
+      <button class="btn btn-sm btn-danger" onclick="doDeleteTemp(${p.id})">删除</button>
+    </div>
+  `).join('');
+  list.innerHTML = html;
+  await loadProfileSelectForTemp();
+}
+
+async function loadProfileSelectForTemp() {
+  const profData = await api('/style/profiles');
+  const profiles = profData && profData.profiles ? profData.profiles : [];
+  const selects = document.querySelectorAll('[id^="tempMergeSelect"]');
+  selects.forEach(sel => {
+    if (profiles.length === 0) {
+      sel.innerHTML = '<option value="">无可用档案</option>';
+    } else {
+      sel.innerHTML = '<option value="">选择档案…</option>' +
+        profiles.map(p => `<option value="${p.id}">${escHtml(p.profile_name)}</option>`).join('');
+    }
+  });
+}
+
+async function doMergeTemp(tempId) {
+  const sel = document.getElementById('tempMergeSelect' + tempId);
+  const targetId = parseInt(sel ? sel.value : 0);
+  if (!targetId) { toast('请选择要合并到的目标档案', 'error'); return; }
+  if (!confirm('确定将此临时档案合并到选中的人格档案？')) return;
+  const res = await api('/style/temp-profile/merge', {
+    method: 'POST',
+    body: JSON.stringify({ temp_id: tempId, target_profile_id: targetId })
+  });
+  if (res && res.ok) {
+    toast('已合并到人格档案');
+    loadTempProfiles();
+    loadProfiles();
+  }
+}
+
+async function doSaveTemp(tempId) {
+  const name = prompt('请输入新档案名称（留空自动生成）:');
+  if (name === null) return;
+  const res = await api('/style/temp-profile/save', {
+    method: 'POST',
+    body: JSON.stringify({ temp_id: tempId, profile_name: name || '' })
+  });
+  if (res && res.ok) {
+    toast(`已另存为新档案: ${res.profile_name}`);
+    loadTempProfiles();
+    loadProfiles();
+  }
+}
+
+async function doDeleteTemp(tempId) {
+  if (!confirm('确定删除此临时档案？')) return;
+  await api('/style/temp-profile/delete', {
+    method: 'POST',
+    body: JSON.stringify({ temp_id: tempId })
+  });
+  toast('临时档案已删除');
+  loadTempProfiles();
 }

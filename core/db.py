@@ -113,6 +113,22 @@ CREATE TABLE IF NOT EXISTS style_bindings (
 )
 """
 
+_DDL_STYLE_TEMP_PROFILES = """
+CREATE TABLE IF NOT EXISTS style_temp_profiles (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_user TEXT NOT NULL,
+    source_adapter TEXT NOT NULL,
+    memory_text TEXT NOT NULL,
+    memory_type TEXT NOT NULL DEFAULT 'style',
+    score REAL NOT NULL DEFAULT 0.5,
+    importance REAL NOT NULL DEFAULT 0.5,
+    confidence REAL NOT NULL DEFAULT 0.5,
+    conversation_context TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+)
+"""
+
 _DDL_CONVERSATION_CACHE = """
 CREATE TABLE IF NOT EXISTS conversation_cache (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -317,6 +333,7 @@ class DatabaseManager:
             conn.execute(_DDL_CONVERSATION_CACHE)
             conn.execute(_DDL_STYLE_PROFILES)
             conn.execute(_DDL_STYLE_BINDINGS)
+            conn.execute(_DDL_STYLE_TEMP_PROFILES)
             
             conn.execute("CREATE INDEX IF NOT EXISTS idx_identity_bindings_canonical ON identity_bindings (canonical_user_id)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_style_bindings_lookup ON style_bindings (adapter_name, conversation_id)")

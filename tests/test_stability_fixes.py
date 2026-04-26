@@ -28,6 +28,24 @@ class _MockContext:
         return None
 
 
+class _StyleDistillEvent:
+    """Minimal AstrMessageEvent stub for style_distill regression tests."""
+
+    adapter_name = "qq"
+
+    def __init__(self, message_str: str):
+        self.message_str = message_str
+
+    def get_sender_id(self):
+        return "42"
+
+    def get_group_id(self):
+        return None
+
+    def plain_result(self, text):
+        return text
+
+
 @pytest.fixture()
 def plugin_with_ctx(tmp_path, monkeypatch, plugin_module):
     """与 plugin fixture 等价，但 context 是可写的 _MockContext。"""
@@ -182,6 +200,79 @@ def test_validate_distill_output_blocks_assistant_style_attribution(plugin):
     ]
 
     assert plugin._validate_distill_output(items) == []
+
+
+@pytest.mark.asyncio
+async def test_style_distill_collection_message_is_captured_without_reply(plugin):
+    """style_distill enabled should collect a normal message without producing a bot reply."""
+    plugin._cfg.enable_auto_capture = True
+    plugin._cfg.enable_style_distill = True
+
+    result = await plugin.on_any_message(
+        _StyleDistillEvent("我写作时喜欢先说结论，再用短句补充理由。")
+    )
+
+    rows = plugin._fetch_pending_rows("qq:42", 10)
+    assert result is None
+    assert len(rows) == 1
+    assert rows[0]["role"] == "user"
+    assert "先说结论" in rows[0]["content"]
+    assert plugin._list_memories("qq:42", limit=10) == []
+
+
+@pytest.mark.asyncio
+async def test_style_distill_creates_temporary_profile_before_manual_archive(plugin_with_ctx):
+    """Distilled style material should land in a temporary profile before merge/save."""
+    plugin, ctx = plugin_with_ctx
+    plugin._cfg.enable_style_distill = True
+    plugin._cfg.distill_provider_id = "mock-provider"
+    plugin._cfg.use_independent_distill_model = True
+
+    await plugin._insert_conversation(
+        canonical_id="qq:42",
+        role="user",
+        content="我表达习惯先给结论，再分三点说明。",
+        source_adapter="qq",
+        source_user_id="42",
+        unified_msg_origin="group:1",
+    )
+
+    async def fake_llm_generate(**kwargs):
+        return types.SimpleNamespace(
+            completion_text=(
+                '{"memories": [{"memory": "用户表达习惯先给结论再分三点说明", '
+                '"memory_type": "style", "importance": 0.8, "confidence": 0.9, "score": 0.85}]}'
+            ),
+            usage=types.SimpleNamespace(input_other=10, input_cached=0, output=8),
+        )
+
+    ctx.llm_generate = fake_llm_generate
+
+    await plugin._run_distill_cycle(force=True, trigger="qa-style-temp-profile")
+
+    with plugin._db() as conn:
+        temp_tables = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='style_temp_profiles'"
+        ).fetchall()
+        temp_rows = []
+        if temp_tables:
+            temp_rows = conn.execute(
+                "SELECT * FROM style_temp_profiles WHERE source_user=?",
+                ("qq:42",),
+            ).fetchall()
+
+    assert temp_tables, "missing temporary style profile storage"
+    assert temp_rows, "style_distill output was not stored as a temporary profile"
+
+
+def test_style_temporary_profile_can_merge_and_save_as_archive(plugin):
+    """Temporary style profiles should support merge into existing and save-as-new flows."""
+    from astrbot_plugin_tmemory.core.admin_service import AdminService
+
+    admin = AdminService(plugin)
+
+    assert hasattr(admin, "merge_temporary_style_profile")
+    assert hasattr(admin, "save_temporary_style_profile")
 
 
 @pytest.mark.asyncio

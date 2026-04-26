@@ -39,10 +39,11 @@ case "$cmd" in
     fi
 
     echo "[tmemory-docker] Starting container: $CONTAINER_NAME"
-    echo "[tmemory-docker] Port mapping: host $HOST_PORT -> container $CONTAINER_PORT"
+    echo "[tmemory-docker] Port mapping: host $HOST_PORT->container $CONTAINER_PORT, host 9966->container 9966"
     docker run -d \
       --name "$CONTAINER_NAME" \
       -p "${HOST_PORT}:${CONTAINER_PORT}" \
+      -p "9966:9966" \
       -v "${DATA_DIR}:/AstrBot/data" \
       "$IMAGE"
 

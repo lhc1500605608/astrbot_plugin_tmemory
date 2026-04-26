@@ -198,6 +198,63 @@ class StyleManager:
             style_summary=style_summary,
         )
 
+    # ── Temporary Profiles (staging for style_distill output) ─────────
+
+    def insert_temp_profile(
+        self,
+        source_user: str,
+        source_adapter: str,
+        memory_text: str,
+        memory_type: str = "style",
+        score: float = 0.5,
+        importance: float = 0.5,
+        confidence: float = 0.5,
+        conversation_context: str = "",
+    ) -> int:
+        now = self._now()
+        with self._db() as conn:
+            cur = conn.execute(
+                """INSERT INTO style_temp_profiles(
+                       source_user, source_adapter, memory_text, memory_type,
+                       score, importance, confidence, conversation_context,
+                       created_at, updated_at)
+                   VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (source_user, source_adapter, memory_text, memory_type,
+                 score, importance, confidence, conversation_context,
+                 now, now),
+            )
+            return int(cur.lastrowid or 0)
+
+    def list_temp_profiles(self, source_user: str = "") -> List[Dict[str, Any]]:
+        with self._db() as conn:
+            if source_user:
+                rows = conn.execute(
+                    "SELECT * FROM style_temp_profiles WHERE source_user=? "
+                    "ORDER BY created_at DESC",
+                    (source_user,),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM style_temp_profiles ORDER BY created_at DESC"
+                ).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_temp_profile(self, temp_id: int) -> Optional[Dict[str, Any]]:
+        with self._db() as conn:
+            row = conn.execute(
+                "SELECT * FROM style_temp_profiles WHERE id=?",
+                (temp_id,),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def delete_temp_profile(self, temp_id: int) -> bool:
+        with self._db() as conn:
+            cur = conn.execute(
+                "DELETE FROM style_temp_profiles WHERE id=?",
+                (temp_id,),
+            )
+            return cur.rowcount > 0
+
     def list_bindings(self) -> List[Dict[str, Any]]:
         with self._db() as conn:
             rows = conn.execute(
