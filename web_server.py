@@ -543,7 +543,7 @@ class TMemoryWebServer:
             for k, v in data.items():
                 current_config[k] = v
 
-            ctx.save_config(current_config)
+            current_config.save_config()
             from .core.config import parse_config
             self.plugin._cfg = parse_config(current_config)
 

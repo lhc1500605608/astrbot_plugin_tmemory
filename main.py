@@ -1857,7 +1857,7 @@ class TMemoryPlugin(Star):
             style_settings["enable_style_distill"] = enabled
             current["style_distill_settings"] = style_settings
             if ctx:
-                ctx.save_config(current)
+                current.save_config()
         except Exception:
             pass
         yield event.plain_result(f"风格蒸馏采集已{'开启' if enabled else '关闭'}（不影响普通记忆整理）。")
