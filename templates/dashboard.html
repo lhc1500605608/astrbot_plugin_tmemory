@@ -68,6 +68,7 @@
         <button onclick="switchTab('refine',this)">✂️ 手动精馏</button>
         <button onclick="switchTab('identity',this)">👥 用户管理</button>
         <button onclick="switchTab('health',this)">💊 系统健康</button>
+        <button onclick="switchTab('style',this)">🎨 聊天风格</button>
       </div>
 
       <!-- Mindmap View -->
@@ -205,6 +206,63 @@
         </div>
       </div>
 
+      <!-- Style View -->
+      <div class="table-panel" id="panelStyle" style="display:none">
+        <div style="margin-bottom:12px;padding:12px;background:var(--surface2);border-radius:var(--radius);display:flex;flex-wrap:wrap;gap:16px;align-items:center;">
+          <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer">
+            <input type="checkbox" id="styleEnableSwitch" onchange="toggleStyleDistill(this.checked)">
+            <strong>启用聊天风格蒸馏</strong>
+          </label>
+          <div style="width:1px;height:24px;background:var(--border)"></div>
+          <div style="display:flex;align-items:center;gap:6px;font-size:13px">
+            <span style="color:var(--text2)">置信度阈值:</span>
+            <input type="number" id="styleMinConf" class="search-box" style="width:70px" step="0.05" min="0" max="1" onchange="updateStyleConfig('style_min_confidence', this.value)">
+          </div>
+          <div style="display:flex;align-items:center;gap:6px;font-size:13px">
+            <span style="color:var(--text2)">重要度阈值:</span>
+            <input type="number" id="styleMinImp" class="search-box" style="width:70px" step="0.05" min="0" max="1" onchange="updateStyleConfig('style_min_importance', this.value)">
+          </div>
+          <div style="width:1px;height:24px;background:var(--border)"></div>
+          <div style="display:flex;align-items:center;gap:6px;font-size:13px">
+            <span style="color:var(--text2)">作用范围:</span>
+            <select id="styleScopeConfig" class="search-box" style="width:90px" onchange="updateGlobalConfig('memory_scope', this.value)">
+              <option value="user">全局 (User)</option>
+              <option value="session">单聊 (Session)</option>
+            </select>
+          </div>
+          <div style="flex:1"></div>
+          <button class="btn btn-sm" onclick="forceStyleDistill()">🚀 强制当前用户风格蒸馏</button>
+        </div>
+        <div style="margin-bottom:12px;display:flex;gap:8px;align-items:center;justify-content:space-between">
+          <div style="display:flex;gap:8px;align-items:center">
+            <span style="font-size:13px;color:var(--text2)">全局风格记忆:</span>
+            <span id="styleTotal" style="font-weight:600;color:var(--accent)">-</span>
+            <span style="font-size:12px;color:var(--text2)">条 (</span>
+            <span id="styleUsers" style="font-weight:600;color:var(--accent)">-</span>
+            <span style="font-size:12px;color:var(--text2)">位用户) 平均置信度:</span>
+            <span id="styleAvgConf" style="font-weight:600;color:var(--accent)">-</span>
+          </div>
+          <div style="display:flex;gap:8px;align-items:center">
+            <input class="search-box" style="max-width:220px" placeholder="搜索风格记忆…" oninput="filterStyle(this.value)">
+          </div>
+        </div>
+        <table class="mem-table">
+          <thead>
+            <tr>
+              <th style="width:40px">ID</th>
+              <th style="width:100px">用户</th>
+              <th>风格记忆</th>
+              <th style="width:60px">分数</th>
+              <th style="width:60px">重要度</th>
+              <th style="width:60px">置信度</th>
+              <th style="width:30px">📌</th>
+              <th style="width:80px">操作</th>
+            </tr>
+          </thead>
+          <tbody id="styleTableBody"></tbody>
+        </table>
+      </div>
+
       <!-- Identity View -->
       <div class="table-panel" id="panelIdentity" style="display:none">
         <div style="margin-bottom:12px;display:flex;gap:8px;align-items:center;">
@@ -314,6 +372,7 @@
 <script src="/static/js/health.js"></script>
 <script src="/static/js/distill.js"></script>
 <script src="/static/js/refine.js"></script>
+<script src="/static/js/style.js"></script>
 <script src="/static/js/main.js"></script>
 </body>
 </html>

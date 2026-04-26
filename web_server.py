@@ -179,6 +179,10 @@ class TMemoryWebServer:
         app.router.add_post("/api/memory/refine", self._handle_memory_refine)
         app.router.add_post("/api/memory/merge", self._handle_memory_merge)
         app.router.add_post("/api/memory/split", self._handle_memory_split)
+        app.router.add_get("/api/style/memories", self._handle_get_style_memories)
+        app.router.add_get("/api/style/stats", self._handle_get_style_stats)
+        app.router.add_get("/api/config", self._handle_get_config)
+        app.router.add_patch("/api/config", self._handle_update_config)
 
     # ── 中间件：IP 白名单 + JWT 鉴权 ─────────────────────────────────────
 
@@ -470,3 +474,53 @@ class TMemoryWebServer:
         except ValueError as e:
             return web.json_response({"error": str(e)}, status=400)
         return web.json_response({"ok": True, **result})
+
+    # ── 聊天风格蒸馏 ─────────────────────────────────────────────────────
+
+    async def _handle_get_style_memories(self, request: web.Request):
+        admin = self._get_admin()
+        user = request.query.get("user", "")
+        memories = admin.get_style_memories(user)
+        return web.json_response({"memories": memories})
+
+    async def _handle_get_style_stats(self, request: web.Request):
+        admin = self._get_admin()
+        stats = admin.get_style_stats()
+        return web.json_response(stats)
+
+    async def _handle_get_config(self, request: web.Request):
+        self._get_admin()  # ensure auth
+        keys = request.query.get("keys", "").split(",")
+        keys = [k.strip() for k in keys if k.strip()]
+        
+        ctx = self._plugin.context
+        if not ctx:
+            return web.json_response({"error": "Plugin not initialized"}, status=500)
+            
+        current_config = ctx.get_config()
+        if not keys:
+            return web.json_response(current_config)
+            
+        return web.json_response({k: current_config.get(k) for k in keys if k in current_config})
+
+    async def _handle_update_config(self, request: web.Request):
+        self._get_admin()  # ensure auth
+        try:
+            data = await request.json()
+            ctx = self._plugin.context
+            if not ctx:
+                return web.json_response({"error": "Plugin not initialized"}, status=500)
+                
+            current_config = ctx.get_config()
+            # update only provided keys
+            for k, v in data.items():
+                current_config[k] = v
+                
+            ctx.save_config(current_config)
+            # Notify plugin to reload config
+            from core.config import parse_config
+            self._plugin.cfg = parse_config(current_config)
+            
+            return web.json_response({"status": "ok"})
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=400)
