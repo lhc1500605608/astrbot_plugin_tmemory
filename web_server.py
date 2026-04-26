@@ -493,33 +493,33 @@ class TMemoryWebServer:
         keys = request.query.get("keys", "").split(",")
         keys = [k.strip() for k in keys if k.strip()]
         
-        ctx = self._plugin.context
+        ctx = self.plugin.context
         if not ctx:
             return web.json_response({"error": "Plugin not initialized"}, status=500)
-            
+
         current_config = ctx.get_config()
         if not keys:
             return web.json_response(current_config)
-            
+
         return web.json_response({k: current_config.get(k) for k in keys if k in current_config})
 
     async def _handle_update_config(self, request: web.Request):
         self._get_admin()  # ensure auth
         try:
             data = await request.json()
-            ctx = self._plugin.context
+            ctx = self.plugin.context
             if not ctx:
                 return web.json_response({"error": "Plugin not initialized"}, status=500)
-                
+
             current_config = ctx.get_config()
             # update only provided keys
             for k, v in data.items():
                 current_config[k] = v
-                
+
             ctx.save_config(current_config)
             # Notify plugin to reload config
             from core.config import parse_config
-            self._plugin.cfg = parse_config(current_config)
+            self.plugin.cfg = parse_config(current_config)
             
             return web.json_response({"status": "ok"})
         except Exception as e:
