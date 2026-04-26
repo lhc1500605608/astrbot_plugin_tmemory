@@ -6,6 +6,8 @@ services:
     container_name: astrbot_tmemory_test
     restart: unless-stopped
     ports:
-      - "6186:6185" # AstrBot WebUI
+      - "6186:6185"   # AstrBot WebUI
+      - "9966:9966"   # tmemory WebUI (when webui_enabled=true)
     volumes:
       - ./data:/AstrBot/data
+      - .:/AstrBot/data/plugins/astrbot_plugin_tmemory

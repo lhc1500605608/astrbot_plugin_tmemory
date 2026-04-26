@@ -11,11 +11,21 @@ class IdentityManager:
     def _now(self) -> str:
         return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
 
+    @staticmethod
+    def _platform_str(val) -> str:
+        try:
+            from astrbot.core.platform.platform_metadata import PlatformMetadata
+            if isinstance(val, PlatformMetadata):
+                return val.id or val.name
+        except ImportError:
+            pass
+        return str(val)
+
     def get_adapter_name(self, event: AstrMessageEvent) -> str:
         for attr in ["adapter_name", "platform", "platform_id"]:
             val = getattr(event, attr, None)
             if val:
-                return str(val)
+                return self._platform_str(val)
         return "unknown"
 
     def get_adapter_user_id(self, event: AstrMessageEvent) -> str:

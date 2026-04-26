@@ -1237,6 +1237,16 @@ class TMemoryPlugin(Star):
         except Exception:
             return ""
 
+    @staticmethod
+    def _platform_str(val):
+        try:
+            from astrbot.core.platform.platform_metadata import PlatformMetadata  # type: ignore
+            if isinstance(val, PlatformMetadata):
+                return val.id or val.name
+        except ImportError:
+            pass
+        return str(val)
+
     def _get_adapter_name(self, event: AstrMessageEvent) -> str:
         for name in ("get_platform_name", "get_adapter_name", "get_client_name"):
             fn = getattr(event, name, None)
@@ -1248,10 +1258,10 @@ class TMemoryPlugin(Star):
                 except Exception:
                     pass
 
-        for attr in ("platform_name", "adapter_name", "adapter"):
+        for attr in ("platform_name", "adapter_name", "adapter", "platform"):
             val = getattr(event, attr, None)
             if val:
-                return str(val)
+                return self._platform_str(val)
 
         return "unknown_adapter"
 

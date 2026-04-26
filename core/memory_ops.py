@@ -313,14 +313,31 @@ class MemoryOps:
                     total_memories += 1
 
                 # 风格蒸馏 v3: 产出 style 记忆后自动创建人格档案
-                if has_style:
+                if has_style and self.plugin._cfg.enable_style_distill:
                     try:
                         source_adapter = str(rows[0].get("source_adapter", ""))
+                        # 将 style 记忆写入临时档案（供用户合并/另存）
+                        for item in valid_items:
+                            if str(item.get("memory_type", "")) == "style":
+                                mem_text = self.plugin._sanitize_text(
+                                    self.plugin._normalize_text(str(item.get("memory", "")))
+                                )
+                                if mem_text:
+                                    self.plugin._style_mgr.insert_temp_profile(
+                                        source_user=canonical_id,
+                                        source_adapter=source_adapter,
+                                        memory_text=mem_text,
+                                        memory_type="style",
+                                        score=self.plugin._clamp01(item.get("score", 0.7)),
+                                        importance=self.plugin._clamp01(item.get("importance", 0.6)),
+                                        confidence=self.plugin._clamp01(item.get("confidence", 0.7)),
+                                        conversation_context=str(rows[0].get("content", ""))[:500],
+                                    )
                         self.plugin._style_mgr.auto_create_profile_if_ready(
                             canonical_id, source_adapter
                         )
-                    except Exception:
-                        pass
+                    except Exception as _te:
+                        logger.warning("[tmemory] temp profile insert failed: %s", _te)
 
                 self.plugin._mark_rows_distilled([int(r["id"]) for r in rows])
                 self.plugin._optimize_context(canonical_id)

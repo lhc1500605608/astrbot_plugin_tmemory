@@ -402,6 +402,88 @@ class TestAdapterUserId:
         assert plugin._get_adapter_user_id(_Event()) == "alice"
 
 
+class TestPlatformMetadataRepr:
+    """Regression: PlatformMetadata dataclass repr should never leak as adapter name."""
+
+    @staticmethod
+    def _inject_platform_metadata_class():
+        """Ensure ``astrbot.core.platform.platform_metadata.PlatformMetadata`` is
+        importable so that _platform_str's isinstance check actually fires.
+        """
+        import dataclasses
+        import sys
+        import types
+
+        if "astrbot.core" not in sys.modules:
+            astrbot_core = types.ModuleType("astrbot.core")
+            sys.modules["astrbot.core"] = astrbot_core
+        if "astrbot.core.platform" not in sys.modules:
+            astrbot_platform = types.ModuleType("astrbot.core.platform")
+            sys.modules["astrbot.core.platform"] = astrbot_platform
+        pkg = types.ModuleType("astrbot.core.platform.platform_metadata")
+
+        @dataclasses.dataclass
+        class PlatformMetadata:
+            name: str
+            description: str
+            id: str
+
+        pkg.PlatformMetadata = PlatformMetadata
+        sys.modules["astrbot.core.platform.platform_metadata"] = pkg
+        return PlatformMetadata
+
+    def test_identity_get_adapter_name_extracts_platform_id(self, plugin):
+        PM = self._inject_platform_metadata_class()
+        meta = PM(name="aiocqhttp", description="QQ适配器", id="qq_prod_1")
+        assert meta.name in repr(meta) and meta.id in repr(meta)  # verbose dataclass repr
+
+        class _Event:
+            adapter_name = None
+            platform = meta
+            platform_id = None
+
+        name = plugin._identity_mgr.get_adapter_name(_Event())
+        assert name == "qq_prod_1"
+        assert "PlatformMetadata" not in name
+
+    def test_identity_get_adapter_name_falls_back_platform_id_str(self, plugin):
+        class _Event:
+            adapter_name = None
+            platform = None
+            platform_id = "custom_platform_42"
+
+        name = plugin._identity_mgr.get_adapter_name(_Event())
+        assert name == "custom_platform_42"
+
+    def test_main_get_adapter_name_fallback_handles_platform_metadata(self, plugin):
+        PM = self._inject_platform_metadata_class()
+        meta = PM(name="discord", description="Discord适配器", id="dc_bot_7")
+
+        class _Event:
+            pass
+
+        event = _Event()
+        setattr(event, "platform", meta)
+
+        name = plugin._get_adapter_name(event)
+        assert name == "dc_bot_7"
+        assert "PlatformMetadata" not in name
+
+    def test_main_get_adapter_name_prefers_method_over_platform_attr(self, plugin):
+        PM = self._inject_platform_metadata_class()
+        meta = PM(name="slack", description="Slack适配器", id="slack_9")
+
+        class _Event:
+            def get_platform_name(self):
+                return "slack"
+
+            platform = meta
+
+        name = plugin._get_adapter_name(_Event())
+        assert name == "slack"
+        assert "PlatformMetadata" not in name
+
+
 # =========================================================================
 # 内部方法
 # =========================================================================

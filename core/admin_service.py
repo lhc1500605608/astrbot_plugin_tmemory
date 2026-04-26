@@ -24,6 +24,8 @@ if TYPE_CHECKING:
     from core.identity import IdentityManager
     from core.utils import MemoryLogger
 
+from .style_manager import _build_default_prompt_supplement
+
 logger = logging.getLogger("astrbot")
 
 # ── 纯工具函数（无状态） ─────────────────────────────────────────────
@@ -324,6 +326,97 @@ class AdminService:
     def remove_style_binding(self, adapter_name: str, conversation_id: str) -> bool:
         return self._plugin._style_mgr.remove_binding(adapter_name, conversation_id)
 
+    # ── Temporary Style Profiles ──────────────────────────────────────
+
+    def list_temp_profiles(self, source_user: str = "") -> List[Dict[str, Any]]:
+        return self._plugin._style_mgr.list_temp_profiles(source_user)
+
+    def merge_temporary_style_profile(
+        self, temp_id: int, target_profile_id: int
+    ) -> Dict[str, Any]:
+        """将临时档案合并到现有档案，返回更新后的档案。"""
+        temp = self._plugin._style_mgr.get_temp_profile(temp_id)
+        if not temp:
+            raise LookupError("temporary profile not found")
+
+        target = self._plugin._style_mgr.get_profile(target_profile_id)
+        if not target:
+            raise LookupError("target profile not found")
+
+        # 追加 style 文本到现有 prompt_supplement
+        existing = str(target.get("prompt_supplement", ""))
+        new_memory = str(temp.get("memory_text", ""))
+        if new_memory not in existing:
+            merged = existing + ("\n" if existing else "") + f"- {new_memory}"
+        else:
+            merged = existing
+
+        self._plugin._style_mgr.update_profile(
+            target_profile_id,
+            prompt_supplement=merged[:2000],
+            style_summary=(str(target.get("style_summary", "")) + "; " + new_memory)[:500],
+        )
+
+        # 清理临时档案
+        self._plugin._style_mgr.delete_temp_profile(temp_id)
+
+        return {
+            "merged": True,
+            "target_profile_id": target_profile_id,
+            "temp_id": temp_id,
+        }
+
+    def save_temporary_style_profile(
+        self, temp_id: int, profile_name: str = ""
+    ) -> Dict[str, Any]:
+        """将临时档案另存为新的独立档案。"""
+        temp = self._plugin._style_mgr.get_temp_profile(temp_id)
+        if not temp:
+            raise LookupError("temporary profile not found")
+
+        source_user = str(temp.get("source_user", ""))
+        source_adapter = str(temp.get("source_adapter", ""))
+        memory_text = str(temp.get("memory_text", ""))
+
+        name = profile_name.strip() if profile_name else f"{source_user}-style-{temp_id}"
+        prompt_supplement = _build_default_prompt_supplement(memory_text)
+
+        pid = self._plugin._style_mgr.create_profile(
+            profile_name=name,
+            prompt_supplement=prompt_supplement,
+            description=f"从临时档案保存 (temp_id={temp_id})",
+            source_user=source_user,
+            source_adapter=source_adapter,
+            style_summary=memory_text,
+        )
+
+        # 同时将 style 内容写入 memories 表
+        from .memory_ops import MemoryOps
+        MemoryOps(self._plugin).insert_memory(
+            canonical_id=source_user,
+            adapter=source_adapter,
+            adapter_user=source_user,
+            memory=memory_text,
+            score=float(temp.get("score", 0.7)),
+            memory_type="style",
+            importance=float(temp.get("importance", 0.6)),
+            confidence=float(temp.get("confidence", 0.7)),
+            source_channel="style_temp_save",
+        )
+
+        # 清理临时档案
+        self._plugin._style_mgr.delete_temp_profile(temp_id)
+
+        return {
+            "saved": True,
+            "profile_id": pid,
+            "profile_name": name,
+            "temp_id": temp_id,
+        }
+
+    def delete_temp_profile(self, temp_id: int) -> bool:
+        return self._plugin._style_mgr.delete_temp_profile(temp_id)
+
     # =====================================================================
     # Batch 1.2 — 低风险写操作
     # =====================================================================
@@ -428,6 +521,39 @@ class AdminService:
     # =====================================================================
     # Batch 1.3 — 高风险写操作
     # =====================================================================
+
+    async def insert_test_conversation(
+        self,
+        user_id: str,
+        role: str,
+        content: str,
+        source_adapter: str = "webui_test",
+        source_user_id: str = "",
+        unified_msg_origin: str = "",
+        scope: str = "user",
+        persona_id: str = "",
+    ) -> Dict[str, Any]:
+        """插入一条测试对话到 conversation_cache，用于 WebUI 模拟链路。
+
+        复用 plugin._insert_conversation 路径，
+        仅写入缓存，不触发蒸馏、不注入记忆。
+        """
+        if not user_id or not content or not role:
+            return {"ok": False, "error": "user_id, role, content are required"}
+        if role not in ("user", "assistant"):
+            return {"ok": False, "error": "role must be user or assistant"}
+
+        await self._plugin._insert_conversation(
+            canonical_id=user_id,
+            role=role,
+            content=content,
+            source_adapter=source_adapter or "webui_test",
+            source_user_id=source_user_id or user_id,
+            unified_msg_origin=unified_msg_origin or f"webui_test:{user_id}",
+            scope=scope or "user",
+            persona_id=persona_id or "",
+        )
+        return {"ok": True}
 
     async def trigger_distill(self) -> Dict[str, Any]:
         """手动触发蒸馏。"""
