@@ -30,6 +30,11 @@ UNSAFE_PATTERNS = [
         re.IGNORECASE,
     ),
 ]
+ASSISTANT_STYLE_ATTRIBUTION_RE = re.compile(
+    r"(助手|assistant|ai|模型|机器人).*(风格|语气|回复|说话)|"
+    r"(风格|语气|回复|说话).*(助手|assistant|ai|模型|机器人)",
+    re.IGNORECASE,
+)
 
 
 def is_junk_memory(text: str) -> bool:
@@ -56,8 +61,9 @@ def is_unsafe_memory(text: str) -> bool:
 def validate_distill_output(
     plugin, items: List[Dict[str, object]]
 ) -> List[Dict[str, object]]:
-    """校验 LLM 蒸馏输出:安全审计 + 废话过滤 + 低置信度剪枝。"""
+    """校验 LLM 蒸馏输出:安全审计 + 废话过滤 + 低置信度剪枝 + 风格专项过滤。"""
     valid: List[Dict[str, object]] = []
+    cfg = plugin._cfg
     for item in items:
         mem = str(item.get("memory", "")).strip()
 
@@ -78,6 +84,16 @@ def validate_distill_output(
         mtype = str(item.get("memory_type", ""))
         if mtype not in {"preference", "fact", "task", "restriction", "style"}:
             item["memory_type"] = plugin._distill_mgr.infer_memory_type(mem)
+            mtype = str(item.get("memory_type", ""))
+
+        if mtype == "style" and ASSISTANT_STYLE_ATTRIBUTION_RE.search(mem):
+            logger.warning("[tmemory] assistant style attribution blocked: %s", mem[:60])
+            continue
+
+        # 风格蒸馏开关：关闭时跳过所有 style 类型记忆
+        if mtype == "style" and not cfg.enable_style_distill:
+            logger.debug("[tmemory] style distill disabled, skipped: %s", mem[:60])
+            continue
 
         for field in ("score", "importance", "confidence"):
             try:
@@ -86,21 +102,37 @@ def validate_distill_output(
             except (TypeError, ValueError):
                 item[field] = 0.5
 
-        if float(item.get("confidence", 0)) < 0.4:
-            logger.debug(
-                "[tmemory] low confidence pruned: %.2f %s",
-                item["confidence"],
-                mem[:60],
-            )
-            continue
+        confidence = float(item.get("confidence", 0))
+        importance = float(item.get("importance", 0))
 
-        if float(item.get("importance", 0)) < 0.3:
-            logger.debug(
-                "[tmemory] low importance pruned: %.2f %s",
-                item["importance"],
-                mem[:60],
-            )
-            continue
+        # 风格记忆使用专属阈值
+        if mtype == "style":
+            if confidence < cfg.style_min_confidence:
+                logger.debug(
+                    "[tmemory] style low confidence pruned: %.2f < %.2f %s",
+                    confidence, cfg.style_min_confidence, mem[:60],
+                )
+                continue
+            if importance < cfg.style_min_importance:
+                logger.debug(
+                    "[tmemory] style low importance pruned: %.2f < %.2f %s",
+                    importance, cfg.style_min_importance, mem[:60],
+                )
+                continue
+        else:
+            if confidence < 0.4:
+                logger.debug(
+                    "[tmemory] low confidence pruned: %.2f %s",
+                    confidence, mem[:60],
+                )
+                continue
+
+            if importance < 0.3:
+                logger.debug(
+                    "[tmemory] low importance pruned: %.2f %s",
+                    importance, mem[:60],
+                )
+                continue
 
         valid.append(item)
     return valid

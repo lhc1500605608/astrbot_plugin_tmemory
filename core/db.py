@@ -73,14 +73,14 @@ CREATE TABLE IF NOT EXISTS identity_bindings (
 _DDL_DISTILL_HISTORY = """
 CREATE TABLE IF NOT EXISTS distill_history (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    run_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    canonical_user_id TEXT NOT NULL,
-    persona_id TEXT NOT NULL DEFAULT '',
-    scope TEXT NOT NULL DEFAULT 'user',
-    status TEXT NOT NULL,
-    messages_processed INTEGER NOT NULL DEFAULT 0,
-    memories_generated INTEGER NOT NULL DEFAULT 0,
-    error_msg TEXT,
+    started_at TEXT NOT NULL,
+    finished_at TEXT NOT NULL,
+    trigger_type TEXT NOT NULL,
+    users_processed INTEGER NOT NULL DEFAULT 0,
+    memories_created INTEGER NOT NULL DEFAULT 0,
+    users_failed INTEGER NOT NULL DEFAULT 0,
+    errors TEXT NOT NULL DEFAULT '[]',
+    duration_sec REAL NOT NULL DEFAULT 0,
     tokens_input INTEGER NOT NULL DEFAULT -1,
     tokens_output INTEGER NOT NULL DEFAULT -1,
     tokens_total INTEGER NOT NULL DEFAULT -1
@@ -239,16 +239,28 @@ class DatabaseManager:
         try:
             existing_dh = {
                 row["name"]
-                for row in conn.execute(f"PRAGMA table_info(distill_history)").fetchall()
+                for row in conn.execute("PRAGMA table_info(distill_history)").fetchall()
             }
-            if existing_dh:  # Only migrate if table exists
-                for col, ddl in {
-                    "tokens_input": "INTEGER NOT NULL DEFAULT -1",
-                    "tokens_output": "INTEGER NOT NULL DEFAULT -1",
-                    "tokens_total": "INTEGER NOT NULL DEFAULT -1",
-                }.items():
-                    if col not in existing_dh:
-                        conn.execute(f"ALTER TABLE distill_history ADD COLUMN {col} {ddl}")
+            if existing_dh:
+                # Detect old schema by checking for old column names
+                old_markers = {
+                    "status", "run_at", "canonical_user_id", "persona_id",
+                    "scope", "messages_processed", "memories_generated", "error_msg",
+                }
+                if existing_dh & old_markers:
+                    logger.info("[tmemory] Migrating distill_history from old schema to new schema...")
+                    conn.execute("DROP TABLE IF EXISTS distill_history_old")
+                    conn.execute("ALTER TABLE distill_history RENAME TO distill_history_old")
+                    conn.execute(_DDL_DISTILL_HISTORY)
+                    logger.info("[tmemory] distill_history migrated, old data preserved in distill_history_old")
+                else:
+                    for col, ddl in {
+                        "tokens_input": "INTEGER NOT NULL DEFAULT -1",
+                        "tokens_output": "INTEGER NOT NULL DEFAULT -1",
+                        "tokens_total": "INTEGER NOT NULL DEFAULT -1",
+                    }.items():
+                        if col not in existing_dh:
+                            conn.execute(f"ALTER TABLE distill_history ADD COLUMN {col} {ddl}")
         except Exception as e:
             logger.warning("[tmemory] Failed to migrate distill_history schema: %s", e)
 

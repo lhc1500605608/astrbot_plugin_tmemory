@@ -219,6 +219,61 @@ class AdminService:
             for r in rows
         ]
 
+    def get_style_memories(self, user: str) -> List[Dict[str, Any]]:
+        """返回指定用户的 style 类型记忆列表。"""
+        if not user:
+            return []
+        with self._db() as conn:
+            rows = conn.execute(
+                """
+                SELECT id, memory_type, memory, score, importance, confidence,
+                       reinforce_count, is_active,
+                       COALESCE(is_pinned, 0) AS is_pinned,
+                       last_seen_at, created_at, updated_at
+                FROM memories WHERE canonical_user_id = ? AND is_active = 1
+                  AND memory_type = 'style'
+                ORDER BY importance DESC, score DESC, updated_at DESC LIMIT 100
+                """,
+                (user,),
+            ).fetchall()
+        return [
+            {
+                "id": int(r["id"]),
+                "memory_type": str(r["memory_type"]),
+                "memory": str(r["memory"]),
+                "score": float(r["score"]),
+                "importance": float(r["importance"]),
+                "confidence": float(r["confidence"]),
+                "reinforce_count": int(r["reinforce_count"]),
+                "is_active": int(r["is_active"]),
+                "is_pinned": int(r["is_pinned"]),
+                "last_seen_at": str(r["last_seen_at"]),
+                "created_at": str(r["created_at"]),
+                "updated_at": str(r["updated_at"]),
+            }
+            for r in rows
+        ]
+
+    def get_style_stats(self) -> Dict[str, Any]:
+        """返回聊天风格记忆的全局统计。"""
+        with self._db() as conn:
+            total = conn.execute(
+                "SELECT COUNT(1) AS n FROM memories WHERE memory_type='style' AND is_active=1"
+            ).fetchone()
+            users = conn.execute(
+                "SELECT COUNT(DISTINCT canonical_user_id) AS n FROM memories"
+                " WHERE memory_type='style' AND is_active=1"
+            ).fetchone()
+            avg_conf = conn.execute(
+                "SELECT AVG(confidence) AS v FROM memories"
+                " WHERE memory_type='style' AND is_active=1"
+            ).fetchone()
+        return {
+            "total_style_memories": int(total["n"] if total else 0),
+            "style_users": int(users["n"] if users else 0),
+            "avg_confidence": round(float(avg_conf["v"] if avg_conf and avg_conf["v"] else 0), 2),
+        }
+
     def get_distill_history(self, limit: int = 30) -> List[Dict]:
         """返回蒸馏历史记录。"""
         from .distill_validator import get_distill_history

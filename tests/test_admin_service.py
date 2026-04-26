@@ -295,6 +295,76 @@ class TestPurgeUser:
         assert result["memories"] >= 1
         assert admin.get_memories("purge_user") == []
 
+    @pytest.mark.asyncio
+    async def test_purge_removes_user_from_all_webui_user_sources(self, admin, plugin):
+        plugin._identity_mgr.bind_identity("qq", "purge-source", "purge_user")
+        plugin._insert_memory(
+            canonical_id="purge_user",
+            adapter="qq",
+            adapter_user="purge-source",
+            memory="待删除用户的记忆",
+            score=0.8,
+            memory_type="fact",
+            importance=0.7,
+            confidence=0.9,
+        )
+        await plugin._insert_conversation(
+            canonical_id="purge_user",
+            role="user",
+            content="待删除用户的缓存",
+            source_adapter="qq",
+            source_user_id="purge-source",
+            unified_msg_origin="group:1",
+        )
+        with plugin._db() as conn:
+            conn.execute(
+                "INSERT INTO conversations(canonical_user_id, role, content, timestamp) VALUES(?, ?, ?, ?)",
+                ("purge_user", "user", "历史会话", plugin._now()),
+            )
+
+        result = admin.purge_user("purge_user")
+
+        with plugin._db() as conn:
+            counts = {
+                table: conn.execute(
+                    f"SELECT COUNT(*) AS n FROM {table} WHERE canonical_user_id=?",
+                    ("purge_user",),
+                ).fetchone()["n"]
+                for table in (
+                    "memories",
+                    "conversation_cache",
+                    "conversations",
+                    "identity_bindings",
+                )
+            }
+
+        assert result["memories"] == 1
+        assert result["cache"] == 1
+        assert counts == {
+            "memories": 0,
+            "conversation_cache": 0,
+            "conversations": 0,
+            "identity_bindings": 0,
+        }
+        assert all(user["id"] != "purge_user" for user in admin.get_users())
+
+
+class TestAdapterUserId:
+    def test_get_adapter_user_id_ignores_platform_metadata_repr(self, plugin):
+        class _Event:
+            def get_sender_id(self):
+                return None
+
+            def get_user_id(self):
+                return None
+
+            def get_sender_name(self):
+                return "alice"
+
+            platform = "PlatformMetadata(name='qq', version='1')"
+
+        assert plugin._get_adapter_user_id(_Event()) == "alice"
+
 
 # =========================================================================
 # 内部方法
