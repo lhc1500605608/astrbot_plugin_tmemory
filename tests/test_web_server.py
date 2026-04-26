@@ -84,17 +84,18 @@ def test_web_middleware_enforces_ip_whitelist_and_authentication(web_module, plu
 def test_update_config_preserves_readonly_style_distill_switch(web_module, plugin):
     saved = {}
 
+    class MockConfig(dict):
+        def save_config(self):
+            saved.update(self)
+
     class Context:
         def get_config(self):
-            return {
+            return MockConfig({
                 "style_distill_settings": {
                     "enable_style_distill": True,
                     "enable_style_injection": False,
                 }
-            }
-
-        def save_config(self, config):
-            saved.update(config)
+            })
 
     plugin.context = Context()
     server = web_module.TMemoryWebServer(plugin, {"webui_enabled": True})
