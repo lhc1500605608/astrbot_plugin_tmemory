@@ -1836,7 +1836,11 @@ class TMemoryPlugin(Star):
         WebUI 中 enable_style_distill 为只读状态，唯一写入口即此命令。
         """
         raw = (event.message_str or "").strip()
-        arg = re.sub(r"^/style_distill\s*", "", raw, flags=re.IGNORECASE).strip().lower()
+        arg = raw.lower()
+        if arg.startswith("/"):
+            arg = re.sub(r"^/style_distill\s*", "", raw, flags=re.IGNORECASE).strip().lower()
+        elif arg.startswith("style_distill"):
+            arg = re.sub(r"^style_distill\s*", "", raw, flags=re.IGNORECASE).strip().lower()
         if arg not in ("on", "off"):
             yield event.plain_result("用法: /style_distill on|off\n当前状态: " + ("开启" if self._cfg.enable_style_distill else "关闭"))
             return
