@@ -81,8 +81,19 @@ async def test_tm_context_returns_explicit_empty_recall_when_no_memory_exists(pl
 
 
 @pytest.mark.asyncio
+async def test_style_distill_accepts_framework_stripped_argument(plugin):
+    plugin._cfg.enable_style_distill = False
+
+    results = await _collect(plugin.style_distill(DummyEvent("on")))
+
+    assert results == ["风格蒸馏采集已开启（不影响普通记忆整理）。"]
+    assert plugin._cfg.enable_style_distill is True
+
+
+@pytest.mark.asyncio
 async def test_on_any_message_does_not_capture_when_auto_capture_disabled(plugin):
     plugin._cfg.enable_auto_capture = False
+    plugin._cfg.enable_style_distill = False
 
     await plugin.on_any_message(DummyEvent("用户说想喝咖啡"))
 
