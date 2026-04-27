@@ -42,6 +42,16 @@ from .core.identity import IdentityManager
 from .core.style_manager import StyleManager
 from .search.retrieval import RetrievalManager
 
+# 插件自身命令名集合，防止 AstrBot 剥离 wake_prefix(/)后控制命令文本进入 conversation_cache
+_CMD_FIRST_WORDS = frozenset({
+    "style_distill", "style_profile_create", "style_profile_delete", "style_profile_list",
+    "style_bind", "style_unbind",
+    "tm_distill_now", "tm_worker", "tm_memory", "tm_context", "tm_bind", "tm_merge",
+    "tm_forget", "tm_stats", "tm_distill_history", "tm_purify", "tm_quality_refine",
+    "tm_vec_rebuild", "tm_refine", "tm_mem_merge", "tm_mem_split", "tm_pin",
+    "tm_unpin", "tm_export", "tm_purge",
+})
+
 @register(
     "tmemory",
     "shangtang",
@@ -262,7 +272,12 @@ class TMemoryPlugin(Star):
             return
 
         # 跳过插件指令，避免把控制命令当作记忆素材。
+        # AstrBot 可能已剥离 wake_prefix(/)，导致 event.message_str 不以 / 开头，
+        # 此时仅靠 startswith("/") 不够。补充 first_word 白名单比对。
         if text.startswith("/"):
+            return
+        first_word = text.split(maxsplit=1)[0] if text else ""
+        if first_word in _CMD_FIRST_WORDS:
             return
 
         # 三层过滤:协议标记 → 前缀 → 正则
@@ -284,8 +299,14 @@ class TMemoryPlugin(Star):
 
     @filter.on_llm_response()
     async def on_llm_response(self, event: AstrMessageEvent, resp: LLMResponse):
-        """可选采集模型回复，作为后续批量蒸馏素材。"""
-        if not self._cfg.enable_auto_capture or not self._cfg.capture_assistant_reply:
+        """可选采集模型回复，作为后续批量蒸馏素材。
+
+        采集条件:
+        - enable_auto_capture=ON 且 capture_assistant_reply=ON → 常规采集
+        - enable_style_distill=ON → 风格蒸馏需要对话上下文，强制采集
+        """
+        should_capture = (self._cfg.enable_auto_capture and self._cfg.capture_assistant_reply) or self._cfg.enable_style_distill
+        if not should_capture:
             return
 
         text = self._normalize_text(getattr(resp, "completion_text", "") or "")
@@ -371,6 +392,10 @@ class TMemoryPlugin(Star):
             return "内容过短，未保存。"
 
         memory_type = self._safe_memory_type(memory_type)
+
+        # 第二道保险: style_distill 关闭时拒绝 style 类型落库
+        if memory_type == "style" and not self._cfg.enable_style_distill:
+            return "风格蒸馏采集已关闭，不接受 style 类型记忆（可通过 /style_distill on 开启）。"
 
         # 安全审计
         if self._is_unsafe_memory(content):
@@ -1828,24 +1853,28 @@ class TMemoryPlugin(Star):
 
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("style_distill")
-    async def style_distill(self, event: AstrMessageEvent):
+    async def style_distill(self, event: AstrMessageEvent, action: str = ""):
         """控制风格蒸馏采集开关: /style_distill on|off
 
         on  — 启用风格蒸馏素材收集和档案更新
         off — 停用风格蒸馏采集，不影响普通记忆整理
         WebUI 中 enable_style_distill 为只读状态，唯一写入口即此命令。
         """
-        raw = (event.message_str or "").strip()
-        arg = raw.lower()
-        if arg.startswith("/"):
-            arg = re.sub(r"^/style_distill\s*", "", raw, flags=re.IGNORECASE).strip().lower()
-        elif arg.startswith("style_distill"):
-            arg = re.sub(r"^style_distill\s*", "", raw, flags=re.IGNORECASE).strip().lower()
-        if arg not in ("on", "off"):
+        # AstrBot 命令入参契约: action 由框架注入的 parsed_params 提供，
+        # 若无则回退到手动解析 event.message_str（兼容直接调用和旧版框架）。
+        if not action:
+            raw = (event.message_str or "").strip()
+            action = raw.lower()
+            if action.startswith("/"):
+                action = re.sub(r"^/style_distill\s*", "", raw, flags=re.IGNORECASE).strip().lower()
+            elif action.startswith("style_distill"):
+                action = re.sub(r"^style_distill\s*", "", raw, flags=re.IGNORECASE).strip().lower()
+
+        if action not in ("on", "off"):
             yield event.plain_result("用法: /style_distill on|off\n当前状态: " + ("开启" if self._cfg.enable_style_distill else "关闭"))
             return
 
-        enabled = arg == "on"
+        enabled = action == "on"
         if enabled == self._cfg.enable_style_distill:
             yield event.plain_result(f"风格蒸馏采集已处于 {'开启' if enabled else '关闭'} 状态，无需重复设置。")
             return

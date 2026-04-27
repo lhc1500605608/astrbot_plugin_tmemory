@@ -221,6 +221,56 @@ async def test_style_distill_collection_message_is_captured_without_reply(plugin
 
 
 @pytest.mark.asyncio
+async def test_on_llm_response_captures_when_style_distill_on_and_auto_capture_off(plugin):
+    """on_llm_response must capture assistant reply when enable_style_distill=True, even with enable_auto_capture=False."""
+    plugin._cfg.enable_auto_capture = False
+    plugin._cfg.capture_assistant_reply = False
+    plugin._cfg.enable_style_distill = True
+
+    resp = types.SimpleNamespace(completion_text="好的，我来用简洁的方式回答你的问题。")
+    event = _StyleDistillEvent("请用简洁方式回答")
+
+    await plugin.on_llm_response(event, resp)
+
+    pending = plugin._fetch_pending_rows("qq:42", 10)
+    assert len(pending) == 1, "assistant reply should be captured for style distill"
+    assert pending[0]["role"] == "assistant"
+    assert "简洁" in pending[0]["content"]
+
+
+@pytest.mark.asyncio
+async def test_on_llm_response_skips_when_both_switches_off(plugin):
+    """on_llm_response must skip capture when both enable_auto_capture and enable_style_distill are off."""
+    plugin._cfg.enable_auto_capture = False
+    plugin._cfg.capture_assistant_reply = False
+    plugin._cfg.enable_style_distill = False
+
+    resp = types.SimpleNamespace(completion_text="这是助手的回复。")
+    event = _StyleDistillEvent("你好")
+
+    await plugin.on_llm_response(event, resp)
+
+    pending = plugin._fetch_pending_rows("qq:42", 10)
+    assert len(pending) == 0, "no capture should happen when both switches are off"
+
+
+@pytest.mark.asyncio
+async def test_on_llm_response_respects_capture_assistant_reply_when_auto_capture_on(plugin):
+    """on_llm_response must respect capture_assistant_reply when enable_auto_capture=True and style_distill=False."""
+    plugin._cfg.enable_auto_capture = True
+    plugin._cfg.capture_assistant_reply = False
+    plugin._cfg.enable_style_distill = False
+
+    resp = types.SimpleNamespace(completion_text="模型回复。")
+    event = _StyleDistillEvent("用户消息")
+
+    await plugin.on_llm_response(event, resp)
+
+    pending = plugin._fetch_pending_rows("qq:42", 10)
+    assert len(pending) == 0, "should not capture when capture_assistant_reply=False and style_distill off"
+
+
+@pytest.mark.asyncio
 async def test_style_distill_creates_temporary_profile_before_manual_archive(plugin_with_ctx):
     """Distilled style material should land in a temporary profile before merge/save."""
     plugin, ctx = plugin_with_ctx

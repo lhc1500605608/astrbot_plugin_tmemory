@@ -210,8 +210,20 @@
       "enable_style_distill": {
         "type": "bool",
         "default": true,
-        "description": "启用聊天风格蒸馏",
-        "hint": "开启后会在蒸馏时专门提取用户的聊天风格（如：喜欢简洁回复、偏好分点说明、使用表情符号习惯）。关闭后仍可提取事实/偏好等其他类型记忆。"
+        "description": "启用聊天风格蒸馏采集",
+        "hint": "开启后会在蒸馏时专门提取用户的聊天风格。关闭后不再采集对话素材用于风格分析，也不在蒸馏提示词中包含 style 类型指令。注：WebUI 中为只读，唯一写入口为 /style_distill 指令。"
+      },
+      "enable_style_injection": {
+        "type": "bool",
+        "default": false,
+        "description": "启用风格注入",
+        "hint": "开启后，当会话绑定了人格档案时，将风格记忆和人格补充提示词注入到 system_prompt，影响 Bot 回复风格。关闭则仅采集不注入。"
+      },
+      "persona_profile": {
+        "type": "string",
+        "default": "",
+        "description": "默认人格描述",
+        "hint": "用于辅助风格蒸馏判断的 Bot 人格参考文本。留空则不注入人格参考。"
       },
       "style_min_confidence": {
         "type": "float",

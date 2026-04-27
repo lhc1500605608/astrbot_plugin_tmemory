@@ -82,12 +82,72 @@ async def test_tm_context_returns_explicit_empty_recall_when_no_memory_exists(pl
 
 @pytest.mark.asyncio
 async def test_style_distill_accepts_framework_stripped_argument(plugin):
+    """event.message_str='on' (framework stripped prefix) — 手动解析回退路径。"""
     plugin._cfg.enable_style_distill = False
 
     results = await _collect(plugin.style_distill(DummyEvent("on")))
 
     assert results == ["风格蒸馏采集已开启（不影响普通记忆整理）。"]
     assert plugin._cfg.enable_style_distill is True
+
+
+@pytest.mark.asyncio
+async def test_style_distill_receives_action_via_parsed_params(plugin):
+    """action 由框架 parsed_params 注入为位置参数 — AstrBot 命令入参标准契约。"""
+    plugin._cfg.enable_style_distill = False
+
+    # event.message_str 为空，action 由框架注入为第三个位置参数
+    results = await _collect(plugin.style_distill(DummyEvent("ignored"), "on"))
+
+    assert "已开启" in results[-1]
+    assert plugin._cfg.enable_style_distill is True
+
+
+@pytest.mark.asyncio
+async def test_style_distill_action_param_takes_priority_over_message_str(plugin):
+    """action 位置参数非空时，跳过 event.message_str 手动解析。"""
+    plugin._cfg.enable_style_distill = True
+
+    # event.message_str 说 off，但 action 位置参数说 on → action 优先
+    results = await _collect(plugin.style_distill(DummyEvent("off"), "on"))
+
+    # action="on" 优先级高于 message_str="off"，但状态已是 True，所以提示"无需重复设置"
+    assert "开启" in results[-1]
+    assert "无需重复设置" in results[-1]
+    assert plugin._cfg.enable_style_distill is True
+
+
+@pytest.mark.asyncio
+async def test_tool_remember_rejects_style_when_style_distill_disabled(plugin):
+    """tool_remember must reject style-type memories when enable_style_distill=False."""
+    plugin._cfg.enable_style_distill = False
+
+    result = await plugin.tool_remember(
+        DummyEvent("记住"),
+        content="用户偏好简洁回复",
+        memory_type="style",
+    )
+    assert "不接受 style 类型" in result
+
+    # 确认未落库
+    memories = plugin._list_memories("qq:42", limit=10)
+    assert not any(m["memory_type"] == "style" for m in memories)
+
+
+@pytest.mark.asyncio
+async def test_tool_remember_accepts_style_when_style_distill_enabled(plugin):
+    """tool_remember must accept style-type memories when enable_style_distill=True."""
+    plugin._cfg.enable_style_distill = True
+
+    result = await plugin.tool_remember(
+        DummyEvent("记住"),
+        content="用户偏好简洁回复",
+        memory_type="style",
+    )
+    assert "已记住" in result
+
+    memories = plugin._list_memories("qq:42", limit=10)
+    assert any(m["memory_type"] == "style" for m in memories)
 
 
 @pytest.mark.asyncio
@@ -98,6 +158,35 @@ async def test_on_any_message_does_not_capture_when_auto_capture_disabled(plugin
     await plugin.on_any_message(DummyEvent("用户说想喝咖啡"))
 
     assert plugin._count_pending_rows() == 0
+
+
+@pytest.mark.asyncio
+async def test_on_any_message_skips_command_without_slash_prefix(plugin):
+    """AstrBot 剥离 wake_prefix 后 /style_distill on 变成 style_distill on — 必须跳过。"""
+    plugin._cfg.enable_auto_capture = True
+    plugin._cfg.enable_style_distill = True
+
+    # 模拟 AstrBot 剥离 / 后的无斜杠命令文本
+    await plugin.on_any_message(DummyEvent("style_distill on"))
+    await plugin.on_any_message(DummyEvent("tm_distill_now"))
+    await plugin.on_any_message(DummyEvent("tm_memory"))
+    await plugin.on_any_message(DummyEvent("style_bind my_profile"))
+
+    assert plugin._count_pending_rows() == 0, "控制命令文本不应进入 conversation_cache"
+
+
+@pytest.mark.asyncio
+async def test_on_any_message_still_captures_normal_text_without_slash(plugin):
+    """无斜杠的普通对话文本仍应正常采集。"""
+    plugin._cfg.enable_auto_capture = True
+    plugin._cfg.enable_style_distill = False
+
+    await plugin.on_any_message(DummyEvent("我今天心情很好"))
+    await plugin.on_any_message(DummyEvent("style 这个词在中文里是风格的意思"))
+    await plugin.on_any_message(DummyEvent("tm 是商标的缩写"))
+
+    rows = plugin._fetch_pending_rows("qq:42", 10)
+    assert len(rows) == 3, "普通对话（即使含 style_/tm_ 子串但不是首词）应正常采集"
 
 
 @pytest.mark.asyncio
