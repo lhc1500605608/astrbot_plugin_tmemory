@@ -151,8 +151,9 @@ class MemoryOps:
             transcript_lines.append(f"{role}: {content}")
 
         transcript = "\n".join(transcript_lines)
-        persona_profile = self.plugin._cfg.persona_profile
-        prompt = self.plugin._distill_mgr.build_distill_prompt(transcript, persona_profile)
+        enable_style = self.plugin._cfg.enable_style_distill
+        persona_profile = self.plugin._cfg.persona_profile if enable_style else ""
+        prompt = self.plugin._distill_mgr.build_distill_prompt(transcript, persona_profile, enable_style=enable_style)
 
         chat_provider_id = await self.plugin._distill_mgr.resolve_distill_provider_id(rows, self.plugin.context)
         chat_model_id = await self.plugin._distill_mgr.resolve_distill_model_id(rows)

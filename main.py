@@ -254,7 +254,7 @@ class TMemoryPlugin(Star):
     @filter.event_message_type(filter.EventMessageType.ALL)
     async def on_any_message(self, event: AstrMessageEvent):
         """自动采集每条用户消息，仅写入 conversation_cache，不实时蒸馏。"""
-        if not self._cfg.enable_auto_capture:
+        if not (self._cfg.enable_auto_capture or self._cfg.enable_style_distill):
             return
 
         text = self._normalize_text(getattr(event, "message_str", "") or "")
@@ -1847,19 +1847,16 @@ class TMemoryPlugin(Star):
             return
 
         self._cfg.enable_style_distill = enabled
-        # 持久化到配置，确保重启后状态保留
+        # 持久化到插件自身配置，确保重启后状态保留
         try:
-            ctx = self.context
-            current = ctx.get_config() if ctx else {}
-            style_settings = current.get("style_distill_settings", {})
+            style_settings = self.config.get("style_distill_settings", {})
             if not isinstance(style_settings, dict):
                 style_settings = {}
             style_settings["enable_style_distill"] = enabled
-            current["style_distill_settings"] = style_settings
-            if ctx:
-                current.save_config()
-        except Exception:
-            pass
+            self.config["style_distill_settings"] = style_settings
+            self.config.save_config()
+        except Exception as e:
+            logger.exception("[tmemory] style_distill 配置持久化失败: %s", e)
         yield event.plain_result(f"风格蒸馏采集已{'开启' if enabled else '关闭'}（不影响普通记忆整理）。")
 
     @filter.permission_type(filter.PermissionType.ADMIN)

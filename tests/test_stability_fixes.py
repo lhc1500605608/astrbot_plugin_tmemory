@@ -849,3 +849,117 @@ def test_safe_bool_handles_string_true(plugin_module, tmp_path, monkeypatch):
         config={"enable_auto_capture": "true"},
     )
     assert p._cfg.enable_auto_capture is True
+
+
+# ── 场景 7: style_distill 持久化与采集条件回归 (TMEAAA-163) ────────────────────
+
+
+def test_build_distill_prompt_enable_style_includes_style_section(plugin):
+    """enable_style=True 时蒸馏提示词应包含 style 类型与 persona 提示。"""
+    prompt = plugin._distill_mgr.build_distill_prompt(
+        "user: 请用简洁方式回复\nassistant: 好的",
+        persona_profile="Bot 人格: 中文助手",
+        enable_style=True,
+    )
+    assert "|style" in prompt
+    assert "style 类型专项" in prompt
+    assert "Bot 人格" in prompt
+
+
+def test_build_distill_prompt_disable_style_excludes_style_section(plugin):
+    """enable_style=False 时蒸馏提示词应排除 style 类型、style 专项、persona 提示。"""
+    prompt = plugin._distill_mgr.build_distill_prompt(
+        "user: 请用简洁方式回复\nassistant: 好的",
+        persona_profile="Bot 人格: 中文助手",
+        enable_style=False,
+    )
+    assert "|style" not in prompt
+    assert "style 类型" not in prompt
+    assert "Bot 人格" not in prompt
+    assert '"memory_type": "preference|fact|task|restriction"' in prompt
+
+
+def test_build_distill_prompt_default_enable_style_backward_compat(plugin):
+    """默认 enable_style=True 保持向后兼容。"""
+    prompt = plugin._distill_mgr.build_distill_prompt(
+        "user: hello\nassistant: hi",
+        persona_profile="test",
+    )
+    assert "|style" in prompt
+
+
+def test_style_distill_config_persists_to_plugin_config_not_global(plugin_module, tmp_path, monkeypatch):
+    """style_distill 持久化应写入 self.config 而非 ctx.get_config()。
+
+    注意：测试环境中 self.config 是普通 dict（无 save_config），
+    生产环境为 AstrBotConfig 子类（自带 save_config）。
+    此测试验证 self.config 字典被正确突变，不验证 save_config 磁盘写入。
+    """
+    monkeypatch.chdir(tmp_path)
+    plugin = plugin_module.TMemoryPlugin(
+        context=None,
+        config={
+            "style_distill_settings": {"enable_style_distill": True}
+        },
+    )
+    plugin._init_db()
+    plugin._migrate_schema()
+
+    # 模拟 /style_distill off 持久化逻辑
+    enabled = False
+    plugin._cfg.enable_style_distill = enabled
+    style_settings = plugin.config.get("style_distill_settings", {})
+    if not isinstance(style_settings, dict):
+        style_settings = {}
+    style_settings["enable_style_distill"] = enabled
+    plugin.config["style_distill_settings"] = style_settings
+
+    # 验证 self.config 被正确更新
+    assert plugin.config["style_distill_settings"]["enable_style_distill"] is False
+    assert plugin._cfg.enable_style_distill is False
+
+    # 验证 parse_config 能从更新后的 config 正确读取
+    from astrbot_plugin_tmemory.core.config import parse_config
+    reparsed = parse_config(plugin.config)
+    assert reparsed.enable_style_distill is False
+
+    plugin._close_db()
+
+
+@pytest.mark.asyncio
+async def test_distill_rows_with_llm_respects_enable_style_flag(plugin_with_ctx):
+    """当 enable_style_distill=False 时，蒸馏提示词不应包含 style 指令。"""
+    plugin, ctx = plugin_with_ctx
+    plugin._cfg.enable_style_distill = False
+    plugin._cfg.distill_provider_id = "mock-provider"
+    plugin._cfg.use_independent_distill_model = True
+
+    rows = [
+        {
+            "id": 1,
+            "role": "user",
+            "content": "我喜欢简洁的回复",
+            "source_adapter": "qq",
+            "source_user_id": "42",
+            "unified_msg_origin": "group:1",
+            "scope": "user",
+            "persona_id": "",
+        }
+    ]
+
+    captured_prompt = []
+
+    async def capture_llm_generate(**kwargs):
+        captured_prompt.append(kwargs.get("prompt", ""))
+        return types.SimpleNamespace(
+            completion_text='{"memories": []}',
+            usage=types.SimpleNamespace(input_other=5, input_cached=0, output=3),
+        )
+
+    ctx.llm_generate = capture_llm_generate
+
+    await plugin._distill_rows_with_llm(rows)
+    assert captured_prompt, "LLM was not called"
+    prompt = captured_prompt[0]
+    assert "|style" not in prompt
+    assert "style 类型" not in prompt
