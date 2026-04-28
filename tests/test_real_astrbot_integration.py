@@ -1,4 +1,6 @@
+import json
 import os
+import pathlib
 import subprocess
 import sys
 import textwrap
@@ -163,3 +165,48 @@ def test_web_server_admin_import_works_from_real_astrbot_plugin_package(tmp_path
     )
 
     assert result.returncode == 0, result.stderr or result.stdout
+
+
+def test_docker_init_deepseek_injection_handles_bom_without_leaking_key(tmp_path):
+    repo_root = pathlib.Path("/Users/tango/Documents/paperclip/astrbot_plugin_tmemory")
+    init_script = repo_root / "docker" / "astrbot_init.sh"
+    script_text = init_script.read_text(encoding="utf-8")
+    python_block = script_text.split("python3 <<'PY'", 1)[1].split("\nPY", 1)[0]
+
+    cmd_config = tmp_path / "cmd_config.json"
+    cmd_config.write_text(
+        '\ufeff{"provider": [], "provider_settings": {}, "dashboard": {}}',
+        encoding="utf-8",
+    )
+
+    env = os.environ.copy()
+    env.update(
+        {
+            "CMD_CONFIG": str(cmd_config),
+            "DEEPSEEK_API_KEY": "sk-test-secret-should-not-be-written",
+            "DEEPSEEK_BASE_URL": "https://example.invalid/deepseek/",
+            "DEEPSEEK_MODEL": "deepseek-test-model",
+        }
+    )
+
+    result = subprocess.run(
+        [sys.executable, "-c", python_block],
+        cwd=repo_root,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr or result.stdout
+    saved_text = cmd_config.read_text(encoding="utf-8")
+    saved_config = json.loads(saved_text)
+    source = saved_config["provider_sources"][0]
+    provider = saved_config["provider"][0]
+    assert provider["id"] == "deepseek"
+    assert provider["provider_source_id"] == "deepseek_source"
+    assert source["id"] == "deepseek_source"
+    assert source["provider_type"] == "chat_completion"
+    assert source["api_base"] == "https://example.invalid/deepseek/v1"
+    assert source["key"] == ["$DEEPSEEK_API_KEY"]
+    assert "sk-test-secret-should-not-be-written" not in saved_text
