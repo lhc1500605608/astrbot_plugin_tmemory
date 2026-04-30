@@ -40,12 +40,13 @@ from .core.distill import DistillManager
 from .core.utils import MemoryLogger
 from .core.identity import IdentityManager
 from .core.style_manager import StyleManager
+from .core.style_distill import StyleDistillManager
 from .search.retrieval import RetrievalManager
 
 # 插件自身命令名集合，防止 AstrBot 剥离 wake_prefix(/)后控制命令文本进入 conversation_cache
 _CMD_FIRST_WORDS = frozenset({
     "style_distill", "style_profile_create", "style_profile_delete", "style_profile_list",
-    "style_bind", "style_unbind",
+    "style_bind", "style_unbind", "style_migrate_preview",
     "tm_distill_now", "tm_worker", "tm_memory", "tm_context", "tm_bind", "tm_merge",
     "tm_forget", "tm_stats", "tm_distill_history", "tm_purify", "tm_quality_refine",
     "tm_vec_rebuild", "tm_refine", "tm_mem_merge", "tm_mem_split", "tm_pin",
@@ -94,6 +95,7 @@ class TMemoryPlugin(Star):
         self._http_session = None
         self._distill_skipped_rows: int = 0
         self._user_last_distilled_ts: Dict[str, float] = {}
+        self._style_last_distilled_ts: Dict[str, float] = {}
 
         # ── CaptureFilter & DistillManager ──────────────────────────────────────────────────────
         self._capture_filter = CaptureFilter(self._cfg)
@@ -102,6 +104,7 @@ class TMemoryPlugin(Star):
         self._memory_logger = MemoryLogger(self._db_mgr)
         self._identity_mgr = IdentityManager(self._db_mgr, self._cfg, self._memory_logger)
         self._style_mgr = StyleManager(self._db_mgr)
+        self._style_distill_mgr = StyleDistillManager(self)
 
         # ── 敏感信息脱敏 ──────────────────────────────────────────────────────
         self._sanitize_patterns = self._build_sanitize_patterns()
@@ -263,7 +266,11 @@ class TMemoryPlugin(Star):
 
     @filter.event_message_type(filter.EventMessageType.ALL)
     async def on_any_message(self, event: AstrMessageEvent):
-        """自动采集每条用户消息，仅写入 conversation_cache，不实时蒸馏。"""
+        """自动采集每条用户消息。
+
+        ADR TMEAAA-180: 根据当前流程开关写入不同队列。
+        style 开启 → style_conversation_cache；memory 开启 → conversation_cache。
+        """
         if not (self._cfg.enable_auto_capture or self._cfg.enable_style_distill):
             return
 
@@ -271,39 +278,58 @@ class TMemoryPlugin(Star):
         if not text:
             return
 
-        # 跳过插件指令，避免把控制命令当作记忆素材。
-        # AstrBot 可能已剥离 wake_prefix(/)，导致 event.message_str 不以 / 开头，
-        # 此时仅靠 startswith("/") 不够。补充 first_word 白名单比对。
         if text.startswith("/"):
             return
         first_word = text.split(maxsplit=1)[0] if text else ""
         if first_word in _CMD_FIRST_WORDS:
             return
 
-        # 三层过滤:协议标记 → 前缀 → 正则
         if self._capture_filter.should_skip_capture(text):
             return
 
         canonical_id, adapter, adapter_user = self._identity_mgr.resolve_current_identity(event)
         umo = self._safe_get_unified_msg_origin(event)
-        await self._insert_conversation(
-            canonical_id=canonical_id,
-            role="user",
-            content=self._sanitize_text(text),
-            source_adapter=adapter,
-            source_user_id=adapter_user,
-            unified_msg_origin=umo,
-            scope=self._get_memory_scope(event),
-            persona_id=self._get_current_persona(event),
-        )
+
+        # ADR TMEAAA-180 互斥路由: style 优先
+        if self._cfg.enable_style_distill:
+            self._style_distill_mgr.insert_style_conversation(
+                canonical_id=canonical_id,
+                role="user",
+                content=self._sanitize_text(text),
+                source_adapter=adapter,
+                source_user_id=adapter_user,
+                unified_msg_origin=umo,
+            )
+        else:
+            await self._insert_conversation(
+                canonical_id=canonical_id,
+                role="user",
+                content=self._sanitize_text(text),
+                source_adapter=adapter,
+                source_user_id=adapter_user,
+                unified_msg_origin=umo,
+                scope=self._get_memory_scope(event),
+                persona_id=self._get_current_persona(event),
+            )
+
+        if self._cfg.enable_style_distill:
+            should_call_llm = getattr(event, "should_call_llm", None)
+            if callable(should_call_llm):
+                should_call_llm(True)
+            else:
+                stop_event = getattr(event, "stop_event", None)
+                if callable(stop_event):
+                    stop_event()
 
     @filter.on_llm_response()
     async def on_llm_response(self, event: AstrMessageEvent, resp: LLMResponse):
         """可选采集模型回复，作为后续批量蒸馏素材。
 
         采集条件:
-        - enable_auto_capture=ON 且 capture_assistant_reply=ON → 常规采集
-        - enable_style_distill=ON → 风格蒸馏需要对话上下文，强制采集
+        - enable_auto_capture=ON 且 capture_assistant_reply=ON → 记忆蒸馏素材
+        - enable_style_distill=ON → 风格蒸馏素材
+
+        ADR TMEAAA-180 互斥路由: style 优先写入 style_conversation_cache。
         """
         should_capture = (self._cfg.enable_auto_capture and self._cfg.capture_assistant_reply) or self._cfg.enable_style_distill
         if not should_capture:
@@ -313,21 +339,30 @@ class TMemoryPlugin(Star):
         if not text:
             return
 
-        # 三层过滤:协议标记 → 前缀 → 正则
         if self._capture_filter.should_skip_capture(text):
             return
 
         try:
             canonical_id, adapter, adapter_user = self._identity_mgr.resolve_current_identity(event)
             umo = self._safe_get_unified_msg_origin(event)
-            await self._insert_conversation(
-                canonical_id=canonical_id,
-                role="assistant",
-                content=text,
-                source_adapter=adapter,
-                source_user_id=adapter_user,
-                unified_msg_origin=umo,
-            )
+            if self._cfg.enable_style_distill:
+                self._style_distill_mgr.insert_style_conversation(
+                    canonical_id=canonical_id,
+                    role="assistant",
+                    content=text,
+                    source_adapter=adapter,
+                    source_user_id=adapter_user,
+                    unified_msg_origin=umo,
+                )
+            else:
+                await self._insert_conversation(
+                    canonical_id=canonical_id,
+                    role="assistant",
+                    content=text,
+                    source_adapter=adapter,
+                    source_user_id=adapter_user,
+                    unified_msg_origin=umo,
+                )
         except Exception as e:
             logger.warning("[tmemory] on_llm_response capture failed: %s", e)
 
@@ -393,9 +428,9 @@ class TMemoryPlugin(Star):
 
         memory_type = self._safe_memory_type(memory_type)
 
-        # 第二道保险: style_distill 关闭时拒绝 style 类型落库
-        if memory_type == "style" and not self._cfg.enable_style_distill:
-            return "风格蒸馏采集已关闭，不接受 style 类型记忆（可通过 /style_distill on 开启）。"
+        # ADR TMEAAA-180: style 类型不再写入 memories 表，请使用 /style_distill on 开启风格蒸馏
+        if memory_type == "style":
+            return "style 类型记忆已独立，不再通过 remember 工具写入。请使用 /style_distill on 开启风格蒸馏采集。"
 
         # 安全审计
         if self._is_unsafe_memory(content):
@@ -489,16 +524,30 @@ class TMemoryPlugin(Star):
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("tm_worker")
     async def tm_worker(self, event: AstrMessageEvent):
-        """查看蒸馏 worker 状态:/tm_worker"""
+        """查看蒸馏 worker 状态:/tm_worker
+
+        ADR TMEAAA-180: 分别展示记忆蒸馏与风格蒸馏的状态。
+        """
         pending_users = self._count_pending_users()
         pending_rows = self._count_pending_rows()
+        style_pending_users = self._count_style_pending_users()
+        style_pending_rows = self._count_style_pending_rows()
         lines = [
             f"worker_running={self._worker_running}",
             f"distill_interval_sec={self._cfg.distill_interval_sec}",
             f"distill_min_batch_count={self._cfg.distill_min_batch_count}",
             f"distill_batch_limit={self._cfg.distill_batch_limit}",
+            f"--- 记忆蒸馏 (memory distill) ---",
+            f"enable_auto_capture={self._cfg.enable_auto_capture}",
+            f"distill_pause={self._cfg.distill_pause}",
+            f"memory_mode={self._cfg.memory_mode}",
             f"pending_users={pending_users}",
             f"pending_rows={pending_rows}",
+            f"--- 风格蒸馏 (style distill) ---",
+            f"enable_style_distill={self._cfg.enable_style_distill}",
+            f"enable_style_injection={self._cfg.enable_style_injection}",
+            f"style_pending_users={style_pending_users}",
+            f"style_pending_rows={style_pending_rows}",
             f"--- gate stats ---",
             f"capture_min_content_len={self._cfg.capture_min_content_len}",
             f"capture_dedup_window={self._cfg.capture_dedup_window}",
@@ -908,10 +957,28 @@ class TMemoryPlugin(Star):
     # =========================================================================
 
     async def _distill_worker_loop(self):
-        """后台定时蒸馏循环。"""
+        """后台定时蒸馏循环。
+
+        ADR TMEAAA-180 互斥规则: 同一轮循环只运行一种蒸馏模式。
+        enable_style_distill 优先 → 跑风格蒸馏；否则跑记忆蒸馏。
+        """
         await asyncio.sleep(8)
         while self._worker_running:
-            if not self._cfg.distill_pause and self._cfg.memory_mode != "active_only":
+            if self._cfg.enable_style_distill:
+                try:
+                    users, candidates, profiles = await self._run_style_distill_cycle(
+                        force=False, trigger="auto"
+                    )
+                    if users > 0:
+                        logger.info(
+                            "[tmemory] style distill cycle done: users=%s candidates=%s profiles=%s",
+                            users,
+                            candidates,
+                            profiles,
+                        )
+                except Exception as e:
+                    logger.warning("[tmemory] style distill worker error: %s", e)
+            elif not self._cfg.distill_pause and self._cfg.memory_mode != "active_only":
                 try:
                     users, memories = await self._run_distill_cycle(
                         force=False, trigger="auto"
@@ -962,6 +1029,11 @@ class TMemoryPlugin(Star):
     ) -> Tuple[int, int]:
         from .core.memory_ops import MemoryOps
         return await MemoryOps(self).run_distill_cycle(force, trigger)
+
+    async def _run_style_distill_cycle(
+        self, force: bool = False, trigger: str = "manual"
+    ) -> Tuple[int, int, int]:
+        return await self._style_distill_mgr.run_style_distill_cycle(force, trigger)
 
     # =========================================================================
     # LLM 蒸馏
@@ -1071,11 +1143,10 @@ class TMemoryPlugin(Star):
         persona_id: str = "",
         exclude_private: bool = False,
     ) -> str:
-        """构建风格注入块（人格档案 + 对话风格记忆），仅在命中绑定时注入。
+        """构建风格注入块（人格档案 prompt_supplement），仅在命中绑定时注入。
 
-        风格蒸馏 v3 双开关逻辑:
-        - enable_style_injection=ON 且 adapter+conversation 命中 active profile → 注入
-        - 未绑定或 profile_id=NULL → 回退 AstrBot 默认人格，不注入任何风格内容
+        ADR TMEAAA-180: 风格注入只读取 bound style_profiles.prompt_supplement，
+        不调用 _retrieve_memories，不读取 memories 表。
         """
         adapter_name = self._get_adapter_name(event)
         conversation_id = await self._get_conversation_id(event)
@@ -1084,26 +1155,17 @@ class TMemoryPlugin(Star):
 
         binding = self._style_mgr.get_binding(adapter_name, conversation_id)
         if not binding or binding.get("profile_id") is None:
-            # 未绑定或显式 NULL：回退 AstrBot 默认人格，不注入额外风格内容
             return ""
 
         prompt_supplement = binding.get("prompt_supplement", "")
+        if not prompt_supplement:
+            return ""
 
-        rows = await self._retrieve_memories(
-            canonical_user_id,
-            query,
-            self._cfg.inject_memory_limit,
-            scope=scope,
-            persona_id=persona_id,
-            exclude_private=exclude_private,
-        )
-        style_memories = [r["memory"] for r in rows if r["memory_type"] == "style"]
-
-        return self._distill_mgr.build_style_injection_block(
-            persona_profile=prompt_supplement,
-            style_memories=style_memories,
-            inject_max_chars=self._cfg.inject_max_chars,
-        )
+        block = "[人格档案]\n" + prompt_supplement.strip()
+        if self._cfg.inject_max_chars > 0 and len(block) > self._cfg.inject_max_chars:
+            cutoff = max(self._cfg.inject_max_chars - 3, 1)
+            block = block[:cutoff] + "…"
+        return block
 
     def _inject_block_by_position(self, req: ProviderRequest, block: str) -> None:
         """按 inject_position 配置将知识记忆块注入到正确位置。"""
@@ -1768,6 +1830,20 @@ class TMemoryPlugin(Star):
             ).fetchone()
         return int(row["n"] if row else 0)
 
+    def _count_style_pending_users(self) -> int:
+        with self._db() as conn:
+            row = conn.execute(
+                "SELECT COUNT(1) AS n FROM (SELECT canonical_user_id FROM style_conversation_cache WHERE distilled=0 GROUP BY canonical_user_id)"
+            ).fetchone()
+        return int(row["n"] if row else 0)
+
+    def _count_style_pending_rows(self) -> int:
+        with self._db() as conn:
+            row = conn.execute(
+                "SELECT COUNT(1) AS n FROM style_conversation_cache WHERE distilled=0"
+            ).fetchone()
+        return int(row["n"] if row else 0)
+
     # =========================================================================
     # 上下文压缩(规则摘要，不触发 LLM)
     # =========================================================================
@@ -1859,9 +1935,9 @@ class TMemoryPlugin(Star):
         on  — 启用风格蒸馏素材收集和档案更新
         off — 停用风格蒸馏采集，不影响普通记忆整理
         WebUI 中 enable_style_distill 为只读状态，唯一写入口即此命令。
+
+        ADR TMEAAA-180 互斥规则: 开启风格蒸馏时，记忆蒸馏必须暂停。
         """
-        # AstrBot 命令入参契约: action 由框架注入的 parsed_params 提供，
-        # 若无则回退到手动解析 event.message_str（兼容直接调用和旧版框架）。
         if not action:
             raw = (event.message_str or "").strip()
             action = raw.lower()
@@ -1879,8 +1955,21 @@ class TMemoryPlugin(Star):
             yield event.plain_result(f"风格蒸馏采集已处于 {'开启' if enabled else '关闭'} 状态，无需重复设置。")
             return
 
+        # ADR TMEAAA-180 互斥校验: 开启风格蒸馏前，先确认记忆蒸馏已暂停
+        if enabled:
+            memory_distill_active = (
+                not self._cfg.distill_pause
+                and self._cfg.memory_mode != "active_only"
+            )
+            if memory_distill_active:
+                yield event.plain_result(
+                    "无法开启风格蒸馏：记忆蒸馏当前处于活跃状态。\n"
+                    "请先在 WebUI 中暂停记忆蒸馏 (distill_pause=true) 或切换到 active_only 模式。\n"
+                    "提示: 两种蒸馏模式互斥，不能同时运行。"
+                )
+                return
+
         self._cfg.enable_style_distill = enabled
-        # 持久化到插件自身配置，确保重启后状态保留
         try:
             style_settings = self.config.get("style_distill_settings", {})
             if not isinstance(style_settings, dict):
@@ -1992,6 +2081,44 @@ class TMemoryPlugin(Star):
             )
         else:
             yield event.plain_result("当前会话未绑定人格档案。")
+
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @filter.command("style_migrate_preview")
+    async def style_migrate_preview(self, event: AstrMessageEvent):
+        """预览旧 style 记忆迁移: /style_migrate_preview
+
+        ADR TMEAAA-180: 只读预览现有 memories.memory_type='style' 数据，
+        按 canonical_user_id 聚合，不删除原数据。
+        """
+        with self._db() as conn:
+            rows = conn.execute(
+                """SELECT canonical_user_id, COUNT(1) AS n,
+                          GROUP_CONCAT(memory, ' | ') AS summary
+                   FROM memories
+                   WHERE memory_type='style' AND is_active=1
+                   GROUP BY canonical_user_id
+                   ORDER BY n DESC
+                   LIMIT 20"""
+            ).fetchall()
+
+        if not rows:
+            yield event.plain_result("没有找到 memory_type='style' 的旧数据。")
+            return
+
+        lines = ["旧 style 记忆预览（只读，不影响数据）:", ""]
+        for row in rows:
+            uid = row["canonical_user_id"]
+            n = row["n"]
+            summary = str(row["summary"] or "")[:120]
+            lines.append(
+                f"  {uid}: {n} 条 | 摘要: {summary}..."
+            )
+        lines.append("")
+        lines.append(
+            f"共 {len(rows)} 个用户有旧 style 记忆。"
+            "这些数据在新架构下不再被读取。如需迁移，请联系管理员。"
+        )
+        yield event.plain_result("\n".join(lines))
 
     # =========================================================================
     # 蒸馏历史与健康监测
