@@ -169,3 +169,141 @@ async def test_style_injection_off_keeps_default_persona(plugin):
     await plugin.on_llm_request(_StyleEvent(), req)
 
     assert req.system_prompt == "default persona"
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# ADR TMEAAA-180 验收测试: 风格/记忆解耦注入
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_memory_and_style_injection_coexist(plugin):
+    """ADR TMEAAA-180: memory 注入与 style 注入可同时生效。"""
+    plugin.context = _Context()
+    plugin._cfg.enable_memory_injection = True
+    plugin._cfg.enable_style_injection = True
+
+    # 插入一条知识记忆（canonical_id 与 identity 解析一致）
+    plugin._insert_memory(
+        canonical_id="qq:42",
+        adapter="qq",
+        adapter_user="42",
+        memory="用户喜欢吃火锅",
+        score=0.8,
+        memory_type="preference",
+        importance=0.7,
+        confidence=0.8,
+    )
+
+    # 创建风格档案并绑定
+    profile_id = plugin._style_mgr.create_profile(
+        "coexist-style", "请用热情的语气回复。", "qa profile"
+    )
+    plugin._style_mgr.set_binding("qq", "conv-style", profile_id)
+
+    class _Request:
+        prompt = "今天吃什么"
+        system_prompt = "default persona"
+
+    class _CoexistEvent:
+        adapter_name = "qq"
+        unified_msg_origin = "group:style"
+
+        def get_sender_id(self):
+            return "42"
+
+        def get_group_id(self):
+            return None
+
+    req = _Request()
+    event = _CoexistEvent()
+    await plugin.on_llm_request(event, req)
+
+    # 风格块应追加到 system_prompt 末尾
+    assert "[人格档案]" in req.system_prompt
+    assert "请用热情的语气回复。" in req.system_prompt
+    # 知识记忆块应通过 inject_position 注入（默认 system_prompt，追加）
+    assert "[用户记忆]" in req.system_prompt
+    assert "用户喜欢吃火锅" in req.system_prompt
+
+
+@pytest.mark.asyncio
+async def test_style_injection_on_unbound_keeps_default_persona(plugin):
+    """ADR TMEAAA-180: style_injection=ON 但未绑定时只保留默认人格。"""
+    plugin.context = _Context()
+    plugin._cfg.enable_style_injection = True
+
+    class _Request:
+        prompt = "你好"
+        system_prompt = "default persona"
+
+    class _UnboundEvent:
+        adapter_name = "qq"
+        unified_msg_origin = "group:nobind"
+
+        def get_sender_id(self):
+            return "99"
+
+        def get_group_id(self):
+            return None
+
+    req = _Request()
+    await plugin.on_llm_request(_UnboundEvent(), req)
+
+    assert req.system_prompt == "default persona"
+    assert "[人格档案]" not in req.system_prompt
+
+
+@pytest.mark.asyncio
+async def test_style_prompt_excludes_memory_content(plugin):
+    """ADR TMEAAA-180: 风格注入块不得包含知识记忆内容。"""
+    plugin.context = _Context()
+    plugin._cfg.enable_memory_injection = True
+    plugin._cfg.enable_style_injection = True
+
+    # 插入一条与风格无关的知识记忆（canonical_id 与 identity 解析一致）
+    plugin._insert_memory(
+        canonical_id="qq:42",
+        adapter="qq",
+        adapter_user="42",
+        memory="用户是Python后端工程师",
+        score=0.8,
+        memory_type="fact",
+        importance=0.7,
+        confidence=0.8,
+    )
+
+    profile_id = plugin._style_mgr.create_profile(
+        "sep-style", "请用专业术语回复。", "qa profile"
+    )
+    plugin._style_mgr.set_binding("qq", "conv-style", profile_id)
+
+    class _Request:
+        prompt = "写段代码"
+        system_prompt = "default persona"
+
+    class _SepEvent:
+        adapter_name = "qq"
+        unified_msg_origin = "group:style"
+
+        def get_sender_id(self):
+            return "42"
+
+        def get_group_id(self):
+            return None
+
+    req = _Request()
+    await plugin.on_llm_request(_SepEvent(), req)
+
+    style_start = req.system_prompt.find("[人格档案]")
+    mem_start = req.system_prompt.find("[用户记忆]")
+    assert style_start >= 0
+    assert mem_start >= 0
+
+    # 风格块不应包含知识记忆内容
+    if style_start < mem_start:
+        style_block = req.system_prompt[style_start:mem_start]
+    else:
+        style_block = req.system_prompt[style_start:]
+    assert "Python后端工程师" not in style_block
+    assert "用户记忆" not in style_block

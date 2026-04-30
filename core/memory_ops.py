@@ -151,9 +151,7 @@ class MemoryOps:
             transcript_lines.append(f"{role}: {content}")
 
         transcript = "\n".join(transcript_lines)
-        enable_style = False  # ADR TMEAAA-180: 记忆蒸馏不再包含 style 类型
-        persona_profile = ""
-        prompt = self.plugin._distill_mgr.build_distill_prompt(transcript, persona_profile, enable_style=enable_style)
+        prompt = self.plugin._distill_mgr.build_distill_prompt(transcript)
 
         chat_provider_id = await self.plugin._distill_mgr.resolve_distill_provider_id(rows, self.plugin.context)
         chat_model_id = await self.plugin._distill_mgr.resolve_distill_model_id(rows)

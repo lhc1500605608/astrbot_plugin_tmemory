@@ -154,50 +154,6 @@ class StyleManager:
             )
             return cur.rowcount > 0
 
-    # ── Auto-create profile from distilled style memories ──────────────
-
-    _AUTO_CREATE_THRESHOLD = 3
-
-    def auto_create_profile_if_ready(
-        self, canonical_user_id: str, source_adapter: str
-    ) -> Optional[int]:
-        """蒸馏完成后自动创建人格档案。
-
-        当用户累积 >= _AUTO_CREATE_THRESHOLD 条活跃 style 记忆且尚未
-        被任何 profile 覆盖时，自动生成一条以 canonical_user_id 命名的档案。
-        """
-        with self._db() as conn:
-            # 统计活跃 style 记忆数
-            row = conn.execute(
-                "SELECT COUNT(1) AS n, GROUP_CONCAT(memory, '; ') AS summary "
-                "FROM memories "
-                "WHERE canonical_user_id=? AND memory_type='style' AND is_active=1",
-                (canonical_user_id,),
-            ).fetchone()
-            if not row or int(row["n"]) < self._AUTO_CREATE_THRESHOLD:
-                return None
-
-            # 已有以此用户为 source 的档案则不再重复创建
-            existing = conn.execute(
-                "SELECT id FROM style_profiles WHERE source_user=?",
-                (canonical_user_id,),
-            ).fetchone()
-            if existing:
-                return None
-
-        style_summary = str(row["summary"] or "")[:500]
-        profile_name = f"{canonical_user_id}-auto-style"
-        prompt_supplement = _build_default_prompt_supplement(style_summary)
-
-        return self.create_profile(
-            profile_name=profile_name,
-            prompt_supplement=prompt_supplement,
-            description=f"自动生成 ({canonical_user_id})",
-            source_user=canonical_user_id,
-            source_adapter=source_adapter,
-            style_summary=style_summary,
-        )
-
     # ── Temporary Profiles (staging for style_distill output) ─────────
 
     def insert_temp_profile(

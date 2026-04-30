@@ -225,24 +225,23 @@ class TestStyleProfiles:
         binding = admin.get_style_binding("qq", "conv-a")
         assert binding["profile_id"] is None
 
-    def test_auto_create_profile_after_three_style_memories(self, admin, plugin):
-        for i in range(3):
-            plugin._insert_memory(
-                canonical_id="style-user",
-                adapter="qq",
-                adapter_user="42",
-                memory=f"用户偏好简洁表达风格{i}",
-                score=0.8,
-                memory_type="style",
-                importance=0.7,
-                confidence=0.9,
-            )
+    def test_style_profile_independent_of_memories_table(self, admin, plugin):
+        """ADR TMEAAA-180: 风格档案独立于 memories 表管理。"""
+        created = admin.create_style_profile(
+            "indie-style", "用户偏好口语化表达。", "独立档案"
+        )
+        pid = created["id"]
+        profile = admin.get_style_profile(pid)
+        assert profile["profile_name"] == "indie-style"
+        assert profile["prompt_supplement"] == "用户偏好口语化表达。"
 
-        profile_id = plugin._style_mgr.auto_create_profile_if_ready("style-user", "qq")
-        profile = admin.get_style_profile(profile_id)
-
-        assert profile["profile_name"] == "style-user-auto-style"
-        assert "用户偏好简洁表达风格" in profile["prompt_supplement"]
+        # 确认 profiles 表不依赖 memories 表
+        with plugin._db() as conn:
+            style_rows = conn.execute(
+                "SELECT COUNT(1) AS n FROM memories WHERE memory_type='style' AND is_active=1"
+            ).fetchone()
+        # 风格档案创建不应写入 memories 表
+        assert int(style_rows["n"]) == 0
 
 
 # =========================================================================

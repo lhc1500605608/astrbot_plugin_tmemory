@@ -932,38 +932,25 @@ def test_safe_bool_handles_string_true(plugin_module, tmp_path, monkeypatch):
 # ── 场景 7: style_distill 持久化与采集条件回归 (TMEAAA-163) ────────────────────
 
 
-def test_build_distill_prompt_enable_style_includes_style_section(plugin):
-    """enable_style=True 时蒸馏提示词应包含 style 类型与 persona 提示。"""
+def test_build_distill_prompt_excludes_style_section(plugin):
+    """ADR TMEAAA-180: 记忆蒸馏 prompt 不再包含 style 类型或 persona 提示。"""
     prompt = plugin._distill_mgr.build_distill_prompt(
         "user: 请用简洁方式回复\nassistant: 好的",
-        persona_profile="Bot 人格: 中文助手",
-        enable_style=True,
     )
-    assert "|style" in prompt
-    assert "style 类型专项" in prompt
-    assert "Bot 人格" in prompt
-
-
-def test_build_distill_prompt_disable_style_excludes_style_section(plugin):
-    """enable_style=False 时蒸馏提示词应排除 style 类型、style 专项、persona 提示。"""
-    prompt = plugin._distill_mgr.build_distill_prompt(
-        "user: 请用简洁方式回复\nassistant: 好的",
-        persona_profile="Bot 人格: 中文助手",
-        enable_style=False,
-    )
-    assert "|style" not in prompt
+    assert "|style" not in prompt, "style should be excluded from memory distill prompt"
     assert "style 类型" not in prompt
-    assert "Bot 人格" not in prompt
+    assert "persona" not in prompt.lower()
     assert '"memory_type": "preference|fact|task|restriction"' in prompt
 
 
-def test_build_distill_prompt_default_excludes_style(plugin):
-    """ADR TMEAAA-180: 默认 enable_style=False，记忆蒸馏不包含 style 类型。"""
+def test_build_distill_prompt_only_memory_types(plugin):
+    """ADR TMEAAA-180: build_distill_prompt 只接受 transcript 参数。"""
     prompt = plugin._distill_mgr.build_distill_prompt(
         "user: hello\nassistant: hi",
-        persona_profile="test",
     )
-    assert "|style" not in prompt, "default should exclude style from memory distill prompt"
+    assert "|style" not in prompt
+    assert '"memory_type": "preference|fact|task|restriction"' in prompt
+    assert "persona" not in prompt.lower()
 
 
 def test_style_distill_config_persists_to_plugin_config_not_global(plugin_module, tmp_path, monkeypatch):
