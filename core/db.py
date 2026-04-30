@@ -146,6 +146,39 @@ CREATE TABLE IF NOT EXISTS conversation_cache (
 )
 """
 
+_DDL_STYLE_CONVERSATION_CACHE = """
+CREATE TABLE IF NOT EXISTS style_conversation_cache (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    canonical_user_id TEXT NOT NULL,
+    role TEXT NOT NULL,
+    content TEXT NOT NULL,
+    source_adapter TEXT NOT NULL DEFAULT 'unknown',
+    source_user_id TEXT NOT NULL DEFAULT 'unknown',
+    unified_msg_origin TEXT NOT NULL DEFAULT '',
+    distilled INTEGER NOT NULL DEFAULT 0,
+    distilled_at TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL
+)
+"""
+
+_DDL_STYLE_DISTILL_HISTORY = """
+CREATE TABLE IF NOT EXISTS style_distill_history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    started_at TEXT NOT NULL,
+    finished_at TEXT NOT NULL,
+    trigger_type TEXT NOT NULL,
+    users_processed INTEGER NOT NULL DEFAULT 0,
+    profiles_created INTEGER NOT NULL DEFAULT 0,
+    candidates_created INTEGER NOT NULL DEFAULT 0,
+    users_failed INTEGER NOT NULL DEFAULT 0,
+    errors TEXT NOT NULL DEFAULT '[]',
+    duration_sec REAL NOT NULL DEFAULT 0,
+    tokens_input INTEGER NOT NULL DEFAULT -1,
+    tokens_output INTEGER NOT NULL DEFAULT -1,
+    tokens_total INTEGER NOT NULL DEFAULT -1
+)
+"""
+
 _DDL_FTS5 = """
 CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
     memory,
@@ -331,6 +364,8 @@ class DatabaseManager:
             conn.execute(_DDL_IDENTITY_MAPPINGS)
             conn.execute(_DDL_DISTILL_HISTORY)
             conn.execute(_DDL_CONVERSATION_CACHE)
+            conn.execute(_DDL_STYLE_CONVERSATION_CACHE)
+            conn.execute(_DDL_STYLE_DISTILL_HISTORY)
             conn.execute(_DDL_STYLE_PROFILES)
             conn.execute(_DDL_STYLE_BINDINGS)
             conn.execute(_DDL_STYLE_TEMP_PROFILES)

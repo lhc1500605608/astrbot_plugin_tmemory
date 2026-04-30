@@ -84,6 +84,7 @@ async def test_tm_context_returns_explicit_empty_recall_when_no_memory_exists(pl
 async def test_style_distill_accepts_framework_stripped_argument(plugin):
     """event.message_str='on' (framework stripped prefix) — 手动解析回退路径。"""
     plugin._cfg.enable_style_distill = False
+    plugin._cfg.distill_pause = True  # ADR TMEAAA-180: 互斥校验需要记忆蒸馏已暂停
 
     results = await _collect(plugin.style_distill(DummyEvent("on")))
 
@@ -95,6 +96,7 @@ async def test_style_distill_accepts_framework_stripped_argument(plugin):
 async def test_style_distill_receives_action_via_parsed_params(plugin):
     """action 由框架 parsed_params 注入为位置参数 — AstrBot 命令入参标准契约。"""
     plugin._cfg.enable_style_distill = False
+    plugin._cfg.distill_pause = True  # ADR TMEAAA-180: 互斥校验需要记忆蒸馏已暂停
 
     # event.message_str 为空，action 由框架注入为第三个位置参数
     results = await _collect(plugin.style_distill(DummyEvent("ignored"), "on"))
@@ -118,8 +120,36 @@ async def test_style_distill_action_param_takes_priority_over_message_str(plugin
 
 
 @pytest.mark.asyncio
-async def test_tool_remember_rejects_style_when_style_distill_disabled(plugin):
-    """tool_remember must reject style-type memories when enable_style_distill=False."""
+async def test_style_distill_on_rejected_when_memory_distill_active(plugin):
+    """ADR TMEAAA-180: /style_distill on 在记忆蒸馏活跃时应拒绝并提示暂停。"""
+    plugin._cfg.enable_style_distill = False
+    plugin._cfg.distill_pause = False
+    plugin._cfg.memory_mode = "hybrid"
+
+    results = await _collect(plugin.style_distill(DummyEvent("on")))
+
+    assert len(results) == 1
+    assert "无法开启风格蒸馏" in results[0]
+    assert "distill_pause" in results[0]
+    assert plugin._cfg.enable_style_distill is False
+
+
+@pytest.mark.asyncio
+async def test_style_distill_on_accepted_when_memory_distill_paused(plugin):
+    """ADR TMEAAA-180: /style_distill on 在记忆蒸馏暂停时应正常开启。"""
+    plugin._cfg.enable_style_distill = False
+    plugin._cfg.distill_pause = True
+
+    results = await _collect(plugin.style_distill(DummyEvent("on")))
+
+    assert len(results) == 1
+    assert "已开启" in results[0]
+    assert plugin._cfg.enable_style_distill is True
+
+
+@pytest.mark.asyncio
+async def test_tool_remember_rejects_style_always(plugin):
+    """ADR TMEAAA-180: tool_remember always rejects style-type memories regardless of enable_style_distill."""
     plugin._cfg.enable_style_distill = False
 
     result = await plugin.tool_remember(
@@ -127,7 +157,7 @@ async def test_tool_remember_rejects_style_when_style_distill_disabled(plugin):
         content="用户偏好简洁回复",
         memory_type="style",
     )
-    assert "不接受 style 类型" in result
+    assert "不再通过 remember 工具写入" in result
 
     # 确认未落库
     memories = plugin._list_memories("qq:42", limit=10)
@@ -135,8 +165,8 @@ async def test_tool_remember_rejects_style_when_style_distill_disabled(plugin):
 
 
 @pytest.mark.asyncio
-async def test_tool_remember_accepts_style_when_style_distill_enabled(plugin):
-    """tool_remember must accept style-type memories when enable_style_distill=True."""
+async def test_tool_remember_rejects_style_even_when_distill_enabled(plugin):
+    """ADR TMEAAA-180: tool_remember rejects style-type even when enable_style_distill=True."""
     plugin._cfg.enable_style_distill = True
 
     result = await plugin.tool_remember(
@@ -144,10 +174,10 @@ async def test_tool_remember_accepts_style_when_style_distill_enabled(plugin):
         content="用户偏好简洁回复",
         memory_type="style",
     )
-    assert "已记住" in result
+    assert "不再通过 remember 工具写入" in result
 
     memories = plugin._list_memories("qq:42", limit=10)
-    assert any(m["memory_type"] == "style" for m in memories)
+    assert not any(m["memory_type"] == "style" for m in memories)
 
 
 @pytest.mark.asyncio
@@ -199,3 +229,54 @@ async def test_on_llm_request_does_not_inject_when_memory_injection_disabled(plu
 
     assert req.prompt == "今天喝什么咖啡？"
     assert req.system_prompt == "base system"
+
+
+@pytest.mark.asyncio
+async def test_style_migrate_preview_shows_old_data(plugin):
+    """ADR TMEAAA-180: /style_migrate_preview 只读预览旧 style 记忆。"""
+    plugin._insert_memory(
+        canonical_id="qq:42",
+        adapter="qq",
+        adapter_user="42",
+        memory="用户偏好简洁的风格",
+        score=0.8,
+        memory_type="style",
+        importance=0.7,
+        confidence=0.8,
+    )
+
+    results = await _collect(plugin.style_migrate_preview(DummyEvent("style_migrate_preview")))
+
+    assert len(results) == 1
+    assert "旧 style 记忆预览" in results[0]
+    assert "qq:42" in results[0]
+
+
+@pytest.mark.asyncio
+async def test_build_knowledge_injection_excludes_style(plugin):
+    """ADR TMEAAA-180: _build_knowledge_injection 不包含 style 类型内容。"""
+    plugin._insert_memory(
+        canonical_id="qq:42",
+        adapter="qq",
+        adapter_user="42",
+        memory="用户是程序员",
+        score=0.8,
+        memory_type="fact",
+        importance=0.7,
+        confidence=0.8,
+    )
+    plugin._insert_memory(
+        canonical_id="qq:42",
+        adapter="qq",
+        adapter_user="42",
+        memory="用户偏好简洁风格",
+        score=0.8,
+        memory_type="style",
+        importance=0.7,
+        confidence=0.8,
+    )
+
+    block = await plugin._build_knowledge_injection("qq:42", "用户", limit=5)
+
+    assert "用户是程序员" in block
+    assert "用户偏好简洁风格" not in block, "style memory should be excluded from knowledge injection"

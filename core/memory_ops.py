@@ -151,8 +151,8 @@ class MemoryOps:
             transcript_lines.append(f"{role}: {content}")
 
         transcript = "\n".join(transcript_lines)
-        enable_style = self.plugin._cfg.enable_style_distill
-        persona_profile = self.plugin._cfg.persona_profile if enable_style else ""
+        enable_style = False  # ADR TMEAAA-180: 记忆蒸馏不再包含 style 类型
+        persona_profile = ""
         prompt = self.plugin._distill_mgr.build_distill_prompt(transcript, persona_profile, enable_style=enable_style)
 
         chat_provider_id = await self.plugin._distill_mgr.resolve_distill_provider_id(rows, self.plugin.context)
@@ -284,16 +284,16 @@ class MemoryOps:
                     continue
 
                 valid_items = self.plugin._validate_distill_output(llm_items)
-                has_style = False
                 for item in valid_items:
+                    memory_type = str(item.get("memory_type", "fact"))
+                    # ADR TMEAAA-180: 记忆蒸馏不再处理 style 类型
+                    if memory_type == "style":
+                        continue
                     mem_text = self.plugin._sanitize_text(
                         self.plugin._normalize_text(str(item.get("memory", "")))
                     )
                     if not mem_text:
                         continue
-                    memory_type = str(item.get("memory_type", "fact"))
-                    if memory_type == "style":
-                        has_style = True
                     row_scope = str(rows[0].get("scope", "user"))
                     row_persona = str(rows[0].get("persona_id", ""))
                     new_id = self.plugin._insert_memory(
@@ -312,33 +312,6 @@ class MemoryOps:
                     if self.plugin._vec_available and new_id:
                         await self.plugin._upsert_vector(new_id, mem_text)
                     total_memories += 1
-
-                # 风格蒸馏 v3: 产出 style 记忆后自动创建人格档案
-                if has_style and self.plugin._cfg.enable_style_distill:
-                    try:
-                        source_adapter = str(rows[0].get("source_adapter", ""))
-                        # 将 style 记忆写入临时档案（供用户合并/另存）
-                        for item in valid_items:
-                            if str(item.get("memory_type", "")) == "style":
-                                mem_text = self.plugin._sanitize_text(
-                                    self.plugin._normalize_text(str(item.get("memory", "")))
-                                )
-                                if mem_text:
-                                    self.plugin._style_mgr.insert_temp_profile(
-                                        source_user=canonical_id,
-                                        source_adapter=source_adapter,
-                                        memory_text=mem_text,
-                                        memory_type="style",
-                                        score=self.plugin._clamp01(item.get("score", 0.7)),
-                                        importance=self.plugin._clamp01(item.get("importance", 0.6)),
-                                        confidence=self.plugin._clamp01(item.get("confidence", 0.7)),
-                                        conversation_context=str(rows[0].get("content", ""))[:500],
-                                    )
-                        self.plugin._style_mgr.auto_create_profile_if_ready(
-                            canonical_id, source_adapter
-                        )
-                    except Exception as _te:
-                        logger.warning("[tmemory] temp profile insert failed: %s", _te)
 
                 self.plugin._mark_rows_distilled([int(r["id"]) for r in rows])
                 self.plugin._optimize_context(canonical_id)

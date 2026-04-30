@@ -49,7 +49,7 @@ class DistillManager:
         short = normalized[: self._cfg.memory_max_chars]
         return f"{prefix}记忆: {short}"
 
-    def build_distill_prompt(self, transcript: str, persona_profile: str = "", enable_style: bool = True) -> str:
+    def build_distill_prompt(self, transcript: str, persona_profile: str = "", enable_style: bool = False) -> str:
         """构建蒸馏提示词。
 
         enable_style: False 时跳过 style 类型指令/规则与 persona 提示，

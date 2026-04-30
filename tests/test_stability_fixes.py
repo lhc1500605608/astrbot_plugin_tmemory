@@ -35,6 +35,8 @@ class _StyleDistillEvent:
 
     def __init__(self, message_str: str):
         self.message_str = message_str
+        self.call_llm_blocked = False
+        self.stopped = False
 
     def get_sender_id(self):
         return "42"
@@ -44,6 +46,12 @@ class _StyleDistillEvent:
 
     def plain_result(self, text):
         return text
+
+    def should_call_llm(self, call_llm):
+        self.call_llm_blocked = call_llm
+
+    def stop_event(self):
+        self.stopped = True
 
 
 @pytest.fixture()
@@ -102,8 +110,8 @@ async def test_distill_rows_with_llm_uses_mock_provider(plugin_with_ctx):
 
 
 @pytest.mark.asyncio
-async def test_distill_cycle_extracts_user_chat_style(plugin_with_ctx):
-    """蒸馏周期应能保存用户聊天风格，而不是只保存普通事实。"""
+async def test_distill_cycle_skips_style_items(plugin_with_ctx):
+    """ADR TMEAAA-180: 记忆蒸馏周期跳过 style 类型，不再写入 memories。"""
     plugin, ctx = plugin_with_ctx
 
     await plugin._insert_conversation(
@@ -138,10 +146,10 @@ async def test_distill_cycle_extracts_user_chat_style(plugin_with_ctx):
             ("style-user",),
         ).fetchone()
 
+    # Memory distill cycle should still process the user but skip style items
     assert processed_users == 1
-    assert total_memories == 1
-    assert row["memory_type"] == "style"
-    assert "先给结论" in row["memory"]
+    assert total_memories == 0, "style items should be skipped in memory distill"
+    assert row is None, "no memories should be written for style-only LLM output"
 
 
 @pytest.mark.asyncio
@@ -204,16 +212,23 @@ def test_validate_distill_output_blocks_assistant_style_attribution(plugin):
 
 @pytest.mark.asyncio
 async def test_style_distill_collection_message_is_captured_without_reply(plugin):
-    """style_distill enabled should collect a normal message without producing a bot reply."""
+    """style_distill enabled should collect a normal message into style_conversation_cache."""
     plugin._cfg.enable_auto_capture = True
     plugin._cfg.enable_style_distill = True
 
-    result = await plugin.on_any_message(
-        _StyleDistillEvent("我写作时喜欢先说结论，再用短句补充理由。")
-    )
+    event = _StyleDistillEvent("我写作时喜欢先说结论，再用短句补充理由。")
 
-    rows = plugin._fetch_pending_rows("qq:42", 10)
+    result = await plugin.on_any_message(event)
+
+    # ADR TMEAAA-180: style capture goes to style_conversation_cache
+    with plugin._db() as conn:
+        rows = conn.execute(
+            "SELECT * FROM style_conversation_cache WHERE canonical_user_id=?",
+            ("qq:42",),
+        ).fetchall()
     assert result is None
+    assert event.call_llm_blocked is True
+    assert event.stopped is False
     assert len(rows) == 1
     assert rows[0]["role"] == "user"
     assert "先说结论" in rows[0]["content"]
@@ -222,7 +237,7 @@ async def test_style_distill_collection_message_is_captured_without_reply(plugin
 
 @pytest.mark.asyncio
 async def test_on_llm_response_captures_when_style_distill_on_and_auto_capture_off(plugin):
-    """on_llm_response must capture assistant reply when enable_style_distill=True, even with enable_auto_capture=False."""
+    """on_llm_response must capture assistant reply into style_conversation_cache when enable_style_distill=True, even with enable_auto_capture=False."""
     plugin._cfg.enable_auto_capture = False
     plugin._cfg.capture_assistant_reply = False
     plugin._cfg.enable_style_distill = True
@@ -232,7 +247,12 @@ async def test_on_llm_response_captures_when_style_distill_on_and_auto_capture_o
 
     await plugin.on_llm_response(event, resp)
 
-    pending = plugin._fetch_pending_rows("qq:42", 10)
+    # ADR TMEAAA-180: style capture goes to style_conversation_cache
+    with plugin._db() as conn:
+        pending = conn.execute(
+            "SELECT * FROM style_conversation_cache WHERE canonical_user_id=?",
+            ("qq:42",),
+        ).fetchall()
     assert len(pending) == 1, "assistant reply should be captured for style distill"
     assert pending[0]["role"] == "assistant"
     assert "简洁" in pending[0]["content"]
@@ -272,13 +292,14 @@ async def test_on_llm_response_respects_capture_assistant_reply_when_auto_captur
 
 @pytest.mark.asyncio
 async def test_style_distill_creates_temporary_profile_before_manual_archive(plugin_with_ctx):
-    """Distilled style material should land in a temporary profile before merge/save."""
+    """ADR TMEAAA-180: StyleDistillManager should create temp profiles from style_conversation_cache."""
     plugin, ctx = plugin_with_ctx
     plugin._cfg.enable_style_distill = True
     plugin._cfg.distill_provider_id = "mock-provider"
     plugin._cfg.use_independent_distill_model = True
+    plugin._cfg.style_min_confidence = 0.55
 
-    await plugin._insert_conversation(
+    plugin._style_distill_mgr.insert_style_conversation(
         canonical_id="qq:42",
         role="user",
         content="我表达习惯先给结论，再分三点说明。",
@@ -290,15 +311,20 @@ async def test_style_distill_creates_temporary_profile_before_manual_archive(plu
     async def fake_llm_generate(**kwargs):
         return types.SimpleNamespace(
             completion_text=(
-                '{"memories": [{"memory": "用户表达习惯先给结论再分三点说明", '
-                '"memory_type": "style", "importance": 0.8, "confidence": 0.9, "score": 0.85}]}'
+                '{"style_observations": ['
+                '{"observation": "用户偏好先给结论再展开细节的沟通方式", "evidence": "先给结论，再分三点说明", "confidence": 0.9}'
+                '], '
+                '"prompt_supplement": "用户偏好先给结论再分三点说明的沟通风格。", '
+                '"importance": 0.8}'
             ),
             usage=types.SimpleNamespace(input_other=10, input_cached=0, output=8),
         )
 
     ctx.llm_generate = fake_llm_generate
 
-    await plugin._run_distill_cycle(force=True, trigger="qa-style-temp-profile")
+    users, candidates, profiles = await plugin._style_distill_mgr.run_style_distill_cycle(
+        force=True, trigger="qa-style-temp-profile"
+    )
 
     with plugin._db() as conn:
         temp_tables = conn.execute(
@@ -313,6 +339,8 @@ async def test_style_distill_creates_temporary_profile_before_manual_archive(plu
 
     assert temp_tables, "missing temporary style profile storage"
     assert temp_rows, "style_distill output was not stored as a temporary profile"
+    assert users == 1
+    assert candidates >= 1
 
 
 def test_style_temporary_profile_can_merge_and_save_as_archive(plugin):
@@ -929,13 +957,13 @@ def test_build_distill_prompt_disable_style_excludes_style_section(plugin):
     assert '"memory_type": "preference|fact|task|restriction"' in prompt
 
 
-def test_build_distill_prompt_default_enable_style_backward_compat(plugin):
-    """默认 enable_style=True 保持向后兼容。"""
+def test_build_distill_prompt_default_excludes_style(plugin):
+    """ADR TMEAAA-180: 默认 enable_style=False，记忆蒸馏不包含 style 类型。"""
     prompt = plugin._distill_mgr.build_distill_prompt(
         "user: hello\nassistant: hi",
         persona_profile="test",
     )
-    assert "|style" in prompt
+    assert "|style" not in prompt, "default should exclude style from memory distill prompt"
 
 
 def test_style_distill_config_persists_to_plugin_config_not_global(plugin_module, tmp_path, monkeypatch):

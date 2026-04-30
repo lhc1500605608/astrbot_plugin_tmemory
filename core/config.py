@@ -286,3 +286,4 @@ def apply_safe_defaults(plugin) -> None:
     plugin._distill_skipped_rows = 0
     # 内存缓存：per-user 最近蒸馏完成时间戳（用于节流）
     plugin._user_last_distilled_ts = {}
+    plugin._style_last_distilled_ts = {}
