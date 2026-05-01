@@ -209,40 +209,6 @@ class TestSetPinned:
         assert unpinned[0]["is_pinned"] == 0
 
 
-class TestStyleProfiles:
-    def test_style_profile_crud_and_binding_roundtrip(self, admin):
-        created = admin.create_style_profile(
-            "qa-style", "请使用更有条理的语气。", "qa profile"
-        )
-
-        assert created["id"] > 0
-        assert admin.set_style_binding("qq", "conv-a", created["id"]) is True
-        binding = admin.get_style_binding("qq", "conv-a")
-        assert binding["profile_id"] == created["id"]
-        assert binding["prompt_supplement"] == "请使用更有条理的语气。"
-
-        assert admin.delete_style_profile(created["id"]) is True
-        binding = admin.get_style_binding("qq", "conv-a")
-        assert binding["profile_id"] is None
-
-    def test_style_profile_independent_of_memories_table(self, admin, plugin):
-        """ADR TMEAAA-180: 风格档案独立于 memories 表管理。"""
-        created = admin.create_style_profile(
-            "indie-style", "用户偏好口语化表达。", "独立档案"
-        )
-        pid = created["id"]
-        profile = admin.get_style_profile(pid)
-        assert profile["profile_name"] == "indie-style"
-        assert profile["prompt_supplement"] == "用户偏好口语化表达。"
-
-        # 确认 profiles 表不依赖 memories 表
-        with plugin._db() as conn:
-            style_rows = conn.execute(
-                "SELECT COUNT(1) AS n FROM memories WHERE memory_type='style' AND is_active=1"
-            ).fetchone()
-        # 风格档案创建不应写入 memories 表
-        assert int(style_rows["n"]) == 0
-
 
 # =========================================================================
 # Batch 1.3 — 高风险写操作

@@ -50,11 +50,7 @@ class DistillManager:
         return f"{prefix}记忆: {short}"
 
     def build_distill_prompt(self, transcript: str) -> str:
-        """构建记忆蒸馏提示词。
-
-        ADR TMEAAA-180: 记忆蒸馏不再包含 style 类型或 persona 提示。
-        风格蒸馏由独立的 StyleDistillManager 负责。
-        """
+        """构建记忆蒸馏提示词。"""
         memory_types = "preference|fact|task|restriction"
 
         return (
@@ -144,6 +140,4 @@ class DistillManager:
             return "task"
         if any(k in lowered for k in ["不要", "禁止", "禁忌", "不能"]):
             return "restriction"
-        if any(k in lowered for k in ["风格", "语气", "简洁", "详细"]):
-            return "style"
         return "fact"

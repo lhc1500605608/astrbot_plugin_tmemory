@@ -179,23 +179,8 @@ class TMemoryWebServer:
         app.router.add_post("/api/memory/refine", self._handle_memory_refine)
         app.router.add_post("/api/memory/merge", self._handle_memory_merge)
         app.router.add_post("/api/memory/split", self._handle_memory_split)
-        app.router.add_get("/api/style/memories", self._handle_get_style_memories)
-        app.router.add_get("/api/style/stats", self._handle_get_style_stats)
         app.router.add_get("/api/config", self._handle_get_config)
         app.router.add_patch("/api/config", self._handle_update_config)
-        # Style profiles & bindings (v3)
-        app.router.add_get("/api/style/profiles", self._handle_list_style_profiles)
-        app.router.add_post("/api/style/profile/create", self._handle_create_style_profile)
-        app.router.add_post("/api/style/profile/update", self._handle_update_style_profile)
-        app.router.add_post("/api/style/profile/delete", self._handle_delete_style_profile)
-        app.router.add_get("/api/style/bindings", self._handle_list_style_bindings)
-        app.router.add_post("/api/style/binding/set", self._handle_set_style_binding)
-        app.router.add_post("/api/style/binding/remove", self._handle_remove_style_binding)
-        # Temporary style profiles (风格蒸馏临时档案)
-        app.router.add_get("/api/style/temp-profiles", self._handle_list_temp_profiles)
-        app.router.add_post("/api/style/temp-profile/merge", self._handle_merge_temp_profile)
-        app.router.add_post("/api/style/temp-profile/save", self._handle_save_temp_profile)
-        app.router.add_post("/api/style/temp-profile/delete", self._handle_delete_temp_profile)
         # 测试对话模拟（受 JWT 保护）
         app.router.add_post("/api/test/conversation", self._handle_test_conversation)
 
@@ -490,19 +475,6 @@ class TMemoryWebServer:
             return web.json_response({"error": str(e)}, status=400)
         return web.json_response({"ok": True, **result})
 
-    # ── 聊天风格蒸馏 ─────────────────────────────────────────────────────
-
-    async def _handle_get_style_memories(self, request: web.Request):
-        admin = self._get_admin()
-        user = request.query.get("user", "")
-        memories = admin.get_style_memories(user)
-        return web.json_response({"memories": memories})
-
-    async def _handle_get_style_stats(self, request: web.Request):
-        admin = self._get_admin()
-        stats = admin.get_style_stats()
-        return web.json_response(stats)
-
     async def _handle_get_config(self, request: web.Request):
         self._get_admin()  # ensure auth
         keys = request.query.get("keys", "").split(",")
@@ -528,17 +500,6 @@ class TMemoryWebServer:
 
             current_config = ctx.get_config()
 
-            # 守卫: enable_style_distill 只能通过 /style_distill on|off 指令修改，
-            # 不允许通过 WebUI API 直接写入，防止前端/脚本绕过。
-            style_settings = data.get("style_distill_settings")
-            if isinstance(style_settings, dict) and "enable_style_distill" in style_settings:
-                existing = current_config.get("style_distill_settings", {})
-                if isinstance(existing, dict) and "enable_style_distill" in existing:
-                    style_settings["enable_style_distill"] = existing["enable_style_distill"]
-                else:
-                    style_settings.pop("enable_style_distill", None)
-                data["style_distill_settings"] = style_settings
-
             # update only provided keys
             for k, v in data.items():
                 current_config[k] = v
@@ -550,130 +511,6 @@ class TMemoryWebServer:
             return web.json_response({"status": "ok"})
         except Exception as e:
             return web.json_response({"error": str(e)}, status=400)
-
-    # ── 风格蒸馏 v3: Profiles & Bindings ────────────────────────────────
-
-    async def _handle_list_style_profiles(self, request: web.Request):
-        admin = self._get_admin()
-        profiles = admin.list_style_profiles()
-        return web.json_response({"profiles": profiles})
-
-    async def _handle_create_style_profile(self, request: web.Request):
-        data = await request.json()
-        name = str(data.get("name", "")).strip()
-        prompt_supplement = str(data.get("prompt_supplement", "")).strip()
-        description = str(data.get("description", "")).strip()
-        source_user = str(data.get("source_user", "")).strip()
-        source_adapter = str(data.get("source_adapter", "")).strip()
-        style_summary = str(data.get("style_summary", "")).strip()
-        if not name or not prompt_supplement:
-            return web.json_response({"error": "name and prompt_supplement are required"}, status=400)
-        admin = self._get_admin()
-        result = admin.create_style_profile(
-            name, prompt_supplement, description,
-            source_user, source_adapter, style_summary,
-        )
-        return web.json_response({"ok": True, **result})
-
-    async def _handle_update_style_profile(self, request: web.Request):
-        data = await request.json()
-        profile_id = int(data.get("id", 0))
-        if not profile_id:
-            return web.json_response({"error": "id is required"}, status=400)
-        admin = self._get_admin()
-        ok = admin.update_style_profile(profile_id, **{
-            k: v for k, v in data.items()
-            if k in ("profile_name", "prompt_supplement", "description",
-                      "source_user", "source_adapter", "style_summary")
-        })
-        return web.json_response({"ok": ok})
-
-    async def _handle_delete_style_profile(self, request: web.Request):
-        data = await request.json()
-        profile_id = int(data.get("id", 0))
-        if not profile_id:
-            return web.json_response({"error": "id is required"}, status=400)
-        admin = self._get_admin()
-        ok = admin.delete_style_profile(profile_id)
-        return web.json_response({"ok": ok})
-
-    async def _handle_list_style_bindings(self, request: web.Request):
-        admin = self._get_admin()
-        bindings = admin.list_style_bindings()
-        return web.json_response({"bindings": bindings})
-
-    async def _handle_set_style_binding(self, request: web.Request):
-        data = await request.json()
-        adapter_name = str(data.get("adapter_name", "")).strip()
-        conversation_id = str(data.get("conversation_id", "")).strip()
-        profile_id = int(data.get("profile_id", 0))
-        if not adapter_name or not conversation_id or not profile_id:
-            return web.json_response(
-                {"error": "adapter_name, conversation_id, and profile_id are required"},
-                status=400,
-            )
-        admin = self._get_admin()
-        admin.set_style_binding(adapter_name, conversation_id, profile_id)
-        return web.json_response({"ok": True})
-
-    async def _handle_remove_style_binding(self, request: web.Request):
-        data = await request.json()
-        adapter_name = str(data.get("adapter_name", "")).strip()
-        conversation_id = str(data.get("conversation_id", "")).strip()
-        if not adapter_name or not conversation_id:
-            return web.json_response(
-                {"error": "adapter_name and conversation_id are required"},
-                status=400,
-            )
-        admin = self._get_admin()
-        removed = admin.remove_style_binding(adapter_name, conversation_id)
-        return web.json_response({"ok": removed})
-
-    # ── 临时风格档案管理 ────────────────────────────────────────────
-
-    async def _handle_list_temp_profiles(self, request: web.Request):
-        admin = self._get_admin()
-        source_user = request.query.get("user", "")
-        profiles = admin.list_temp_profiles(source_user)
-        return web.json_response({"temp_profiles": profiles})
-
-    async def _handle_merge_temp_profile(self, request: web.Request):
-        data = await request.json()
-        temp_id = int(data.get("temp_id", 0))
-        target_profile_id = int(data.get("target_profile_id", 0))
-        if not temp_id or not target_profile_id:
-            return web.json_response(
-                {"error": "temp_id and target_profile_id are required"},
-                status=400,
-            )
-        admin = self._get_admin()
-        try:
-            result = admin.merge_temporary_style_profile(temp_id, target_profile_id)
-            return web.json_response({"ok": True, **result})
-        except LookupError as e:
-            return web.json_response({"error": str(e)}, status=404)
-
-    async def _handle_save_temp_profile(self, request: web.Request):
-        data = await request.json()
-        temp_id = int(data.get("temp_id", 0))
-        profile_name = str(data.get("profile_name", "")).strip()
-        if not temp_id:
-            return web.json_response({"error": "temp_id is required"}, status=400)
-        admin = self._get_admin()
-        try:
-            result = admin.save_temporary_style_profile(temp_id, profile_name)
-            return web.json_response({"ok": True, **result})
-        except LookupError as e:
-            return web.json_response({"error": str(e)}, status=404)
-
-    async def _handle_delete_temp_profile(self, request: web.Request):
-        data = await request.json()
-        temp_id = int(data.get("temp_id", 0))
-        if not temp_id:
-            return web.json_response({"error": "temp_id is required"}, status=400)
-        admin = self._get_admin()
-        ok = admin.delete_temp_profile(temp_id)
-        return web.json_response({"ok": ok})
 
     # ── 测试对话模拟 ──────────────────────────────────────────────────
 
