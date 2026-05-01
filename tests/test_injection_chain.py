@@ -101,3 +101,151 @@ async def test_retrieve_memories_respects_limit(plugin):
     results = await plugin._retrieve_memories("u5", "XYZNOTFOUND", limit=3)
     assert len(results) <= 3
 
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Prefix-cache-friendly injection position tests  (TMEAAA-205)
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+class DummyReq:
+    """Minimal ProviderRequest stub for injection-position unit tests."""
+    def __init__(self, prompt: str = "", system_prompt: str = ""):
+        self.prompt = prompt
+        self.system_prompt = system_prompt
+
+
+# ── system_prompt mode (default) ──────────────────────────────────────────────
+
+def test_inject_system_prompt_keeps_static_prefix_first(plugin):
+    """Static system prompt stays at position 0; memory block appended after."""
+    plugin._cfg.inject_position = "system_prompt"
+    req = DummyReq(prompt="你好", system_prompt="你是AI助手。")
+
+    plugin._inject_block_by_position(req, "[用户记忆]\n- (preference) 用户喜欢咖啡")
+
+    assert req.system_prompt.startswith("你是AI助手。"), (
+        "Static system prompt must remain at the start"
+    )
+    idx = req.system_prompt.find("[用户记忆]")
+    assert idx > len("你是AI助手。"), (
+        "Memory block must appear after static system prompt"
+    )
+
+
+def test_inject_system_prompt_does_not_modify_user_prompt(plugin):
+    """system_prompt injection must not touch req.prompt."""
+    plugin._cfg.inject_position = "system_prompt"
+    req = DummyReq(prompt="今天天气怎么样？", system_prompt="你是AI助手。")
+
+    plugin._inject_block_by_position(req, "[用户记忆]\n- (fact) 用户在北京")
+
+    assert req.prompt == "今天天气怎么样？", "User prompt must be unchanged"
+    assert "[用户记忆]" in req.system_prompt
+
+
+# ── slot mode ─────────────────────────────────────────────────────────────────
+
+def test_inject_slot_absent_appends_to_suffix(plugin):
+    """When slot marker is absent, memory appends after static prefix."""
+    plugin._cfg.inject_position = "slot"
+    plugin._cfg.inject_slot_marker = "{{tmemory}}"
+    req = DummyReq(system_prompt="你是AI助手，请用中文回复。")
+
+    plugin._inject_block_by_position(req, "[用户记忆]\n- (fact) 用户是工程师")
+
+    assert req.system_prompt.startswith("你是AI助手，请用中文回复。"), (
+        "Static prefix must stay at start when slot marker is absent"
+    )
+    idx = req.system_prompt.find("[用户记忆]")
+    assert idx > len("你是AI助手，请用中文回复。"), (
+        "Memory block must appear after static prefix"
+    )
+
+
+def test_inject_slot_at_end_preserves_prefix(plugin):
+    """Slot marker at end: memory goes after static prefix (cache-friendly)."""
+    plugin._cfg.inject_position = "slot"
+    plugin._cfg.inject_slot_marker = "{{tmemory}}"
+    req = DummyReq(system_prompt="你是AI助手。\n{{tmemory}}")
+
+    plugin._inject_block_by_position(req, "[用户记忆]\n- (preference) 用户喜欢绿茶")
+
+    assert req.system_prompt.startswith("你是AI助手。"), (
+        "Static prefix must remain at start when slot is at end"
+    )
+    assert req.system_prompt.endswith("[用户记忆]\n- (preference) 用户喜欢绿茶"), (
+        "Memory block must be at the end"
+    )
+    assert "{{tmemory}}" not in req.system_prompt, "Slot marker must be replaced"
+
+
+def test_inject_slot_at_start_allows_user_explicit_choice(plugin):
+    """Slot marker at start: user explicitly chose to break prefix cache."""
+    plugin._cfg.inject_position = "slot"
+    plugin._cfg.inject_slot_marker = "{{tmemory}}"
+    req = DummyReq(system_prompt="{{tmemory}}\n你是AI助手。")
+
+    plugin._inject_block_by_position(req, "[用户记忆]\n- (fact) 用户是学生")
+
+    assert req.system_prompt.startswith("[用户记忆]"), (
+        "When slot is at start, memory goes first (user's explicit choice)"
+    )
+    assert "你是AI助手。" in req.system_prompt
+    assert "{{tmemory}}" not in req.system_prompt
+
+
+# ── user_message modes (unchanged) ────────────────────────────────────────────
+
+def test_inject_user_message_before_prepends_to_prompt(plugin):
+    """user_message_before: memory block prepended to user prompt."""
+    plugin._cfg.inject_position = "user_message_before"
+    req = DummyReq(prompt="今天天气怎么样？", system_prompt="你是AI助手。")
+
+    plugin._inject_block_by_position(req, "[用户记忆]\n- (fact) 用户在北京")
+
+    assert req.prompt.startswith("[用户记忆]"), "Memory must be prepended to user prompt"
+    assert "今天天气怎么样？" in req.prompt
+    assert req.system_prompt == "你是AI助手。", "System prompt must be unchanged"
+
+
+def test_inject_user_message_after_appends_to_prompt(plugin):
+    """user_message_after: memory block appended to user prompt."""
+    plugin._cfg.inject_position = "user_message_after"
+    req = DummyReq(prompt="今天天气怎么样？", system_prompt="你是AI助手。")
+
+    plugin._inject_block_by_position(req, "[用户记忆]\n- (fact) 用户在北京")
+
+    assert req.prompt.startswith("今天天气怎么样？"), "User prompt must stay first"
+    assert "[用户记忆]" in req.prompt
+    assert req.prompt.endswith("[用户记忆]\n- (fact) 用户在北京"), (
+        "Memory must be appended to user prompt"
+    )
+    assert req.system_prompt == "你是AI助手。", "System prompt must be unchanged"
+
+
+# ── End-to-end: on_llm_request integration ────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_on_llm_request_injects_memory_after_static_prefix(plugin):
+    """Full chain: on_llm_request appends memory after static system_prompt."""
+    from tests.test_active_tool_mode_regression import DummyEvent
+
+    # Insert a memory for the test identity
+    _insert_memory(plugin, "qq:42", "用户喜欢喝咖啡")
+
+    plugin._cfg.inject_position = "system_prompt"
+    plugin._cfg.enable_memory_injection = True
+    static_system = "你是AI助手，请用中文回复。"
+
+    req = DummyReq(prompt="今天喝什么？", system_prompt=static_system)
+    await plugin.on_llm_request(DummyEvent("今天喝什么？"), req)
+
+    assert req.system_prompt.startswith(static_system), (
+        "Static system prompt must remain at the start after full injection chain"
+    )
+    idx = req.system_prompt.find("[用户记忆]")
+    assert idx >= len(static_system), (
+        "Memory block must appear after static system prompt"
+    )
+    assert req.prompt == "今天喝什么？", "User prompt must be unchanged"
+

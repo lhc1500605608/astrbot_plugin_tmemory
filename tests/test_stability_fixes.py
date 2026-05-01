@@ -84,6 +84,128 @@ async def test_distill_rows_with_llm_uses_mock_provider(plugin_with_ctx):
     assert tok_out == 50
 
 
+def test_distill_prompt_keeps_static_prefix_stable_for_cache(plugin):
+    """动态风格分析和对话内容应位于静态规则之后，保留可缓存 prompt 前缀。"""
+    style_a = "── 用户风格特征(规则分析) ──\n- 回复简短(平均8字)"
+    style_b = "── 用户风格特征(规则分析) ──\n- 语气倾向: formal"
+
+    prompt_a = plugin._distill_mgr.build_distill_prompt(
+        "user: 哈哈我喜欢黑咖啡", style_a
+    )
+    prompt_b = plugin._distill_mgr.build_distill_prompt(
+        "user: 请记住我周三晚上练球", style_b
+    )
+
+    static_prefix_a = prompt_a[: prompt_a.index(style_a)]
+    static_prefix_b = prompt_b[: prompt_b.index(style_b)]
+
+    assert static_prefix_a == static_prefix_b
+    assert "输出格式(必须严格遵守)" in static_prefix_a
+    assert "── 安全规则 ──" in static_prefix_a
+    assert prompt_a.index(style_a) < prompt_a.index("对话如下:\n")
+    assert prompt_b.index(style_b) < prompt_b.index("对话如下:\n")
+
+
+@pytest.mark.asyncio
+async def test_distill_rows_with_llm_preserves_prompt_prefix_across_batches(
+    plugin_with_ctx,
+):
+    """不同批次的动态内容变化时，发送给 LLM 的静态 prompt 前缀仍应一致。"""
+    plugin, ctx = plugin_with_ctx
+
+    captured_prompts = []
+    fake_resp = types.SimpleNamespace(
+        completion_text='{"memories": []}',
+        usage=types.SimpleNamespace(input_other=10, input_cached=5, output=2),
+    )
+
+    async def fake_llm_generate(**kwargs):
+        captured_prompts.append(kwargs["prompt"])
+        return fake_resp
+
+    ctx.llm_generate = fake_llm_generate
+    plugin._cfg.distill_provider_id = "mock-provider"
+    plugin._cfg.use_independent_distill_model = True
+
+    await plugin._distill_rows_with_llm(
+        [
+            {
+                "id": 1,
+                "role": "user",
+                "content": "哈哈今天也要喝黑咖啡！",
+                "source_adapter": "qq",
+                "source_user_id": "42",
+                "unified_msg_origin": "group:1",
+                "scope": "user",
+                "persona_id": "",
+            },
+            {
+                "id": 2,
+                "role": "user",
+                "content": "哈哈黑咖啡继续安排！",
+                "source_adapter": "qq",
+                "source_user_id": "42",
+                "unified_msg_origin": "group:1",
+                "scope": "user",
+                "persona_id": "",
+            },
+            {
+                "id": 3,
+                "role": "user",
+                "content": "哈哈不加糖！",
+                "source_adapter": "qq",
+                "source_user_id": "42",
+                "unified_msg_origin": "group:1",
+                "scope": "user",
+                "persona_id": "",
+            },
+        ]
+    )
+    await plugin._distill_rows_with_llm(
+        [
+            {
+                "id": 4,
+                "role": "user",
+                "content": "请记住我周三晚上固定练羽毛球。",
+                "source_adapter": "qq",
+                "source_user_id": "42",
+                "unified_msg_origin": "group:1",
+                "scope": "user",
+                "persona_id": "",
+            },
+            {
+                "id": 5,
+                "role": "user",
+                "content": "麻烦提醒事项避开周三晚上。",
+                "source_adapter": "qq",
+                "source_user_id": "42",
+                "unified_msg_origin": "group:1",
+                "scope": "user",
+                "persona_id": "",
+            },
+            {
+                "id": 6,
+                "role": "user",
+                "content": "谢谢，请以后都按这个约束处理。",
+                "source_adapter": "qq",
+                "source_user_id": "42",
+                "unified_msg_origin": "group:1",
+                "scope": "user",
+                "persona_id": "",
+            },
+        ]
+    )
+
+    assert len(captured_prompts) == 2
+    static_prefixes = [
+        prompt[: prompt.index("── 用户风格特征(规则分析) ──")]
+        for prompt in captured_prompts
+    ]
+    assert static_prefixes[0] == static_prefixes[1]
+    assert "哈哈今天也要喝黑咖啡" not in static_prefixes[0]
+    assert "周三晚上固定练羽毛球" not in static_prefixes[1]
+
+
 
 @pytest.mark.asyncio
 async def test_distill_cycle_does_not_extract_assistant_style_without_user_rows(
