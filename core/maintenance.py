@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import re
 import time
 from typing import Dict, List, Tuple
@@ -235,14 +236,19 @@ async def llm_split_memory(plugin, event, memory_text: str) -> List[str]:
 # =============================================================================
 
 def decay_stale_memories(plugin) -> None:
-    """将长期未命中的记忆标记为 stale(is_active=2)，超久的归档(is_active=3)。"""
+    """将长期未命中的记忆标记为 stale(is_active=2)，超久的归档(is_active=3)。
+
+    同时对 attention_score 应用指数衰减：未被召回的记忆随时间衰减，
+    衰减率 λ=0.05/天，使 attention_score 综合 reinforce_count + freshness + initial_importance。
+    """
     now_ts = int(time.time())
     stale_threshold = 30 * 86400
     archive_threshold = 90 * 86400
+    decay_rate = 0.05  # per day
 
     with plugin._db() as conn:
         rows = conn.execute(
-            "SELECT id, last_seen_at FROM memories WHERE is_active = 1 AND is_pinned = 0"
+            "SELECT id, last_seen_at, attention_score FROM memories WHERE is_active = 1 AND is_pinned = 0"
         ).fetchall()
         for row in rows:
             try:
@@ -263,6 +269,17 @@ def decay_stale_memories(plugin) -> None:
                 conn.execute(
                     "UPDATE memories SET is_active = 2 WHERE id = ?",
                     (int(row["id"]),),
+                )
+
+            # 指数衰减 attention_score（未被召回的时间越长衰减越多）
+            days_since_seen = max(0.0, age / 86400.0)
+            decay_factor = math.exp(-decay_rate * days_since_seen)
+            current_attn = float(row["attention_score"] or 0.5)
+            new_attn = max(0.05, current_attn * decay_factor)
+            if abs(new_attn - current_attn) > 0.001:
+                conn.execute(
+                    "UPDATE memories SET attention_score = ? WHERE id = ?",
+                    (new_attn, int(row["id"])),
                 )
 
     auto_prune_low_quality(plugin)

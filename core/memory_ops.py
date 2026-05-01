@@ -38,15 +38,16 @@ class MemoryOps:
         tokenized_memory = " ".join(jieba.cut_for_search(memory))
         with self.plugin._db() as conn:
             row = conn.execute(
-                "SELECT id, reinforce_count FROM memories WHERE canonical_user_id=? AND memory_hash=?",
+                "SELECT id, reinforce_count, attention_score FROM memories WHERE canonical_user_id=? AND memory_hash=?",
                 (canonical_id, mhash),
             ).fetchone()
             if row:
+                existing_attn = float(row["attention_score"] or 0.5)
                 conn.execute(
                     """
                     UPDATE memories
                     SET score=?, memory_type=?, importance=MAX(importance, ?), confidence=MAX(confidence, ?),
-                        reinforce_count=?, last_seen_at=?, updated_at=?, tokenized_memory=?
+                        reinforce_count=?, attention_score=?, last_seen_at=?, updated_at=?, tokenized_memory=?
                     WHERE id=?
                     """,
                     (
@@ -55,6 +56,7 @@ class MemoryOps:
                         self.plugin._clamp01(importance),
                         self.plugin._clamp01(confidence),
                         int(row["reinforce_count"]) + 1,
+                        min(1.0, existing_attn + 0.05),
                         now,
                         now,
                         tokenized_memory,
@@ -91,9 +93,9 @@ class MemoryOps:
                 """
                 INSERT INTO memories(
                     canonical_user_id, source_adapter, source_user_id, source_channel, memory_type,
-                    summary_channel, memory, tokenized_memory, memory_hash, score, importance, confidence, reinforce_count, is_active,
+                    summary_channel, memory, tokenized_memory, memory_hash, score, importance, confidence, reinforce_count, attention_score, is_active,
                     last_seen_at, created_at, updated_at, persona_id, scope
-                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     canonical_id,
@@ -109,6 +111,7 @@ class MemoryOps:
                     self.plugin._clamp01(importance),
                     self.plugin._clamp01(confidence),
                     1,
+                    self.plugin._clamp01(importance),
                     1,
                     now,
                     now,

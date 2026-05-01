@@ -63,7 +63,7 @@ class RetrievalManager:
                 if not query or not fused_results:
                     rows = conn.execute(
                         f"""
-                        SELECT id, memory_type, memory, score, importance, confidence, reinforce_count,
+                        SELECT id, memory_type, memory, score, importance, confidence, reinforce_count, attention_score,
                                last_seen_at, scope, persona_id
                         FROM memories
                         WHERE canonical_user_id=? AND is_active=1 {scope_cond} {persona_cond} {private_cond} {channel_cond}
@@ -79,7 +79,7 @@ class RetrievalManager:
                 placeholders = ",".join("?" * len(hit_ids))
 
                 query_sql = f"""
-                    SELECT id, memory_type, memory, score, importance, confidence, reinforce_count,
+                    SELECT id, memory_type, memory, score, importance, confidence, reinforce_count, attention_score,
                            last_seen_at, scope, persona_id
                     FROM memories
                     WHERE id IN ({placeholders}) AND is_active=1
@@ -113,22 +113,23 @@ class RetrievalManager:
                     pass
 
                 search_relevance = rrf_scores.get(row_id, 0.0)
-                
+                attention_score = float(row.get("attention_score", 0.5) or 0.5)
+
                 if query:
                     final_score = (
                         0.20 * float(row["score"])
-                        + 0.15 * float(row["importance"])
+                        + 0.10 * float(row["importance"])
                         + 0.15 * float(row["confidence"])
                         + 0.40 * search_relevance
-                        + 0.05 * min(1.0, float(row["reinforce_count"]) / 10.0)
+                        + 0.10 * attention_score
                         + recency_bonus
                     )
                 else:
                     final_score = (
                         0.35 * float(row["score"])
-                        + 0.25 * float(row["importance"])
+                        + 0.20 * float(row["importance"])
                         + 0.20 * float(row["confidence"])
-                        + 0.05 * min(1.0, float(row["reinforce_count"]) / 10.0)
+                        + 0.15 * attention_score
                         + recency_bonus
                     )
 
