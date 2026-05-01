@@ -224,6 +224,7 @@ class DatabaseManager:
                 "persona_id": "TEXT NOT NULL DEFAULT ''",
                 "scope": "TEXT NOT NULL DEFAULT 'user'",
                 "tokenized_memory": "TEXT NOT NULL DEFAULT ''",
+                "attention_score": "REAL NOT NULL DEFAULT 0.5",
             }
         )
         # Backfill summary_channel for existing rows: style → persona

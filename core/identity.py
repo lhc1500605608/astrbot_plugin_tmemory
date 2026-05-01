@@ -74,7 +74,7 @@ class IdentityManager:
             rows = conn.execute(
                 """
                 SELECT source_adapter, source_user_id, source_channel, memory_type, memory, memory_hash,
-                       score, importance, confidence, reinforce_count, last_seen_at, is_active,
+                       score, importance, confidence, reinforce_count, attention_score, last_seen_at, is_active,
                        COALESCE(is_pinned, 0) AS is_pinned,
                        COALESCE(summary_channel, 'canonical') AS summary_channel
                 FROM memories WHERE canonical_user_id=?
@@ -88,8 +88,8 @@ class IdentityManager:
                         INSERT INTO memories(
                             canonical_user_id, source_adapter, source_user_id, source_channel,
                             memory_type, summary_channel, memory, memory_hash, score, importance, confidence,
-                            reinforce_count, last_seen_at, created_at, updated_at, is_active, is_pinned
-                        ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            reinforce_count, attention_score, last_seen_at, created_at, updated_at, is_active, is_pinned
+                        ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
                         (
                             to_id,
@@ -104,6 +104,7 @@ class IdentityManager:
                             row["importance"],
                             row["confidence"],
                             row["reinforce_count"],
+                            float(row["attention_score"] or 0.5),
                             row["last_seen_at"],
                             now,
                             now,
@@ -116,12 +117,13 @@ class IdentityManager:
                     # Constraint error - merge by updating scores
                     conn.execute(
                         """
-                        UPDATE memories 
-                        SET score=MAX(score, ?), importance=MAX(importance, ?), 
-                            confidence=MAX(confidence, ?), reinforce_count=reinforce_count+? 
+                        UPDATE memories
+                        SET score=MAX(score, ?), importance=MAX(importance, ?),
+                            confidence=MAX(confidence, ?), reinforce_count=reinforce_count+?,
+                            attention_score=MAX(attention_score, ?)
                         WHERE canonical_user_id=? AND memory_hash=?
                         """,
-                        (row["score"], row["importance"], row["confidence"], row["reinforce_count"] or 0, to_id, row["memory_hash"])
+                        (row["score"], row["importance"], row["confidence"], row["reinforce_count"] or 0, float(row["attention_score"] or 0.5), to_id, row["memory_hash"])
                     )
             
             conn.execute("DELETE FROM memories WHERE canonical_user_id=?", (from_id,))

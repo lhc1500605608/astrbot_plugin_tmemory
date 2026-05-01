@@ -426,7 +426,7 @@ class PluginHelpersMixin:
         with self._db() as conn:
             rows = conn.execute(
                 """
-                SELECT id, memory_type, memory, score, importance, confidence, reinforce_count, updated_at, is_pinned
+                SELECT id, memory_type, memory, score, importance, confidence, reinforce_count, attention_score, updated_at, is_pinned
                 FROM memories
                 WHERE canonical_user_id=? AND is_active=1
                 ORDER BY importance DESC, score DESC, updated_at DESC
@@ -444,6 +444,7 @@ class PluginHelpersMixin:
                 "importance": float(r["importance"]),
                 "confidence": float(r["confidence"]),
                 "reinforce_count": int(r["reinforce_count"]),
+                "attention_score": float(r["attention_score"] or 0.5),
                 "updated_at": str(r["updated_at"]),
                 "is_pinned": int(r["is_pinned"]),
             }
@@ -491,7 +492,7 @@ class PluginHelpersMixin:
         else:
             top_result = deduped[:limit]
 
-        # 对命中的 top 结果进行强化:reinforce_count += 1，批量更新减少 DB 开销
+        # 对命中的 top 结果进行强化:reinforce_count += 1, attention_score += 0.05
         if top_result:
             reinforce_now = self._now()
             reinforce_ids = [int(item["id"]) for item in top_result]
@@ -499,6 +500,7 @@ class PluginHelpersMixin:
             with self._db() as conn:
                 conn.execute(
                     f"UPDATE memories SET reinforce_count = reinforce_count + 1,"
+                    f" attention_score = MIN(1.0, attention_score + 0.05),"
                     f" last_seen_at = ? WHERE id IN ({placeholders})",
                     [reinforce_now, *reinforce_ids],
                 )
@@ -1066,8 +1068,9 @@ class PluginHandlersMixin:
         lines = [f"canonical_id={canonical_id}"]
         for row in memories:
             pin = "📌 " if row.get("is_pinned") else ""
+            attn = row.get("attention_score", 0.0)
             lines.append(
-                f"[{row['id']}] {pin}[{row['memory_type']}] s={row['score']:.2f} i={row['importance']:.2f} c={row['confidence']:.2f} r={row['reinforce_count']} | {row['memory']}"
+                f"[{row['id']}] {pin}[{row['memory_type']}] s={row['score']:.2f} i={row['importance']:.2f} c={row['confidence']:.2f} r={row['reinforce_count']} a={attn:.2f} | {row['memory']}"
             )
         yield event.plain_result("\n".join(lines))
 
