@@ -132,6 +132,297 @@ async def test_distill_cycle_does_not_extract_assistant_style_without_user_rows(
 
 
 @pytest.mark.asyncio
+async def test_distill_cycle_integrates_cache_llm_memory_and_history(plugin_with_ctx):
+    """强制蒸馏应贯通 conversation_cache、LLM、memories 与 distill_history。"""
+    plugin, ctx = plugin_with_ctx
+
+    await plugin._insert_conversation(
+        canonical_id="cycle-user",
+        role="user",
+        content="我每周三晚上都要练羽毛球，提醒事项请避开这个时间。",
+        source_adapter="qq",
+        source_user_id="42",
+        unified_msg_origin="group:1",
+        scope="user",
+        persona_id="persona-a",
+    )
+    await plugin._insert_conversation(
+        canonical_id="cycle-user",
+        role="assistant",
+        content="收到，我会避开周三晚上安排提醒。",
+        source_adapter="qq",
+        source_user_id="42",
+        unified_msg_origin="group:1",
+        scope="user",
+        persona_id="persona-a",
+    )
+
+    seen_kwargs = {}
+    fake_resp = types.SimpleNamespace(
+        completion_text=(
+            '{"memories": [{"memory": "用户每周三晚上练羽毛球，提醒事项需避开该时间", '
+            '"memory_type": "preference", "importance": 0.82, '
+            '"confidence": 0.91, "score": 0.88}]}'
+        ),
+        usage=types.SimpleNamespace(input_other=120, input_cached=10, output=35),
+    )
+
+    async def fake_llm_generate(**kwargs):
+        seen_kwargs.update(kwargs)
+        return fake_resp
+
+    ctx.llm_generate = fake_llm_generate
+    plugin._cfg.distill_provider_id = "mock-provider"
+    plugin._cfg.distill_model_id = "mock-model"
+    plugin._cfg.use_independent_distill_model = True
+
+    processed_users, total_memories = await plugin._run_distill_cycle(
+        force=True, trigger="qa-full-cycle"
+    )
+
+    with plugin._db() as conn:
+        pending = conn.execute(
+            "SELECT COUNT(*) AS n FROM conversation_cache WHERE canonical_user_id=? AND distilled=0",
+            ("cycle-user",),
+        ).fetchone()["n"]
+        memory = conn.execute(
+            """
+            SELECT memory, memory_type, source_channel, scope, persona_id
+            FROM memories
+            WHERE canonical_user_id=?
+            """,
+            ("cycle-user",),
+        ).fetchone()
+        history = conn.execute(
+            """
+            SELECT trigger_type, users_processed, memories_created, users_failed,
+                   tokens_input, tokens_output, tokens_total
+            FROM distill_history
+            ORDER BY id DESC
+            LIMIT 1
+            """
+        ).fetchone()
+
+    assert processed_users == 1
+    assert total_memories == 1
+    assert pending == 0
+    assert seen_kwargs["chat_provider_id"] == "mock-provider"
+    assert seen_kwargs["model_id"] == "mock-model"
+    assert "周三晚上" in seen_kwargs["prompt"]
+    assert memory["memory"] == "用户每周三晚上练羽毛球，提醒事项需避开该时间"
+    assert memory["memory_type"] == "preference"
+    assert memory["source_channel"] == "scheduled_distill"
+    assert memory["scope"] == "user"
+    assert memory["persona_id"] == "persona-a"
+    assert history["trigger_type"] == "qa-full-cycle"
+    assert history["users_processed"] == 1
+    assert history["memories_created"] == 1
+    assert history["users_failed"] == 0
+    assert history["tokens_input"] == 130
+    assert history["tokens_output"] == 35
+    assert history["tokens_total"] == 165
+
+
+@pytest.mark.asyncio
+async def test_distill_cycle_falls_back_to_rule_and_still_persists_memory(
+    plugin_with_ctx,
+):
+    """LLM 异常时 run_distill_cycle 应走规则降级并完成入库与历史记录。"""
+    plugin, ctx = plugin_with_ctx
+
+    await plugin._insert_conversation(
+        canonical_id="fallback-cycle-user",
+        role="user",
+        content="我长期住在杭州，工作日早上通常七点半出门。",
+        source_adapter="qq",
+        source_user_id="42",
+        unified_msg_origin="group:1",
+    )
+
+    async def bad_llm_generate(**kwargs):
+        raise RuntimeError("simulate distill provider outage")
+
+    ctx.llm_generate = bad_llm_generate
+    plugin._cfg.distill_provider_id = "mock-provider"
+    plugin._cfg.use_independent_distill_model = True
+
+    processed_users, total_memories = await plugin._run_distill_cycle(
+        force=True, trigger="qa-rule-fallback-cycle"
+    )
+
+    with plugin._db() as conn:
+        memory = conn.execute(
+            """
+            SELECT memory, memory_type, source_channel
+            FROM memories
+            WHERE canonical_user_id=?
+            """,
+            ("fallback-cycle-user",),
+        ).fetchone()
+        pending = conn.execute(
+            "SELECT COUNT(*) AS n FROM conversation_cache WHERE canonical_user_id=? AND distilled=0",
+            ("fallback-cycle-user",),
+        ).fetchone()["n"]
+        history = conn.execute(
+            """
+            SELECT trigger_type, users_processed, memories_created,
+                   tokens_input, tokens_output, tokens_total
+            FROM distill_history
+            ORDER BY id DESC
+            LIMIT 1
+            """
+        ).fetchone()
+
+    assert processed_users == 1
+    assert total_memories == 1
+    assert pending == 0
+    assert memory["memory_type"] == "fact"
+    assert memory["source_channel"] == "scheduled_distill"
+    assert "杭州" in memory["memory"]
+    assert history["trigger_type"] == "qa-rule-fallback-cycle"
+    assert history["users_processed"] == 1
+    assert history["memories_created"] == 1
+    assert history["tokens_input"] == -1
+    assert history["tokens_output"] == -1
+    assert history["tokens_total"] == -1
+
+
+@pytest.mark.asyncio
+async def test_distill_cycle_marks_conflicting_old_memory_inactive(plugin_with_ctx):
+    """蒸馏入库时应复用 _insert_memory 冲突检测并记录审计事件。"""
+    plugin, ctx = plugin_with_ctx
+
+    old_id = plugin._insert_memory(
+        canonical_id="conflict-cycle-user",
+        adapter="qq",
+        adapter_user="42",
+        memory="用户每周三晚上练羽毛球",
+        score=0.8,
+        memory_type="preference",
+        importance=0.8,
+        confidence=0.8,
+    )
+    await plugin._insert_conversation(
+        canonical_id="conflict-cycle-user",
+        role="user",
+        content="我每周三晚上固定练羽毛球，提醒事项请避开这个时间。",
+        source_adapter="qq",
+        source_user_id="42",
+        unified_msg_origin="group:1",
+    )
+
+    fake_resp = types.SimpleNamespace(
+        completion_text=(
+            '{"memories": [{"memory": "用户每周三晚上练羽毛球，提醒事项需避开该时间", '
+            '"memory_type": "preference", "importance": 0.9, '
+            '"confidence": 0.9, "score": 0.9}]}'
+        ),
+        usage=types.SimpleNamespace(input_other=80, input_cached=0, output=20),
+    )
+
+    async def fake_llm_generate(**kwargs):
+        return fake_resp
+
+    ctx.llm_generate = fake_llm_generate
+    plugin._cfg.distill_provider_id = "mock-provider"
+    plugin._cfg.use_independent_distill_model = True
+
+    processed_users, total_memories = await plugin._run_distill_cycle(
+        force=True, trigger="qa-conflict-cycle"
+    )
+
+    with plugin._db() as conn:
+        old_memory = conn.execute(
+            "SELECT is_active FROM memories WHERE id=?", (old_id,)
+        ).fetchone()
+        active_new = conn.execute(
+            """
+            SELECT COUNT(*) AS n FROM memories
+            WHERE canonical_user_id=? AND is_active=1 AND source_channel='scheduled_distill'
+            """,
+            ("conflict-cycle-user",),
+        ).fetchone()["n"]
+        event = conn.execute(
+            """
+            SELECT event_type, payload_json
+            FROM memory_events
+            WHERE canonical_user_id=?
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            ("conflict-cycle-user",),
+        ).fetchone()
+
+    assert processed_users == 1
+    assert total_memories == 1
+    assert old_memory["is_active"] == 0
+    assert active_new == 1
+    assert event["event_type"] == "create_with_conflict"
+    assert '"deactivated_count": 1' in event["payload_json"]
+
+
+@pytest.mark.asyncio
+async def test_distill_cycle_triggers_memory_decay_after_success(plugin_with_ctx):
+    """run_distill_cycle 完成后应触发衰减，把长期未命中的旧记忆标记 stale。"""
+    plugin, ctx = plugin_with_ctx
+
+    stale_id = _insert_memory_with_age(
+        plugin,
+        "decay-cycle-user",
+        "用户喜欢长途徒步旅行",
+        days_old=35,
+        score=0.8,
+        importance=0.8,
+        confidence=0.8,
+    )
+    await plugin._insert_conversation(
+        canonical_id="fresh-cycle-user",
+        role="user",
+        content="我喜欢用番茄钟安排深度工作。",
+        source_adapter="qq",
+        source_user_id="43",
+        unified_msg_origin="group:1",
+    )
+
+    fake_resp = types.SimpleNamespace(
+        completion_text=(
+            '{"memories": [{"memory": "用户喜欢用番茄钟安排深度工作", '
+            '"memory_type": "preference", "importance": 0.8, '
+            '"confidence": 0.9, "score": 0.85}]}'
+        ),
+        usage=types.SimpleNamespace(input_other=70, input_cached=0, output=18),
+    )
+
+    async def fake_llm_generate(**kwargs):
+        return fake_resp
+
+    ctx.llm_generate = fake_llm_generate
+    plugin._cfg.distill_provider_id = "mock-provider"
+    plugin._cfg.use_independent_distill_model = True
+
+    processed_users, total_memories = await plugin._run_distill_cycle(
+        force=True, trigger="qa-decay-cycle"
+    )
+
+    with plugin._db() as conn:
+        stale_memory = conn.execute(
+            "SELECT is_active FROM memories WHERE id=?", (stale_id,)
+        ).fetchone()
+        fresh_memory = conn.execute(
+            """
+            SELECT is_active FROM memories
+            WHERE canonical_user_id=? AND source_channel='scheduled_distill'
+            """,
+            ("fresh-cycle-user",),
+        ).fetchone()
+
+    assert processed_users == 1
+    assert total_memories == 1
+    assert stale_memory["is_active"] == 2
+    assert fresh_memory["is_active"] == 1
+
+
+@pytest.mark.asyncio
 async def test_on_llm_response_skips_when_both_switches_off(plugin):
     """on_llm_response must skip capture when enable_auto_capture and capture_assistant_reply are off."""
     plugin._cfg.enable_auto_capture = False
@@ -750,4 +1041,3 @@ def test_safe_bool_handles_string_true(plugin_module, tmp_path, monkeypatch):
         config={"enable_auto_capture": "true"},
     )
     assert p._cfg.enable_auto_capture is True
-
