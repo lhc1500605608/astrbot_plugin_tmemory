@@ -1,6 +1,7 @@
 import re
 import asyncio
 import logging
+import os
 from typing import List, Optional, Dict
 from dataclasses import dataclass, field
 
@@ -264,3 +265,168 @@ def apply_safe_defaults(plugin) -> None:
     plugin._distill_skipped_rows = 0
     # 内存缓存：per-user 最近蒸馏完成时间戳（用于节流）
     plugin._user_last_distilled_ts = {}
+
+
+# =============================================================================
+# Plugin lifecycle mixin
+# =============================================================================
+
+import importlib.util
+
+
+class _NullWebServer:
+    """WebUI 降级替身，保证核心功能不受 WebUI 加载失败影响。"""
+
+    async def start(self) -> None:
+        pass
+
+    async def stop(self) -> None:
+        pass
+
+
+class PluginLifecycleMixin:
+    def _set_safe_defaults(self):
+        """设置所有配置属性的安全默认值，确保任何配置解析失败都不会导致 AttributeError。
+        
+        实现细节见 core.config.apply_safe_defaults。
+        """
+        from .config import apply_safe_defaults
+        apply_safe_defaults(self)
+
+    def _get_vector_retrieval_config(self) -> Dict:
+        """兼容旧平铺配置和新嵌套配置的向量检索配置读取。"""
+        vector_cfg = self.config.get("vector_retrieval", {})
+        if not isinstance(vector_cfg, dict):
+            vector_cfg = {}
+
+        merged = dict(vector_cfg)
+        legacy_keys = (
+            "enable_vector_search",
+            "embedding_provider",
+            "embedding_api_key",
+            "embedding_model",
+            "embedding_base_url",
+            "vector_dim",
+            "auto_rebuild_on_dim_change",
+        )
+        for key in legacy_keys:
+            if key not in merged and key in self.config:
+                merged[key] = self.config.get(key)
+        return merged
+
+    def _get_vector_retrieval_config_from_cfg(self) -> Dict:
+        """从 self._cfg 返回 vector_retrieval 字典用于传递给 VectorManager"""
+        return {
+            "enable_vector_search": self._cfg.enable_vector_search,
+            "embedding_provider": self._cfg.embed_provider_id,
+            "embedding_api_key": self._cfg.embed_api_key,
+            "embedding_model": self._cfg.embed_model_id,
+            "embedding_base_url": self._cfg.embed_base_url,
+            "vector_dim": self._cfg.embed_dim,
+        }
+
+    def _safe_load_web_server(self):
+        """安全加载 WebUI 服务器，失败时降级为 _NullWebServer。"""
+        try:
+            TMemoryWebServer = self._load_web_server_class()
+            webui_cfg = dict(self.config)
+            webui_sub = self.config.get("webui_settings", {})
+            if isinstance(webui_sub, dict):
+                webui_cfg.update(webui_sub)
+            return TMemoryWebServer(self, webui_cfg)
+        except Exception as e:
+            logger.warning(
+                "[tmemory] WebUI 加载失败，核心功能不受影响: %s", e
+            )
+            return _NullWebServer()
+
+    def _load_web_server_class(self):
+        """通过文件路径动态加载 web_server.py，避免 `No module named 'web_server'`。"""
+        web_server_path = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "web_server.py"
+        )
+        if not os.path.exists(web_server_path):
+            raise ImportError(f"web_server.py not found: {web_server_path}")
+
+        plugin_module = self.__class__.__module__
+        module_prefix = plugin_module.rsplit(".", 1)[0] if "." in plugin_module else self.plugin_name
+        module_name = f"{module_prefix}.web_server"
+        spec = importlib.util.spec_from_file_location(module_name, web_server_path)
+        if spec is None or spec.loader is None:
+            raise ImportError("failed to create module spec for web_server.py")
+
+        module = importlib.util.module_from_spec(spec)
+        sys_modules = __import__("sys").modules
+        sys_modules[module_name] = module
+        spec.loader.exec_module(module)
+
+        cls = getattr(module, "TMemoryWebServer", None)
+        if cls is None:
+            raise ImportError("TMemoryWebServer not found in web_server.py")
+        return cls
+
+    async def initialize(self):
+        self._init_db()
+        self._migrate_schema()
+
+        # 初始化 VectorManager(如果向量检索启用)
+        if self._cfg.enable_vector_search:
+            try:
+                from ..vector_manager import VectorManager
+                vr = self._get_vector_retrieval_config_from_cfg()
+                self._vector_manager = VectorManager(self.db_path, vr)
+                await self._vector_manager.initialize()
+                logger.info("[tmemory] VectorManager initialized")
+            except Exception as e:
+                logger.error("[tmemory] Failed to initialize VectorManager: %s", e)
+                self._vector_manager = None
+
+        self._worker_running = True
+        self._distill_task = asyncio.create_task(self._distill_worker_loop())
+
+        # 启动独立 WebUI 服务器
+        try:
+            await self._web_server.start()
+        except Exception as e:
+            logger.warning("[tmemory] WebUI 启动失败，核心功能不受影响: %s", e)
+            self._web_server = _NullWebServer()
+
+        logger.info(
+            "[tmemory] initialized, db=%s, auto_capture=%s, memory_injection=%s, distill_interval=%ss, memory_mode=%s",
+            self.db_path,
+            self._cfg.enable_auto_capture,
+            self._cfg.enable_memory_injection,
+            self._cfg.distill_interval_sec,
+            self._cfg.memory_mode,
+        )
+
+    async def terminate(self):
+        self._worker_running = False
+        if self._distill_task and not self._distill_task.done():
+            self._distill_task.cancel()
+            try:
+                await self._distill_task
+            except asyncio.CancelledError:
+                pass
+        # 关闭 VectorManager
+        if self._vector_manager:
+            try:
+                await self._vector_manager.close()
+                logger.info("[tmemory] VectorManager closed")
+            except Exception as e:
+                logger.warning("[tmemory] VectorManager close exception: %s", e)
+        # 关闭 WebUI 服务器
+        try:
+            await self._web_server.stop()
+        except Exception as e:
+            logger.warning("[tmemory] WebUI 关闭异常: %s", e)
+        # 关闭 aiohttp session（向量检索启用时防止连接泄漏）
+        if self._http_session and not self._http_session.closed:
+            try:
+                await self._http_session.close()
+            except Exception as e:
+                logger.warning("[tmemory] http_session 关闭异常: %s", e)
+        # 关闭持久 DB 连接
+        self._close_db()
+        logger.info("[tmemory] terminated")
+

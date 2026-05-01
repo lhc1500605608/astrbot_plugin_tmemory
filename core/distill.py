@@ -3,6 +3,8 @@ from typing import List, Dict
 from collections import Counter
 from .config import PluginConfig
 from .capture import CaptureFilter
+from . import distill_validator as _distill_validator
+from . import maintenance as _maintenance
 import logging
 
 logger = logging.getLogger("astrbot")
@@ -141,3 +143,163 @@ class DistillManager:
         if any(k in lowered for k in ["不要", "禁止", "禁忌", "不能"]):
             return "restriction"
         return "fact"
+
+
+# =============================================================================
+# Plugin distill runtime mixin
+# =============================================================================
+
+import asyncio
+import json
+import re
+import time
+from typing import Dict, List, Tuple
+
+from astrbot.api import logger
+
+
+class DistillRuntimeMixin:
+    async def _distill_worker_loop(self):
+        """后台定时蒸馏循环。"""
+        await asyncio.sleep(8)
+        while self._worker_running:
+            if not self._cfg.distill_pause and self._cfg.memory_mode != "active_only":
+                try:
+                    users, memories = await self._run_distill_cycle(
+                        force=False, trigger="auto"
+                    )
+                    if users > 0:
+                        logger.info(
+                            "[tmemory] distill cycle done: users=%s memories=%s",
+                            users,
+                            memories,
+                        )
+                except Exception as e:
+                    logger.warning("[tmemory] distill worker error: %s", e)
+
+            # 如有用户合并待处理，在下一轮 sleep 前补全向量索引
+            if self._merge_needs_vector_rebuild and self._vec_available:
+                try:
+                    ok, fail = await self._rebuild_vector_index()
+                    if ok > 0:
+                        logger.info(
+                            "[tmemory] post-merge vector rebuild: ok=%s fail=%s",
+                            ok,
+                            fail,
+                        )
+                except Exception as _e:
+                    logger.debug("[tmemory] post-merge vector rebuild error: %s", _e)
+                self._merge_needs_vector_rebuild = False
+
+            # 提纯调度:每隔 purify_interval_days 天对全部记忆做质量重评
+            if self._cfg.purify_interval_days > 0:
+                now_ts = time.time()
+                interval_sec = self._cfg.purify_interval_days * 86400
+                if now_ts - self._last_purify_ts >= interval_sec:
+                    try:
+                        pruned, kept = await self._run_memory_purify()
+                        logger.info(
+                            "[tmemory] memory purify done: pruned=%s kept=%s",
+                            pruned,
+                            kept,
+                        )
+                        self._last_purify_ts = now_ts
+                    except Exception as _qe:
+                        logger.warning("[tmemory] memory purify error: %s", _qe)
+
+            await asyncio.sleep(max(3600, self._cfg.distill_interval_sec))
+
+    async def _run_distill_cycle(
+        self, force: bool = False, trigger: str = "manual"
+    ) -> Tuple[int, int]:
+        from .memory_ops import MemoryOps
+        return await MemoryOps(self).run_distill_cycle(force, trigger)
+
+    def _prefilter_distill_rows(self, rows: List[Dict]) -> List[Dict]:
+        """蒸馏前预过滤：去除低信息量行，减少送入 LLM 的无效 token。
+
+        过滤规则（满足任一则跳过该行）：
+        - content 在 _is_low_info_content 判定为低信息量
+        - role 为 'summary'（规则摘要行，已浓缩，不重复蒸馏）
+
+        保留规则：
+        - 如果过滤后为空，返回空列表（由调用方决定跳过 LLM 调用）
+        - 始终保留 role=assistant 行与其配对的 user 行（上下文完整性）
+          → 实现上采用宽松策略：只过滤掉纯噪声 user 行，不做配对强制保留
+        """
+        if not rows:
+            return []
+
+        filtered = []
+        for row in rows:
+            role = str(row.get("role", ""))
+            content = str(row.get("content", ""))
+
+            # 跳过规则摘要行（已是浓缩形式，无需再蒸馏）
+            if role == "summary":
+                continue
+
+            # 跳过低信息量行
+            if self._capture_filter.is_low_info_content(content):
+                continue
+
+            filtered.append(row)
+
+        return filtered
+
+    async def _distill_rows_with_llm(
+        self, rows: List[Dict]
+    ) -> Tuple[List[Dict[str, object]], int, int]:
+        from .memory_ops import MemoryOps
+        return await MemoryOps(self).distill_rows_with_llm(rows)
+
+    def _parse_llm_json_memories(self, raw_text: str) -> List[Dict[str, object]]:
+        from .llm_helpers import LLMHelpers
+        return LLMHelpers.parse_llm_json_memories(
+            raw_text, self._normalize_text, self._safe_memory_type, self._clamp01
+        )
+
+    def _strip_think_tags(self, text: str) -> str:
+        from .llm_helpers import LLMHelpers
+        return LLMHelpers.strip_think_tags(text)
+
+    async def _run_memory_purify(self) -> tuple[int, int]:
+        """对全量已蒸馏记忆进行提纯。见 core.maintenance.run_memory_purify。"""
+        return await _maintenance.run_memory_purify(self)
+
+    async def _llm_purify_judge(
+        self, provider_id: str, memories: List[Dict]
+    ) -> List[int]:
+        return await _maintenance.llm_purify_judge(self, provider_id, memories)
+
+    async def _run_quality_refinement(self) -> tuple[int, int]:
+        """兼容旧方法名，等价 _run_memory_purify。"""
+        return await self._run_memory_purify()
+
+    def _record_distill_history(self, **kwargs):
+        _distill_validator.record_distill_history(self, **kwargs)
+
+    def _get_distill_history(self, limit: int = 20) -> List[Dict]:
+        return _distill_validator.get_distill_history(self, limit=limit)
+
+    def _get_distill_cost_summary(self, last_n: int = 10) -> Dict:
+        return _distill_validator.get_distill_cost_summary(self, last_n=last_n)
+
+    def _validate_distill_output(
+        self, items: List[Dict[str, object]]
+    ) -> List[Dict[str, object]]:
+        return _distill_validator.validate_distill_output(self, items)
+
+    def _is_junk_memory(self, text: str) -> bool:
+        return _distill_validator.is_junk_memory(text)
+
+    def _is_unsafe_memory(self, text: str) -> bool:
+        return _distill_validator.is_unsafe_memory(text)
+
+    def _decay_stale_memories(self):
+        _maintenance.decay_stale_memories(self)
+
+    def _auto_prune_low_quality(self):
+        _maintenance.auto_prune_low_quality(self)
+
+
