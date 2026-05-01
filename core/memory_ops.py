@@ -34,6 +34,7 @@ class MemoryOps:
         ).hexdigest()
         now = self.plugin._now()
         memory_type_safe = self.plugin._safe_memory_type(memory_type)
+        summary_channel = "persona" if memory_type_safe == "style" else "canonical"
         tokenized_memory = " ".join(jieba.cut_for_search(memory))
         with self.plugin._db() as conn:
             row = conn.execute(
@@ -90,9 +91,9 @@ class MemoryOps:
                 """
                 INSERT INTO memories(
                     canonical_user_id, source_adapter, source_user_id, source_channel, memory_type,
-                    memory, tokenized_memory, memory_hash, score, importance, confidence, reinforce_count, is_active,
+                    summary_channel, memory, tokenized_memory, memory_hash, score, importance, confidence, reinforce_count, is_active,
                     last_seen_at, created_at, updated_at, persona_id, scope
-                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     canonical_id,
@@ -100,6 +101,7 @@ class MemoryOps:
                     adapter_user,
                     source_channel,
                     memory_type_safe,
+                    summary_channel,
                     memory,
                     tokenized_memory,
                     mhash,
@@ -492,12 +494,14 @@ def update_memory_full(
     now = plugin._now()
     mhash = hashlib.sha256(plugin._normalize_text(memory).encode("utf-8")).hexdigest()
     tokenized_memory = " ".join(jieba.cut_for_search(memory))
+    summary_channel = "persona" if plugin._safe_memory_type(memory_type) == "style" else "canonical"
     with plugin._db() as conn:
         conn.execute(
             """
             UPDATE memories
-            SET memory=?, tokenized_memory=?, memory_hash=?, memory_type=?, score=?, importance=?, confidence=?, updated_at=?
+            SET memory=?, tokenized_memory=?, memory_hash=?, memory_type=?, summary_channel=?,
+                score=?, importance=?, confidence=?, updated_at=?
             WHERE id=?
             """,
-            (memory, tokenized_memory, mhash, memory_type, score, importance, confidence, now, memory_id),
+            (memory, tokenized_memory, mhash, memory_type, summary_channel, score, importance, confidence, now, memory_id),
         )

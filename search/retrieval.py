@@ -28,10 +28,13 @@ class RetrievalManager:
         scope: str = "user",
         persona_id: str = "",
         exclude_private: bool = False,
+        summary_channel: str = "canonical",
     ) -> Tuple[List[Dict[str, object]], List[Dict[str, object]]]:
         """执行底层数据库检索和重排序，返回 (未精排的候选结果列表, 需要更新reinforce的ID)
-        
+
         实际 Rerank 将留给主类以便调用 LLM。
+        summary_channel: 'canonical' for fact-oriented search, 'persona' for style injection,
+                         empty string for all channels.
         """
         now_ts = int(time.time())
 
@@ -44,6 +47,8 @@ class RetrievalManager:
             persona_cond = "AND (persona_id=? OR persona_id='')"
             persona_params = [persona_id]
             private_cond = "AND scope != 'private'" if exclude_private else ""
+            channel_cond = "AND summary_channel = ?" if summary_channel else ""
+            channel_params = [summary_channel] if summary_channel else []
 
             with self._db_mgr.db() as conn:
                 hybrid_system = HybridMemorySystem(conn, self._cfg.embed_dim)
@@ -61,26 +66,26 @@ class RetrievalManager:
                         SELECT id, memory_type, memory, score, importance, confidence, reinforce_count,
                                last_seen_at, scope, persona_id
                         FROM memories
-                        WHERE canonical_user_id=? AND is_active=1 {scope_cond} {persona_cond} {private_cond}
+                        WHERE canonical_user_id=? AND is_active=1 {scope_cond} {persona_cond} {private_cond} {channel_cond}
                         ORDER BY score DESC, updated_at DESC
                         LIMIT ?
                         """,
-                        (canonical_id, *scope_params, *persona_params, limit * 3),
+                        (canonical_id, *scope_params, *persona_params, *channel_params, limit * 3),
                     ).fetchall()
                     return [dict(r) | {"_retrieval_score": r["score"]} for r in rows], []
 
                 rrf_scores = {item["id"]: item["rrf_score"] for item in fused_results}
                 hit_ids = [str(r["id"]) for r in fused_results]
                 placeholders = ",".join("?" * len(hit_ids))
-                
+
                 query_sql = f"""
                     SELECT id, memory_type, memory, score, importance, confidence, reinforce_count,
                            last_seen_at, scope, persona_id
-                    FROM memories 
+                    FROM memories
                     WHERE id IN ({placeholders}) AND is_active=1
-                    {scope_cond} {persona_cond} {private_cond}
+                    {scope_cond} {persona_cond} {private_cond} {channel_cond}
                 """
-                rows = conn.execute(query_sql, [*hit_ids, *scope_params, *persona_params]).fetchall()
+                rows = conn.execute(query_sql, [*hit_ids, *scope_params, *persona_params, *channel_params]).fetchall()
                 candidates = {int(r["id"]): dict(r) for r in rows}
                 
                 return candidates, rrf_scores

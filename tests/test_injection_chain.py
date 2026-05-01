@@ -249,3 +249,108 @@ async def test_on_llm_request_injects_memory_after_static_prefix(plugin):
     )
     assert req.prompt == "今天喝什么？", "User prompt must be unchanged"
 
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Dual-channel summary separation tests  (TMEAAA-198)
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _insert_typed_memory(plugin, canonical_id: str, memory: str, memory_type: str, score: float = 0.8) -> int:
+    return plugin._insert_memory(
+        canonical_id=canonical_id,
+        adapter="qq",
+        adapter_user="42",
+        memory=memory,
+        score=score,
+        memory_type=memory_type,
+        importance=0.7,
+        confidence=0.8,
+    )
+
+
+@pytest.mark.asyncio
+async def test_style_memory_gets_persona_channel(plugin):
+    """Style-type memories are automatically tagged as persona channel."""
+    mid = _insert_typed_memory(plugin, "u-dc1", "用户沟通风格随意", memory_type="style")
+    with plugin._db() as conn:
+        row = conn.execute(
+            "SELECT summary_channel FROM memories WHERE id=?", (mid,)
+        ).fetchone()
+    assert row["summary_channel"] == "persona"
+
+
+@pytest.mark.asyncio
+async def test_fact_memory_gets_canonical_channel(plugin):
+    """Non-style memories are automatically tagged as canonical channel."""
+    mid = _insert_typed_memory(plugin, "u-dc2", "用户喜欢喝咖啡", memory_type="preference")
+    with plugin._db() as conn:
+        row = conn.execute(
+            "SELECT summary_channel FROM memories WHERE id=?", (mid,)
+        ).fetchone()
+    assert row["summary_channel"] == "canonical"
+
+
+@pytest.mark.asyncio
+async def test_canonical_retrieval_excludes_persona_memories(plugin):
+    """Retrieval with summary_channel='canonical' excludes style/persona memories."""
+    _insert_typed_memory(plugin, "u-dc3", "用户喜欢爬山", memory_type="preference")
+    _insert_typed_memory(plugin, "u-dc3", "用户沟通风格随意，常用'哈哈'", memory_type="style")
+
+    results = await plugin._retrieve_memories(
+        "u-dc3", "爬山", limit=5, summary_channel="canonical"
+    )
+    memories = [r["memory"] for r in results]
+    assert "用户喜欢爬山" in memories
+    assert not any("风格" in m for m in memories), (
+        "Persona channel memories must not appear in canonical search results"
+    )
+
+
+@pytest.mark.asyncio
+async def test_persona_retrieval_only_returns_style_memories(plugin):
+    """Retrieval with summary_channel='persona' only returns style memories."""
+    _insert_typed_memory(plugin, "u-dc4", "用户是一名工程师", memory_type="fact")
+    _insert_typed_memory(plugin, "u-dc4", "用户喜欢用emoji表达", memory_type="style")
+
+    results = await plugin._retrieve_memories(
+        "u-dc4", "", limit=5, summary_channel="persona"
+    )
+    memories = [r["memory"] for r in results]
+    assert all(r["memory_type"] == "style" for r in results), (
+        "Persona channel retrieval must only return style-type memories"
+    )
+    assert len(memories) >= 1
+
+
+@pytest.mark.asyncio
+async def test_build_knowledge_injection_dual_channel(plugin):
+    """_build_knowledge_injection fetches both canonical and persona channels."""
+    _insert_typed_memory(plugin, "u-dc5", "用户喜欢喝绿茶", memory_type="preference")
+    _insert_typed_memory(plugin, "u-dc5", "用户沟通风格简短，常用'好的'回复", memory_type="style")
+
+    block = await plugin._build_knowledge_injection("u-dc5", "绿茶", limit=5)
+    assert "[用户记忆]" in block, "Canonical channel memories must appear in injection"
+    assert "用户喜欢喝绿茶" in block
+    assert "[用户风格指导]" in block, "Persona channel memories must appear in injection"
+    assert "好的" in block
+
+
+@pytest.mark.asyncio
+async def test_build_knowledge_injection_style_only_no_query_pollution(plugin):
+    """Style memories are fetched by importance, not matched against user query."""
+    _insert_typed_memory(plugin, "u-dc6", "用户常用'哈哈'和emoji表达情绪", memory_type="style")
+    # No canonical memories exist for this user
+
+    block = await plugin._build_knowledge_injection("u-dc6", "今天吃什么", limit=5)
+    # Style channel should still produce injection block (without query matching)
+    assert "[用户风格指导]" in block
+    assert "[用户记忆]" not in block, (
+        "No canonical memories exist, so knowledge block must be absent"
+    )
+
+
+@pytest.mark.asyncio
+async def test_build_knowledge_injection_no_memories_returns_empty(plugin):
+    """No memories across either channel → empty injection block."""
+    block = await plugin._build_knowledge_injection("u-dc-none", "anything", limit=5)
+    assert block == ""
+
