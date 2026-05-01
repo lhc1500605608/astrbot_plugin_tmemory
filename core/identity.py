@@ -75,7 +75,8 @@ class IdentityManager:
                 """
                 SELECT source_adapter, source_user_id, source_channel, memory_type, memory, memory_hash,
                        score, importance, confidence, reinforce_count, last_seen_at, is_active,
-                       COALESCE(is_pinned, 0) AS is_pinned
+                       COALESCE(is_pinned, 0) AS is_pinned,
+                       COALESCE(summary_channel, 'canonical') AS summary_channel
                 FROM memories WHERE canonical_user_id=?
                 """,
                 (from_id,),
@@ -86,9 +87,9 @@ class IdentityManager:
                         """
                         INSERT INTO memories(
                             canonical_user_id, source_adapter, source_user_id, source_channel,
-                            memory_type, memory, memory_hash, score, importance, confidence,
+                            memory_type, summary_channel, memory, memory_hash, score, importance, confidence,
                             reinforce_count, last_seen_at, created_at, updated_at, is_active, is_pinned
-                        ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
                         (
                             to_id,
@@ -96,6 +97,7 @@ class IdentityManager:
                             row["source_user_id"],
                             row["source_channel"],
                             row["memory_type"],
+                            row["summary_channel"],
                             row["memory"],
                             row["memory_hash"],
                             row["score"],

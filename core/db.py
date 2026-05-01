@@ -214,6 +214,7 @@ class DatabaseManager:
             {
                 "source_channel": "TEXT NOT NULL DEFAULT 'default'",
                 "memory_type": "TEXT NOT NULL DEFAULT 'fact'",
+                "summary_channel": "TEXT NOT NULL DEFAULT 'canonical'",
                 "importance": "REAL NOT NULL DEFAULT 0.5",
                 "confidence": "REAL NOT NULL DEFAULT 0.5",
                 "reinforce_count": "INTEGER NOT NULL DEFAULT 0",
@@ -224,6 +225,11 @@ class DatabaseManager:
                 "scope": "TEXT NOT NULL DEFAULT 'user'",
                 "tokenized_memory": "TEXT NOT NULL DEFAULT ''",
             }
+        )
+        # Backfill summary_channel for existing rows: style → persona
+        conn.execute(
+            "UPDATE memories SET summary_channel = 'persona' "
+            "WHERE summary_channel = 'canonical' AND memory_type = 'style'"
         )
         self._ensure_columns(
             conn,

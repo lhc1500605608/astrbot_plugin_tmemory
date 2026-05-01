@@ -82,35 +82,49 @@ class PluginHelpersMixin:
         persona_id: str = "",
         exclude_private: bool = False,
     ) -> str:
-        """构建知识/偏好记忆注入块。"""
-        rows = await self._retrieve_memories(
+        """构建知识/偏好记忆注入块。
+
+        双通道设计:
+        - canonical 通道: 用查询语义搜索事实/偏好/任务/限制类记忆
+        - persona 通道: 按重要性取 top 风格记忆，不参与查询匹配
+        避免风格噪音污染可搜索的事实记忆。
+        """
+        # 通道 1: 事实导向记忆，用查询做语义匹配
+        canonical_rows = await self._retrieve_memories(
             canonical_user_id,
             query,
             limit,
             scope=scope,
             persona_id=persona_id,
             exclude_private=exclude_private,
+            summary_channel="canonical",
         )
-        if not rows:
-            return ""
 
-        if not rows:
-            return ""
+        # 通道 2: 人格风格记忆，不参与查询匹配，取最重要的几条
+        persona_rows = await self._retrieve_memories(
+            canonical_user_id,
+            "",  # 空查询:按 score/importance 排序，不做语义匹配
+            min(limit, 3),  # 风格记忆不宜过多
+            scope=scope,
+            persona_id=persona_id,
+            exclude_private=exclude_private,
+            summary_channel="persona",
+        )
 
-        knowledge_rows = [r for r in rows if r["memory_type"] != "style"]
-        style_rows = [r for r in rows if r["memory_type"] == "style"]
+        if not canonical_rows and not persona_rows:
+            return ""
 
         blocks: list[str] = []
 
-        if knowledge_rows:
+        if canonical_rows:
             knowledge_lines = ["[用户记忆]"]
-            for row in knowledge_rows:
+            for row in canonical_rows:
                 knowledge_lines.append(f"- ({row['memory_type']}) {row['memory']}")
             blocks.append("\n".join(knowledge_lines))
 
-        if style_rows:
+        if persona_rows:
             style_lines = ["[用户风格指导]"]
-            for row in style_rows:
+            for row in persona_rows:
                 style_lines.append(f"- {row['memory']}")
             blocks.append("\n".join(style_lines))
 
@@ -444,8 +458,13 @@ class PluginHelpersMixin:
         scope: str = "user",
         persona_id: str = "",
         exclude_private: bool = False,
+        summary_channel: str = "canonical",
     ) -> List[Dict[str, object]]:
-        """从 memories 表中检索最相关的记忆，按综合评分排序。只返回 is_active=1 的有效记忆。"""
+        """从 memories 表中检索最相关的记忆，按综合评分排序。只返回 is_active=1 的有效记忆。
+
+        summary_channel: 'canonical' for fact-oriented search, 'persona' for style memories,
+                         empty string to search all channels.
+        """
         # 步骤 1:获取查询向量
         query_vec: Optional[List[float]] = None
         if self._vec_available and query:
@@ -459,7 +478,8 @@ class PluginHelpersMixin:
             query_vec=query_vec,
             scope=scope,
             persona_id=persona_id,
-            exclude_private=exclude_private
+            exclude_private=exclude_private,
+            summary_channel=summary_channel,
         )
 
         # 去重:高语义重叠的记忆只保留分数最高的那条
