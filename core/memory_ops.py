@@ -4,6 +4,7 @@ import sqlite3
 import hashlib
 from typing import Dict, Any, List, Optional
 import jieba
+from .style_analyzer import get_style_analyzer
 
 logger = logging.getLogger("astrbot:db.py")
 
@@ -151,7 +152,10 @@ class MemoryOps:
             transcript_lines.append(f"{role}: {content}")
 
         transcript = "\n".join(transcript_lines)
-        prompt = self.plugin._distill_mgr.build_distill_prompt(transcript)
+
+        style_analysis = get_style_analyzer().analyze(rows)
+        style_context = get_style_analyzer().build_style_context(style_analysis)
+        prompt = self.plugin._distill_mgr.build_distill_prompt(transcript, style_context)
 
         chat_provider_id = await self.plugin._distill_mgr.resolve_distill_provider_id(rows, self.plugin.context)
         chat_model_id = await self.plugin._distill_mgr.resolve_distill_model_id(rows)

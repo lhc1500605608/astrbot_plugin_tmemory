@@ -28,7 +28,7 @@ logger = logging.getLogger("astrbot")
 
 # ── 纯工具函数（无状态） ─────────────────────────────────────────────
 
-_VALID_MEMORY_TYPES = frozenset({"preference", "fact", "task", "restriction"})
+_VALID_MEMORY_TYPES = frozenset({"preference", "fact", "task", "restriction", "style"})
 
 
 def _now() -> str:

@@ -78,7 +78,7 @@ def validate_distill_output(
             continue
 
         mtype = str(item.get("memory_type", ""))
-        if mtype not in {"preference", "fact", "task", "restriction"}:
+        if mtype not in {"preference", "fact", "task", "restriction", "style"}:
             item["memory_type"] = plugin._distill_mgr.infer_memory_type(mem)
             mtype = str(item.get("memory_type", ""))
 

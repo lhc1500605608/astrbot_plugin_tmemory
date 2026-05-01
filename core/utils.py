@@ -97,12 +97,24 @@ class PluginHelpersMixin:
         if not rows:
             return ""
 
-        lines = ["[用户记忆]"]
-        for row in rows:
-            mtype = row["memory_type"]
-            mem = row["memory"]
-            lines.append(f"- ({mtype}) {mem}")
-        block = "\n".join(lines)
+        knowledge_rows = [r for r in rows if r["memory_type"] != "style"]
+        style_rows = [r for r in rows if r["memory_type"] == "style"]
+
+        blocks: list[str] = []
+
+        if knowledge_rows:
+            knowledge_lines = ["[用户记忆]"]
+            for row in knowledge_rows:
+                knowledge_lines.append(f"- ({row['memory_type']}) {row['memory']}")
+            blocks.append("\n".join(knowledge_lines))
+
+        if style_rows:
+            style_lines = ["[用户风格指导]"]
+            for row in style_rows:
+                style_lines.append(f"- {row['memory']}")
+            blocks.append("\n".join(style_lines))
+
+        block = "\n\n".join(blocks)
         if self._cfg.inject_max_chars > 0 and len(block) > self._cfg.inject_max_chars:
             cutoff = max(self._cfg.inject_max_chars - 3, 1)
             block = block[:cutoff] + "…"
