@@ -111,8 +111,6 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Ar
 .type-fact { background:#1a3a2a; color:#56d364; }
 .type-task { background:#3d2e00; color:#e3b341; }
 .type-restriction { background:#3d1f20; color:#f85149; }
-.type-style { background:#2d1f3d; color:#bc8cff; }
-
 .score-bar { width:50px; height:6px; background:var(--surface2); border-radius:3px; display:inline-block; vertical-align:middle; overflow:hidden; }
 .score-bar-fill { height:100%; border-radius:3px; }
 

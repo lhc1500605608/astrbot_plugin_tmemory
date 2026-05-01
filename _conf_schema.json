@@ -202,43 +202,6 @@
     "hint": "高级过滤。填写 Python 正则表达式，匹配到的消息（用户/助手双侧）不会被写入对话缓存。留空不启用。示例：^\\[系统\\]|^SYSTEM:",
     "default": ""
   },
-  "style_distill_settings": {
-    "type": "object",
-    "description": "聊天风格蒸馏配置",
-    "hint": "控制从对话中提取用户聊天风格特征（语气、简洁度、格式偏好等）的专项蒸馏设置。",
-    "items": {
-      "enable_style_distill": {
-        "type": "bool",
-        "default": true,
-        "description": "启用聊天风格蒸馏采集",
-        "hint": "开启后会在蒸馏时专门提取用户的聊天风格。关闭后不再采集对话素材用于风格分析，也不在蒸馏提示词中包含 style 类型指令。注：WebUI 中为只读，唯一写入口为 /style_distill 指令。"
-      },
-      "enable_style_injection": {
-        "type": "bool",
-        "default": false,
-        "description": "启用风格注入",
-        "hint": "开启后，当会话绑定了人格档案时，将风格记忆和人格补充提示词注入到 system_prompt，影响 Bot 回复风格。关闭则仅采集不注入。"
-      },
-      "persona_profile": {
-        "type": "string",
-        "default": "",
-        "description": "默认人格描述",
-        "hint": "用于辅助风格蒸馏判断的 Bot 人格参考文本。留空则不注入人格参考。"
-      },
-      "style_min_confidence": {
-        "type": "float",
-        "default": 0.55,
-        "description": "风格记忆最低置信度",
-        "hint": "仅存储置信度高于此值的风格类记忆（0.0~1.0）。风格推断天然比事实类更不确定，默认阈值略低于通用蒸馏，可适当放宽。"
-      },
-      "style_min_importance": {
-        "type": "float",
-        "default": 0.4,
-        "description": "风格记忆最低重要度",
-        "hint": "仅存储重要度高于此值的风格类记忆（0.0~1.0）。"
-      }
-    }
-  },
   "memory_scope": {
     "type": "string",
     "description": "记忆隔离范围",

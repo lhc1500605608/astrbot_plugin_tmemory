@@ -24,13 +24,11 @@ if TYPE_CHECKING:
     from core.identity import IdentityManager
     from core.utils import MemoryLogger
 
-from .style_manager import _build_default_prompt_supplement
-
 logger = logging.getLogger("astrbot")
 
 # ── 纯工具函数（无状态） ─────────────────────────────────────────────
 
-_VALID_MEMORY_TYPES = frozenset({"preference", "fact", "task", "restriction", "style"})
+_VALID_MEMORY_TYPES = frozenset({"preference", "fact", "task", "restriction"})
 
 
 def _now() -> str:
@@ -221,201 +219,10 @@ class AdminService:
             for r in rows
         ]
 
-    def get_style_memories(self, user: str) -> List[Dict[str, Any]]:
-        """返回指定用户的 style 类型记忆列表。"""
-        if not user:
-            return []
-        with self._db() as conn:
-            rows = conn.execute(
-                """
-                SELECT id, memory_type, memory, score, importance, confidence,
-                       reinforce_count, is_active,
-                       COALESCE(is_pinned, 0) AS is_pinned,
-                       last_seen_at, created_at, updated_at
-                FROM memories WHERE canonical_user_id = ? AND is_active = 1
-                  AND memory_type = 'style'
-                ORDER BY importance DESC, score DESC, updated_at DESC LIMIT 100
-                """,
-                (user,),
-            ).fetchall()
-        return [
-            {
-                "id": int(r["id"]),
-                "memory_type": str(r["memory_type"]),
-                "memory": str(r["memory"]),
-                "score": float(r["score"]),
-                "importance": float(r["importance"]),
-                "confidence": float(r["confidence"]),
-                "reinforce_count": int(r["reinforce_count"]),
-                "is_active": int(r["is_active"]),
-                "is_pinned": int(r["is_pinned"]),
-                "last_seen_at": str(r["last_seen_at"]),
-                "created_at": str(r["created_at"]),
-                "updated_at": str(r["updated_at"]),
-            }
-            for r in rows
-        ]
-
-    def get_style_stats(self) -> Dict[str, Any]:
-        """返回聊天风格记忆的全局统计。"""
-        with self._db() as conn:
-            total = conn.execute(
-                "SELECT COUNT(1) AS n FROM memories WHERE memory_type='style' AND is_active=1"
-            ).fetchone()
-            users = conn.execute(
-                "SELECT COUNT(DISTINCT canonical_user_id) AS n FROM memories"
-                " WHERE memory_type='style' AND is_active=1"
-            ).fetchone()
-            avg_conf = conn.execute(
-                "SELECT AVG(confidence) AS v FROM memories"
-                " WHERE memory_type='style' AND is_active=1"
-            ).fetchone()
-        return {
-            "total_style_memories": int(total["n"] if total else 0),
-            "style_users": int(users["n"] if users else 0),
-            "avg_confidence": round(float(avg_conf["v"] if avg_conf and avg_conf["v"] else 0), 2),
-        }
-
     def get_distill_history(self, limit: int = 30) -> List[Dict]:
         """返回蒸馏历史记录。"""
         from .distill_validator import get_distill_history
         return get_distill_history(self._plugin, limit=limit)
-
-    # =====================================================================
-    # Style Profiles & Bindings (v3)
-    # =====================================================================
-
-    def list_style_profiles(self) -> List[Dict[str, Any]]:
-        return self._plugin._style_mgr.list_profiles()
-
-    def get_style_profile(self, profile_id: int) -> Optional[Dict[str, Any]]:
-        return self._plugin._style_mgr.get_profile(profile_id)
-
-    def create_style_profile(
-        self, name: str, prompt_supplement: str, description: str = "",
-        source_user: str = "", source_adapter: str = "", style_summary: str = "",
-    ) -> Dict[str, Any]:
-        existing = self._plugin._style_mgr.get_profile_by_name(name)
-        if existing:
-            return {"error": f"profile '{name}' already exists", "id": existing["id"]}
-        pid = self._plugin._style_mgr.create_profile(
-            name, prompt_supplement, description,
-            source_user, source_adapter, style_summary,
-        )
-        return {"id": pid, "name": name}
-
-    def update_style_profile(self, profile_id: int, **kwargs) -> bool:
-        return self._plugin._style_mgr.update_profile(profile_id, **kwargs)
-
-    def delete_style_profile(self, profile_id: int) -> bool:
-        return self._plugin._style_mgr.delete_profile(profile_id)
-
-    def list_style_bindings(self) -> List[Dict[str, Any]]:
-        return self._plugin._style_mgr.list_bindings()
-
-    def get_style_binding(
-        self, adapter_name: str, conversation_id: str
-    ) -> Optional[Dict[str, Any]]:
-        return self._plugin._style_mgr.get_binding(adapter_name, conversation_id)
-
-    def set_style_binding(
-        self, adapter_name: str, conversation_id: str, profile_id: int
-    ) -> bool:
-        return self._plugin._style_mgr.set_binding(adapter_name, conversation_id, profile_id)
-
-    def remove_style_binding(self, adapter_name: str, conversation_id: str) -> bool:
-        return self._plugin._style_mgr.remove_binding(adapter_name, conversation_id)
-
-    # ── Temporary Style Profiles ──────────────────────────────────────
-
-    def list_temp_profiles(self, source_user: str = "") -> List[Dict[str, Any]]:
-        return self._plugin._style_mgr.list_temp_profiles(source_user)
-
-    def merge_temporary_style_profile(
-        self, temp_id: int, target_profile_id: int
-    ) -> Dict[str, Any]:
-        """将临时档案合并到现有档案，返回更新后的档案。"""
-        temp = self._plugin._style_mgr.get_temp_profile(temp_id)
-        if not temp:
-            raise LookupError("temporary profile not found")
-
-        target = self._plugin._style_mgr.get_profile(target_profile_id)
-        if not target:
-            raise LookupError("target profile not found")
-
-        # 追加 style 文本到现有 prompt_supplement
-        existing = str(target.get("prompt_supplement", ""))
-        new_memory = str(temp.get("memory_text", ""))
-        if new_memory not in existing:
-            merged = existing + ("\n" if existing else "") + f"- {new_memory}"
-        else:
-            merged = existing
-
-        self._plugin._style_mgr.update_profile(
-            target_profile_id,
-            prompt_supplement=merged[:2000],
-            style_summary=(str(target.get("style_summary", "")) + "; " + new_memory)[:500],
-        )
-
-        # 清理临时档案
-        self._plugin._style_mgr.delete_temp_profile(temp_id)
-
-        return {
-            "merged": True,
-            "target_profile_id": target_profile_id,
-            "temp_id": temp_id,
-        }
-
-    def save_temporary_style_profile(
-        self, temp_id: int, profile_name: str = ""
-    ) -> Dict[str, Any]:
-        """将临时档案另存为新的独立档案。"""
-        temp = self._plugin._style_mgr.get_temp_profile(temp_id)
-        if not temp:
-            raise LookupError("temporary profile not found")
-
-        source_user = str(temp.get("source_user", ""))
-        source_adapter = str(temp.get("source_adapter", ""))
-        memory_text = str(temp.get("memory_text", ""))
-
-        name = profile_name.strip() if profile_name else f"{source_user}-style-{temp_id}"
-        prompt_supplement = _build_default_prompt_supplement(memory_text)
-
-        pid = self._plugin._style_mgr.create_profile(
-            profile_name=name,
-            prompt_supplement=prompt_supplement,
-            description=f"从临时档案保存 (temp_id={temp_id})",
-            source_user=source_user,
-            source_adapter=source_adapter,
-            style_summary=memory_text,
-        )
-
-        # 同时将 style 内容写入 memories 表
-        from .memory_ops import MemoryOps
-        MemoryOps(self._plugin).insert_memory(
-            canonical_id=source_user,
-            adapter=source_adapter,
-            adapter_user=source_user,
-            memory=memory_text,
-            score=float(temp.get("score", 0.7)),
-            memory_type="style",
-            importance=float(temp.get("importance", 0.6)),
-            confidence=float(temp.get("confidence", 0.7)),
-            source_channel="style_temp_save",
-        )
-
-        # 清理临时档案
-        self._plugin._style_mgr.delete_temp_profile(temp_id)
-
-        return {
-            "saved": True,
-            "profile_id": pid,
-            "profile_name": name,
-            "temp_id": temp_id,
-        }
-
-    def delete_temp_profile(self, temp_id: int) -> bool:
-        return self._plugin._style_mgr.delete_temp_profile(temp_id)
 
     # =====================================================================
     # Batch 1.2 — 低风险写操作

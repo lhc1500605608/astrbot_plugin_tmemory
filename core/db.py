@@ -87,48 +87,6 @@ CREATE TABLE IF NOT EXISTS distill_history (
 )
 """
 
-_DDL_STYLE_PROFILES = """
-CREATE TABLE IF NOT EXISTS style_profiles (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    profile_name TEXT UNIQUE NOT NULL,
-    prompt_supplement TEXT NOT NULL DEFAULT '',
-    description TEXT NOT NULL DEFAULT '',
-    source_user TEXT NOT NULL DEFAULT '',
-    source_adapter TEXT NOT NULL DEFAULT '',
-    style_summary TEXT NOT NULL DEFAULT '',
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
-)
-"""
-
-_DDL_STYLE_BINDINGS = """
-CREATE TABLE IF NOT EXISTS style_bindings (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    adapter_name TEXT NOT NULL,
-    conversation_id TEXT NOT NULL,
-    profile_id INTEGER DEFAULT NULL REFERENCES style_profiles(id),
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL,
-    UNIQUE(adapter_name, conversation_id)
-)
-"""
-
-_DDL_STYLE_TEMP_PROFILES = """
-CREATE TABLE IF NOT EXISTS style_temp_profiles (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    source_user TEXT NOT NULL,
-    source_adapter TEXT NOT NULL,
-    memory_text TEXT NOT NULL,
-    memory_type TEXT NOT NULL DEFAULT 'style',
-    score REAL NOT NULL DEFAULT 0.5,
-    importance REAL NOT NULL DEFAULT 0.5,
-    confidence REAL NOT NULL DEFAULT 0.5,
-    conversation_context TEXT NOT NULL DEFAULT '',
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
-)
-"""
-
 _DDL_CONVERSATION_CACHE = """
 CREATE TABLE IF NOT EXISTS conversation_cache (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -143,39 +101,6 @@ CREATE TABLE IF NOT EXISTS conversation_cache (
     created_at TEXT NOT NULL,
     scope TEXT NOT NULL DEFAULT 'user',
     persona_id TEXT NOT NULL DEFAULT ''
-)
-"""
-
-_DDL_STYLE_CONVERSATION_CACHE = """
-CREATE TABLE IF NOT EXISTS style_conversation_cache (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    canonical_user_id TEXT NOT NULL,
-    role TEXT NOT NULL,
-    content TEXT NOT NULL,
-    source_adapter TEXT NOT NULL DEFAULT 'unknown',
-    source_user_id TEXT NOT NULL DEFAULT 'unknown',
-    unified_msg_origin TEXT NOT NULL DEFAULT '',
-    distilled INTEGER NOT NULL DEFAULT 0,
-    distilled_at TEXT NOT NULL DEFAULT '',
-    created_at TEXT NOT NULL
-)
-"""
-
-_DDL_STYLE_DISTILL_HISTORY = """
-CREATE TABLE IF NOT EXISTS style_distill_history (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    started_at TEXT NOT NULL,
-    finished_at TEXT NOT NULL,
-    trigger_type TEXT NOT NULL,
-    users_processed INTEGER NOT NULL DEFAULT 0,
-    profiles_created INTEGER NOT NULL DEFAULT 0,
-    candidates_created INTEGER NOT NULL DEFAULT 0,
-    users_failed INTEGER NOT NULL DEFAULT 0,
-    errors TEXT NOT NULL DEFAULT '[]',
-    duration_sec REAL NOT NULL DEFAULT 0,
-    tokens_input INTEGER NOT NULL DEFAULT -1,
-    tokens_output INTEGER NOT NULL DEFAULT -1,
-    tokens_total INTEGER NOT NULL DEFAULT -1
 )
 """
 
@@ -316,16 +241,6 @@ class DatabaseManager:
 
         conn.execute("UPDATE memories SET last_seen_at=COALESCE(NULLIF(last_seen_at, ''), updated_at, created_at)")
 
-        self._ensure_columns(
-            conn,
-            "style_profiles",
-            {
-                "source_user": "TEXT NOT NULL DEFAULT ''",
-                "source_adapter": "TEXT NOT NULL DEFAULT ''",
-                "style_summary": "TEXT NOT NULL DEFAULT ''",
-            }
-        )
-
         try:
             existing_dh = {
                 row["name"]
@@ -364,14 +279,8 @@ class DatabaseManager:
             conn.execute(_DDL_IDENTITY_MAPPINGS)
             conn.execute(_DDL_DISTILL_HISTORY)
             conn.execute(_DDL_CONVERSATION_CACHE)
-            conn.execute(_DDL_STYLE_CONVERSATION_CACHE)
-            conn.execute(_DDL_STYLE_DISTILL_HISTORY)
-            conn.execute(_DDL_STYLE_PROFILES)
-            conn.execute(_DDL_STYLE_BINDINGS)
-            conn.execute(_DDL_STYLE_TEMP_PROFILES)
-            
+
             conn.execute("CREATE INDEX IF NOT EXISTS idx_identity_bindings_canonical ON identity_bindings (canonical_user_id)")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_style_bindings_lookup ON style_bindings (adapter_name, conversation_id)")
 
             self.migrate_schema(conn)
 

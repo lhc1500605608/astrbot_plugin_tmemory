@@ -284,9 +284,6 @@ class MemoryOps:
                 valid_items = self.plugin._validate_distill_output(llm_items)
                 for item in valid_items:
                     memory_type = str(item.get("memory_type", "fact"))
-                    # ADR TMEAAA-180: 记忆蒸馏不再处理 style 类型
-                    if memory_type == "style":
-                        continue
                     mem_text = self.plugin._sanitize_text(
                         self.plugin._normalize_text(str(item.get("memory", "")))
                     )

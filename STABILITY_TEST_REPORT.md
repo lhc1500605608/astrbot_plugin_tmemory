@@ -377,3 +377,45 @@ END;
 **测试日期**：2026-04-17
 **质量状态**：**CONDITIONAL PASS**
 **发布就绪性**：**Go（需跟进 2 项 P1 修复）**
+
+---
+
+## 八、TMEAAA-182 聊天记录蒸馏重构 QA 验证（2026-04-30）
+
+### 8.1 验证范围
+
+本轮根据 TMEAAA-180/TMEAAA-181 的交付产出做最小必要回归，重点验证：
+
+1. 人格/风格蒸馏不再写入或污染核心 `memories` / `conversation_cache` 管线。
+2. runtime memory injection 与 persona/style injection 可同时启用并并存。
+3. style/persona 注入始终留在 `system_prompt`，知识记忆仍按 `inject_position` 配置路由。
+4. 记忆蒸馏 prompt 不再包含 `style` 或 `persona` 相关输出要求。
+
+### 8.2 测试矩阵
+
+| 编号 | 对应交付 | 风险点 | 验证用例 | 结果 |
+|------|----------|--------|----------|------|
+| T182-1 | TMEAAA-180 | 仅开启 style distill 时误写核心记忆队列 | `test_llm_response_when_only_style_distill_enabled_writes_style_cache_only` | **PASS** |
+| T182-2 | TMEAAA-180 | style distill 产物直接进入长期记忆 | `test_style_distill_creates_temporary_profile_before_manual_archive` | **PASS** |
+| T182-3 | TMEAAA-181 | 记忆蒸馏 prompt 残留 style/persona 指令 | `test_build_distill_prompt_excludes_style_section`、`test_distill_rows_with_llm_respects_enable_style_flag` | **PASS** |
+| T182-4 | TMEAAA-180/TMEAAA-181 | 未绑定风格档案时覆盖默认人格 | `test_style_injection_on_unbound_keeps_default_persona` | **PASS** |
+| T182-5 | TMEAAA-180/TMEAAA-181 | 风格块混入知识记忆内容 | `test_style_prompt_excludes_memory_content` | **PASS** |
+| T182-6 | TMEAAA-180/TMEAAA-181 | runtime memory injection 与 persona/style injection 互相覆盖 | `test_memory_and_style_injection_coexist`、`test_memory_and_style_injection_coexist_with_separate_positions` | **PASS** |
+
+### 8.3 执行证据
+
+命令：
+
+```bash
+python -m pytest tests/test_injection_chain.py tests/test_stability_fixes.py -k 'memory_and_style_injection_coexist or style_prompt_excludes_memory_content or style_injection_on_unbound_keeps_default_persona or build_distill_prompt_excludes_style_section or style_distill_creates_temporary_profile_before_manual_archive or llm_response_when_only_style_distill_enabled_writes_style_cache_only or distill_rows_with_llm_respects_enable_style_flag' -q
+```
+
+结果：
+
+```text
+7 passed, 34 deselected in 0.55s
+```
+
+### 8.4 QA 结论
+
+**PASS** — 最小必要验证已证明聊天记录风格/人格蒸馏与核心 memory pipeline 解耦；runtime memory injection 与 persona/style injection 可并存，且在 `inject_position=user_message_before` 时不会互相覆盖。
