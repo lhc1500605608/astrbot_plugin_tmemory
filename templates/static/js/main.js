@@ -33,7 +33,7 @@ async function exportCurrentUser() {
     const blob = new Blob([JSON.stringify(res, null, 2)], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
-    a.href = url; a.download = `tmemory_export_${currentUser}.json`;
+    a.href = url; a.download = `MemoryForge_export_${currentUser}.json`;
     a.click(); URL.revokeObjectURL(url);
     toast('导出成功', 'success');
   }

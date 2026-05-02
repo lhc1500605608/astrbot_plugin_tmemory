@@ -3,18 +3,19 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>tmemory - 记忆管理面板</title>
+<title>MemoryForge - 记忆管理面板</title>
 <link rel="stylesheet" href="/static/css/dashboard.css">
-<link rel="icon" type="image/svg+xml" href="/static/icons/tmemory.svg">
+<link rel="icon" type="image/png" sizes="192x192" href="/static/icons/tmemory-icon.png">
 <link rel="icon" type="image/png" sizes="32x32" href="/static/icons/favicon-32.png">
 <link rel="icon" type="image/png" sizes="16x16" href="/static/icons/favicon-16.png">
+<link rel="icon" type="image/svg+xml" href="/static/icons/tmemory.svg">
 </head>
 <body>
 
 <!-- Login Overlay -->
 <div class="login-overlay" id="loginOverlay">
   <div class="login-card">
-    <h2><img class="logo" src="/static/icons/tmemory.svg" alt="tmemory"> tmemory</h2>
+    <h2><img class="logo" src="/static/icons/tmemory-icon.png" alt="MemoryForge"> MemoryForge</h2>
     <div class="subtitle">记忆管理面板</div>
     <div class="form-group"><label>用户名</label><input id="loginUser" type="text" placeholder="admin" autocomplete="username"></div>
     <div class="form-group"><label>密码</label><input id="loginPass" type="password" placeholder="请输入密码" autocomplete="current-password" onkeydown="if(event.key==='Enter')doLogin()"></div>
@@ -26,7 +27,7 @@
 <div class="app" id="mainApp" style="display:none">
   <!-- Header -->
   <div class="header">
-    <h1><img class="logo" src="/static/icons/tmemory.svg" alt="tmemory"> tmemory 记忆管理</h1>
+    <h1><img class="logo" src="/static/icons/tmemory-icon.png" alt="MemoryForge"> MemoryForge 记忆管理</h1>
     <div class="header-right">
       <button class="btn btn-sm" onclick="refreshAll()">🔄 刷新</button>
       <button class="btn btn-sm btn-primary" onclick="openDistillModal()">⚡ 立即蒸馏</button>
