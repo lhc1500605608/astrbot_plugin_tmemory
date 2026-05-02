@@ -111,7 +111,7 @@ async def test_pending_distill_users_matches_admin_get_pending(plugin_with_ctx):
     )
 
     # Via AdminService.get_pending
-    from core.admin_service import AdminService
+    from astrbot_plugin_tmemory.core.admin_service import AdminService
     admin = AdminService(plugin)
     admin_pending = admin.get_pending()
     admin_users = {p["user"] for p in admin_pending}
@@ -228,7 +228,7 @@ async def test_admin_service_trigger_distill_with_pending_data(plugin_with_ctx):
         unified_msg_origin="group:1",
     )
 
-    from core.admin_service import AdminService
+    from astrbot_plugin_tmemory.core.admin_service import AdminService
 
     admin = AdminService(plugin)
 
@@ -269,7 +269,7 @@ async def test_admin_service_trigger_distill_with_empty_pending(plugin_with_ctx)
     """AdminService.trigger_distill() should return {0, 0} when no pending data."""
     plugin, ctx = plugin_with_ctx
 
-    from core.admin_service import AdminService
+    from astrbot_plugin_tmemory.core.admin_service import AdminService
     admin = AdminService(plugin)
 
     # With no data inserted, pending should be empty
