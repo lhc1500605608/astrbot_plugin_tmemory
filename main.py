@@ -27,7 +27,7 @@ _CMD_FIRST_WORDS = frozenset({
     "tmemory",
     "shangtang",
     "AstrBot 用户长期记忆插件(自动采集 + 定时LLM蒸馏 + 跨适配器合并)",
-    "0.5.0",
+    "0.6.0",
 )
 class TMemoryPlugin(PluginLifecycleMixin, DistillRuntimeMixin, PluginHelpersMixin, PluginHandlersMixin, Star):
     def __init__(self, context: Context, config=None):
