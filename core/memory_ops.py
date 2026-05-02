@@ -288,6 +288,7 @@ class MemoryOps:
                 if not llm_items:
                     self.plugin._mark_rows_distilled([int(r["id"]) for r in rows])
                     self.plugin._user_last_distilled_ts[canonical_id] = now_ts
+                    processed_users += 1
                     continue
 
                 valid_items = self.plugin._validate_distill_output(llm_items)

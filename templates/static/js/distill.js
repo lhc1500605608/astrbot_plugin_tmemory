@@ -23,7 +23,13 @@ async function triggerDistill() {
   const res = await api('/distill', { method: 'POST' });
   if (res && res.ok) {
     if (res.processed_users === 0 && res.total_memories === 0) {
-      toast('蒸馏完成：没有需要处理的数据（可能缓存为空或 LLM 不可用）', 'error');
+      if (res.pending_users_before > 0) {
+        toast('蒸馏完成：队列有 ' + res.pending_users_before + ' 个待处理用户，但全部被跳过或 LLM 未返回有效记忆', 'error');
+      } else {
+        toast('蒸馏完成：没有需要处理的数据（缓存为空）', 'error');
+      }
+    } else if (res.total_memories === 0) {
+      toast(`蒸馏完成：${res.processed_users} 个用户，但未产出有效记忆（内容可能为低信息量或 LLM 返回无效）`, 'error');
     } else {
       toast(`蒸馏完成：${res.processed_users} 个用户，${res.total_memories} 条记忆`, 'success');
     }
