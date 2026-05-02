@@ -27,7 +27,7 @@ _CMD_FIRST_WORDS = frozenset({
     "tmemory",
     "shangtang",
     "AstrBot 用户长期记忆插件(自动采集 + 定时LLM蒸馏 + 跨适配器合并)",
-    "0.7.0",
+    "0.7.1",
 )
 class TMemoryPlugin(PluginLifecycleMixin, DistillRuntimeMixin, PluginHelpersMixin, PluginHandlersMixin, Star):
     def __init__(self, context: Context, config=None):
@@ -350,7 +350,6 @@ class TMemoryPlugin(PluginLifecycleMixin, DistillRuntimeMixin, PluginHelpersMixi
         """删除当前用户的所有记忆和缓存:/tm_purge"""
         async for result in self._handle_tm_purge(event):
             yield result
-
 
 
 

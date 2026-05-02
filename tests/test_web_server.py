@@ -137,6 +137,17 @@ def test_dashboard_memoryforge_css_and_export_contract():
     assert "tmemory_export_${currentUser}.json" not in main_js
 
 
+def test_dashboard_switch_tab_only_references_rendered_panels():
+    html = Path("templates/dashboard.html").read_text(encoding="utf-8")
+    ui_js = Path("templates/static/js/ui.js").read_text(encoding="utf-8")
+
+    rendered_panel_ids = set(re.findall(r'id="(panel[A-Za-z]+)"', html))
+    referenced_panel_ids = set(re.findall(r"'panel[A-Za-z]+'", ui_js))
+    referenced_panel_ids = {panel_id.strip("'") for panel_id in referenced_panel_ids}
+
+    assert referenced_panel_ids <= rendered_panel_ids
+
+
 def _png_size(path):
     with path.open("rb") as file:
         header = file.read(24)
