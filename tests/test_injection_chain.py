@@ -114,6 +114,18 @@ class DummyReq:
         self.system_prompt = system_prompt
 
 
+class DummyEvent:
+    def __init__(self, message_str: str):
+        self.message_str = message_str
+        self.adapter_name = "qq"
+
+    def get_sender_id(self):
+        return "42"
+
+    def get_group_id(self):
+        return None
+
+
 # ── system_prompt mode (default) ──────────────────────────────────────────────
 
 def test_inject_system_prompt_keeps_static_prefix_first(plugin):
@@ -228,8 +240,6 @@ def test_inject_user_message_after_appends_to_prompt(plugin):
 @pytest.mark.asyncio
 async def test_on_llm_request_injects_memory_after_static_prefix(plugin):
     """Full chain: on_llm_request appends memory after static system_prompt."""
-    from tests.test_active_tool_mode_regression import DummyEvent
-
     # Insert a memory for the test identity
     _insert_memory(plugin, "qq:42", "用户喜欢喝咖啡")
 
@@ -353,4 +363,3 @@ async def test_build_knowledge_injection_no_memories_returns_empty(plugin):
     """No memories across either channel → empty injection block."""
     block = await plugin._build_knowledge_injection("u-dc-none", "anything", limit=5)
     assert block == ""
-
