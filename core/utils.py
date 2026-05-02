@@ -247,11 +247,11 @@ class PluginHelpersMixin:
         return await _vector.upsert_vector(self, memory_id, text)
 
     def _delete_vector(self, memory_id: int, conn=None) -> None:
-        from astrbot_plugin_tmemory.core import vector as _vec
+        from . import vector as _vec
         _vec.delete_vector(self, memory_id, conn)
 
     def _delete_vectors_for_user(self, canonical_id: str, conn=None) -> None:
-        from astrbot_plugin_tmemory.core import vector as _vec
+        from . import vector as _vec
         _vec.delete_vectors_for_user(self, canonical_id, conn)
 
     async def _rebuild_vector_index(self) -> Tuple[int, int]:
@@ -633,7 +633,7 @@ class PluginHelpersMixin:
         self, memory_id: int, memory: str, memory_type: str,
         score: float, importance: float, confidence: float,
     ) -> None:
-        from astrbot_plugin_tmemory.core import memory_ops as _mo
+        from . import memory_ops as _mo
         _mo.update_memory_full(self, memory_id, memory, memory_type, score, importance, confidence)
 
     def _auto_merge_memory_text(self, memories: List[str]) -> str:
@@ -686,7 +686,7 @@ class PluginHelpersMixin:
         self, canonical_id: str, role: str, content: str, source_adapter: str,
         source_user_id: str, unified_msg_origin: str, scope: str = "user", persona_id: str = "",
     ):
-        from astrbot_plugin_tmemory.core import maintenance as _m
+        from . import maintenance as _m
         _m.insert_conversation_sync(
             self, canonical_id, role, content, source_adapter,
             source_user_id, unified_msg_origin, scope, persona_id,
