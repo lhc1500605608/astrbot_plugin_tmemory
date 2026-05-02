@@ -10,7 +10,10 @@
 - **LLM 蒸馏**：后台 worker 按用户批量处理未蒸馏缓存，生成结构化长期记忆。
 - **主动记忆工具**：提供 `remember` / `recall` LLM tool，支持模型主动保存和检索记忆。
 - **记忆注入**：在 `on_llm_request` 阶段召回相关记忆，注入到 `system_prompt` 或指定占位符。
-- **混合检索**：默认使用 SQLite FTS5；可启用 `sqlite-vec` + Embedding 做向量召回与混合排序。
+- **双通道记忆注入**：支持 canonical（跨适配器身份）与 persona（当前人格）双通道独立召回与组合注入。(TMEAAA-199)
+- **Prompt 前缀缓存优化**：优化记忆注入格式与排序，提升对 LLM prompt prefix caching 的友好度，降低长上下文 token 开销。(TMEAAA-205)
+- **RRF 混合检索**：默认使用 SQLite FTS5；可启用 `sqlite-vec` + Embedding 做向量召回，并通过 RRF（Reciprocal Rank Fusion）融合排序。
+- **注意力衰减记忆评分**：引入基于指数衰减的 `attention_score` 字段，为记忆质量评估和召回排序提供动态权重依据。(TMEAAA-199)
 - **冲突与质量维护**：支持记忆强化、衰减、固定、提纯、合并、拆分和失活。
 - **隐私保护**：内置敏感信息脱敏、群聊私聊记忆隔离、采集跳过规则和 no-memory 标记。
 - **跨适配器身份合并**：通过 `canonical_user_id` 合并同一用户在不同平台的记忆。
