@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v0.7.0] - 2026-05-02
+
+### Changed
+
+- 将插件外显品牌更新为 **MemoryForge**，并按用户模板完成 WebUI 视觉体系迁移。
+- 更新 README 外显名称与版本信息，同时保留 `astrbot_plugin_tmemory` 仓库名和内部技术标识。
+
+### Fixed
+
+- 清理迁移过程中残留的未跟踪 React/Vite `webui/` 目录，最终保持现有 AstrBot 静态 WebUI 交付结构。
+
 ## [v0.6.0] - 2026-05-02
 
 ### Added
