@@ -1,6 +1,6 @@
 # MemoryForge
 
-`astrbot_plugin_tmemory`（外显名称 **MemoryForge**）是一个面向 [AstrBot](https://github.com/AstrBotDevs/AstrBot) 的长期记忆插件。它会把对话写入本地 SQLite，按需通过 LLM 蒸馏成结构化长期记忆，并在后续请求前自动召回、注入相关记忆，让机器人在多轮、多会话、跨平台场景下持续理解用户偏好、事实、任务、限制和沟通风格。
+**MemoryForge** 是一个面向 [AstrBot](https://github.com/AstrBotDevs/AstrBot) 的长期记忆插件。它会把对话写入本地 SQLite，按需通过 LLM 蒸馏成结构化长期记忆，并在后续请求前自动召回、注入相关记忆，让机器人在多轮、多会话、跨平台场景下持续理解用户偏好、事实、任务、限制和沟通风格。
 
 > 当前版本：`v0.7.1`。插件仍在快速迭代，请在生产环境开启 WebUI、向量检索或跨账号合并前先备份数据库。
 
