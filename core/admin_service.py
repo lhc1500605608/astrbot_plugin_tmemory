@@ -364,6 +364,7 @@ class AdminService:
 
     async def trigger_distill(self) -> Dict[str, Any]:
         """手动触发蒸馏。"""
+        pending_before = self.count_pending_users()
         from .memory_ops import MemoryOps
         processed_users, total_memories = await MemoryOps(self._plugin).run_distill_cycle(
             force=True, trigger="manual_web"
@@ -371,6 +372,7 @@ class AdminService:
         return {
             "processed_users": processed_users,
             "total_memories": total_memories,
+            "pending_users_before": pending_before,
         }
 
     def set_distill_pause(self, pause: bool) -> None:
