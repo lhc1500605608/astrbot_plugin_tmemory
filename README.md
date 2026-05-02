@@ -1,8 +1,8 @@
-# astrbot_plugin_tmemory
+# MemoryForge
 
-`astrbot_plugin_tmemory` 是一个面向 [AstrBot](https://github.com/AstrBotDevs/AstrBot) 的长期记忆插件。它会把对话写入本地 SQLite，按需通过 LLM 蒸馏成结构化长期记忆，并在后续请求前自动召回、注入相关记忆，让机器人在多轮、多会话、跨平台场景下持续理解用户偏好、事实、任务、限制和沟通风格。
+`astrbot_plugin_tmemory`（外显名称 **MemoryForge**）是一个面向 [AstrBot](https://github.com/AstrBotDevs/AstrBot) 的长期记忆插件。它会把对话写入本地 SQLite，按需通过 LLM 蒸馏成结构化长期记忆，并在后续请求前自动召回、注入相关记忆，让机器人在多轮、多会话、跨平台场景下持续理解用户偏好、事实、任务、限制和沟通风格。
 
-> 当前版本：`v0.6.0`。插件仍在快速迭代，请在生产环境开启 WebUI、向量检索或跨账号合并前先备份数据库。
+> 当前版本：`v0.7.0`。插件仍在快速迭代，请在生产环境开启 WebUI、向量检索或跨账号合并前先备份数据库。
 
 ## 功能概览
 
@@ -178,9 +178,9 @@ pip install -r requirements.txt
 | `rerank_top_n` | `5` | 重排后保留候选数。 |
 | `rerank_base_url` | `""` | 重排服务 Base URL。 |
 
-### WebUI
+### MemoryForge WebUI
 
-WebUI 默认关闭。必须设置 `webui_password` 后才建议对外启用。
+MemoryForge 管理面板默认关闭。必须设置 `webui_password` 后才建议对外启用。
 
 | 配置项 | 默认值 | 说明 |
 |--------|--------|------|
@@ -337,7 +337,7 @@ Docker / AstrBot 集成相关脚本：
 
 先确认 `sqlite-vec` 可用、Embedding API Key 有效、模型输出维度与 `vector_dim` 一致，然后执行 `/tm_vec_rebuild`。如果向量不可用，插件仍可回退到 FTS5。
 
-### WebUI 打不开怎么办？
+### MemoryForge WebUI 打不开怎么办？
 
 确认 `webui_enabled=true`，`webui_password` 已设置，端口未被占用，防火墙或反向代理允许访问。如果配置了白名单，请确认客户端 IP 命中规则。
 
@@ -347,7 +347,7 @@ Docker / AstrBot 集成相关脚本：
 
 ## 维护状态
 
-- 插件版本：`v0.6.0`
+- 插件版本：`v0.7.0`
 - Python：`3.10+`
 - 存储：SQLite + FTS5，可选 `sqlite-vec`
 - 主要入口：`main.py`
