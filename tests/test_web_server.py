@@ -233,6 +233,30 @@ def test_dashboard_switch_tab_only_references_rendered_panels():
     assert referenced_panel_ids <= rendered_panel_ids
 
 
+def test_dashboard_default_entry_is_profile_workbench_without_mindmap_assets():
+    html = Path("templates/dashboard.html").read_text(encoding="utf-8")
+    ui_js = Path("templates/static/js/ui.js").read_text(encoding="utf-8")
+    main_js = Path("templates/static/js/main.js").read_text(encoding="utf-8")
+
+    script_sources = re.findall(r'<script src="([^"]+)"></script>', html)
+
+    assert '<button class="active" onclick="switchTab(\'profile\',this)">👤 画像工作台</button>' in html
+    assert 'id="panelProfile"' in html
+    assert '<!-- Profile Workbench -->' in html
+    assert 'style="display:flex;flex-direction:column"' in html
+    assert "profile:'panelProfile'" in ui_js
+    assert 'loadProfileSummary(currentUser)' in ui_js
+    assert 'loadProfileItems(currentUser)' in ui_js
+    assert 'loadProfileSummary(userId)' in main_js
+    assert 'loadProfileItems(userId)' in main_js
+    assert '/static/js/profile.js' in script_sources
+
+    assert '/static/js/mindmap.js' not in script_sources
+    assert '/static/vendor/d3.v7.min.js' not in script_sources
+    assert "switchTab('mindmap'" not in html
+    assert 'id="panelMindmap"' not in html
+
+
 def test_dashboard_does_not_reference_removed_profile_creation_ui():
     html = Path("templates/dashboard.html").read_text(encoding="utf-8")
 
