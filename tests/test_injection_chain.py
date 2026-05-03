@@ -73,13 +73,21 @@ async def test_retrieve_memories_fts_hit_returns_relevant_results(plugin):
 @pytest.mark.asyncio
 async def test_build_injection_block_fts_miss_still_produces_block(plugin):
     """End-to-end: _build_knowledge_injection must produce a non-empty string
-    even when FTS has no hits, so on_llm_request can inject memories.
+    even when FTS has no hits, so on_llm_request can inject profile items.
     """
-    _insert_memory(plugin, "u4", "用户是一名软件工程师")
+    now = plugin._now()
+    with plugin._db() as conn:
+        conn.execute(
+            "INSERT INTO profile_items(canonical_user_id, facet_type, content, "
+            "normalized_content, status, confidence, importance, stability, "
+            "created_at, updated_at) VALUES(?, ?, ?, ?, 'active', ?, ?, ?, ?, ?)",
+            ("u4", "fact", "用户是一名软件工程师", "用户是一名软件工程师",
+             0.8, 0.7, 0.5, now, now),
+        )
 
     block = await plugin._build_knowledge_injection("u4", "XYZNOTFOUND", limit=5)
     assert block != "", (
-        "_build_knowledge_injection returned empty string when memories exist "
+        "_build_knowledge_injection returned empty string when profile items exist "
         "and FTS missed — injection would be silently skipped."
     )
     assert "用户是一名软件工程师" in block
@@ -238,10 +246,18 @@ def test_inject_user_message_after_appends_to_prompt(plugin):
 # ── End-to-end: on_llm_request integration ────────────────────────────────────
 
 @pytest.mark.asyncio
-async def test_on_llm_request_injects_memory_after_static_prefix(plugin):
-    """Full chain: on_llm_request appends memory after static system_prompt."""
-    # Insert a memory for the test identity
-    _insert_memory(plugin, "qq:42", "用户喜欢喝咖啡")
+async def test_on_llm_request_injects_profile_after_static_prefix(plugin):
+    """Full chain: on_llm_request appends profile block after static system_prompt."""
+    # Insert a profile item for the test identity
+    now = plugin._now()
+    with plugin._db() as conn:
+        conn.execute(
+            "INSERT INTO profile_items(canonical_user_id, facet_type, content, "
+            "normalized_content, status, confidence, importance, stability, "
+            "created_at, updated_at) VALUES(?, ?, ?, ?, 'active', ?, ?, ?, ?, ?)",
+            ("qq:42", "preference", "用户喜欢喝咖啡", "用户喜欢喝咖啡",
+             0.8, 0.7, 0.5, now, now),
+        )
 
     plugin._cfg.inject_position = "system_prompt"
     plugin._cfg.enable_memory_injection = True
@@ -253,9 +269,9 @@ async def test_on_llm_request_injects_memory_after_static_prefix(plugin):
     assert req.system_prompt.startswith(static_system), (
         "Static system prompt must remain at the start after full injection chain"
     )
-    idx = req.system_prompt.find("[用户记忆]")
+    idx = req.system_prompt.find("[用户画像·偏好]")
     assert idx >= len(static_system), (
-        "Memory block must appear after static system prompt"
+        "Profile block must appear after static system prompt"
     )
     assert req.prompt == "今天喝什么？", "User prompt must be unchanged"
 
@@ -333,29 +349,49 @@ async def test_persona_retrieval_only_returns_style_memories(plugin):
 
 @pytest.mark.asyncio
 async def test_build_knowledge_injection_dual_channel(plugin):
-    """_build_knowledge_injection fetches both canonical and persona channels."""
-    _insert_typed_memory(plugin, "u-dc5", "用户喜欢喝绿茶", memory_type="preference")
-    _insert_typed_memory(plugin, "u-dc5", "用户沟通风格简短，常用'好的'回复", memory_type="style")
+    """_build_knowledge_injection groups profile items by facet."""
+    now = plugin._now()
+    with plugin._db() as conn:
+        conn.execute(
+            "INSERT INTO profile_items(canonical_user_id, facet_type, content, "
+            "normalized_content, status, confidence, importance, stability, "
+            "created_at, updated_at) VALUES(?, ?, ?, ?, 'active', ?, ?, ?, ?, ?)",
+            ("u-dc5", "preference", "用户喜欢喝绿茶", "用户喜欢喝绿茶",
+             0.8, 0.7, 0.5, now, now),
+        )
+        conn.execute(
+            "INSERT INTO profile_items(canonical_user_id, facet_type, content, "
+            "normalized_content, status, confidence, importance, stability, "
+            "created_at, updated_at) VALUES(?, ?, ?, ?, 'active', ?, ?, ?, ?, ?)",
+            ("u-dc5", "style", "用户沟通风格简短，常用'好的'回复", "用户沟通风格简短，常用'好的'回复",
+             0.7, 0.6, 0.5, now, now),
+        )
 
     block = await plugin._build_knowledge_injection("u-dc5", "绿茶", limit=5)
-    assert "[用户记忆]" in block, "Canonical channel memories must appear in injection"
+    assert "[用户画像·偏好]" in block, "Preference facet must appear in injection"
     assert "用户喜欢喝绿茶" in block
-    assert "[用户风格指导]" in block, "Persona channel memories must appear in injection"
+    assert "[用户画像·风格指导]" in block, "Style facet must appear in injection"
     assert "好的" in block
 
 
 @pytest.mark.asyncio
 async def test_build_knowledge_injection_style_only_no_query_pollution(plugin):
-    """Style memories are fetched by importance, not matched against user query."""
-    _insert_typed_memory(plugin, "u-dc6", "用户常用'哈哈'和emoji表达情绪", memory_type="style")
-    # No canonical memories exist for this user
+    """Style profile items are injected without query matching."""
+    now = plugin._now()
+    with plugin._db() as conn:
+        conn.execute(
+            "INSERT INTO profile_items(canonical_user_id, facet_type, content, "
+            "normalized_content, status, confidence, importance, stability, "
+            "created_at, updated_at) VALUES(?, ?, ?, ?, 'active', ?, ?, ?, ?, ?)",
+            ("u-dc6", "style", "用户常用'哈哈'和emoji表达情绪", "用户常用'哈哈'和emoji表达情绪",
+             0.7, 0.6, 0.5, now, now),
+        )
 
     block = await plugin._build_knowledge_injection("u-dc6", "今天吃什么", limit=5)
-    # Style channel should still produce injection block (without query matching)
-    assert "[用户风格指导]" in block
-    assert "[用户记忆]" not in block, (
-        "No canonical memories exist, so knowledge block must be absent"
-    )
+    assert "[用户画像·风格指导]" in block
+    # No preference/fact items exist for this user
+    assert "[用户画像·偏好]" not in block
+    assert "[用户画像·事实]" not in block
 
 
 @pytest.mark.asyncio

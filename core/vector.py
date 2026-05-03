@@ -114,6 +114,26 @@ async def upsert_vector(plugin, memory_id: int, text: str) -> bool:
         return False
 
 
+async def upsert_profile_vector(plugin, profile_item_id: int, text: str) -> bool:
+    """为一条画像条目生成并写入向量到 profile_item_vectors。"""
+    if not plugin._vec_available:
+        return False
+    vec = await embed_text(plugin, text)
+    if vec is None:
+        return False
+    try:
+        blob = plugin._sqlite_vec.serialize_float32(vec)
+        with plugin._db() as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO profile_item_vectors(profile_item_id, embedding) VALUES(?, ?)",
+                (profile_item_id, blob),
+            )
+        return True
+    except Exception as e:
+        logger.debug("[tmemory] upsert_profile_vector failed for id=%s: %s", profile_item_id, e)
+        return False
+
+
 def delete_vector(plugin, memory_id: int, conn=None) -> None:
     """删除单条记忆的向量行。"""
     if not plugin._vec_available:
