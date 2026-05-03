@@ -44,6 +44,13 @@ CREATE TABLE IF NOT EXISTS memories (
     is_pinned INTEGER NOT NULL DEFAULT 0,
     persona_id TEXT NOT NULL DEFAULT '',
     scope TEXT NOT NULL DEFAULT 'user',
+    summary_channel TEXT NOT NULL DEFAULT 'canonical',
+    attention_score REAL NOT NULL DEFAULT 0.5,
+    episode_id INTEGER NOT NULL DEFAULT 0,
+    derived_from TEXT NOT NULL DEFAULT 'direct',
+    evidence_json TEXT NOT NULL DEFAULT '',
+    semantic_status TEXT NOT NULL DEFAULT 'active',
+    contradiction_of INTEGER NOT NULL DEFAULT 0,
     UNIQUE(canonical_user_id, memory_hash, persona_id, scope)
 )
 """
@@ -87,6 +94,42 @@ CREATE TABLE IF NOT EXISTS distill_history (
 )
 """
 
+_DDL_MEMORY_EPISODES = """
+CREATE TABLE IF NOT EXISTS memory_episodes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    canonical_user_id TEXT NOT NULL,
+    scope TEXT NOT NULL DEFAULT 'user',
+    persona_id TEXT NOT NULL DEFAULT '',
+    session_key TEXT NOT NULL DEFAULT '',
+    episode_title TEXT NOT NULL,
+    episode_summary TEXT NOT NULL,
+    topic_tags TEXT NOT NULL DEFAULT '[]',
+    key_entities TEXT NOT NULL DEFAULT '[]',
+    status TEXT NOT NULL DEFAULT 'ongoing',
+    importance REAL NOT NULL DEFAULT 0.5,
+    confidence REAL NOT NULL DEFAULT 0.5,
+    consolidation_status TEXT NOT NULL DEFAULT 'pending_semantic',
+    attention_score REAL NOT NULL DEFAULT 0.5,
+    source_count INTEGER NOT NULL DEFAULT 0,
+    first_source_at TEXT NOT NULL,
+    last_source_at TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+)
+"""
+
+_DDL_EPISODE_SOURCES = """
+CREATE TABLE IF NOT EXISTS episode_sources (
+    episode_id INTEGER NOT NULL,
+    conversation_cache_id INTEGER NOT NULL,
+    canonical_user_id TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (episode_id, conversation_cache_id),
+    FOREIGN KEY (episode_id) REFERENCES memory_episodes(id),
+    FOREIGN KEY (conversation_cache_id) REFERENCES conversation_cache(id)
+)
+"""
+
 _DDL_CONVERSATION_CACHE = """
 CREATE TABLE IF NOT EXISTS conversation_cache (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -100,7 +143,12 @@ CREATE TABLE IF NOT EXISTS conversation_cache (
     distilled_at TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL,
     scope TEXT NOT NULL DEFAULT 'user',
-    persona_id TEXT NOT NULL DEFAULT ''
+    persona_id TEXT NOT NULL DEFAULT '',
+    episode_id INTEGER NOT NULL DEFAULT 0,
+    session_key TEXT NOT NULL DEFAULT '',
+    turn_index INTEGER NOT NULL DEFAULT 0,
+    topic_hint TEXT NOT NULL DEFAULT '',
+    captured_at TEXT NOT NULL DEFAULT ''
 )
 """
 
@@ -132,6 +180,38 @@ CREATE TRIGGER IF NOT EXISTS t_memories_au AFTER UPDATE ON memories BEGIN
   VALUES ('delete', old.id, old.memory, old.memory_type);
   INSERT INTO memories_fts(rowid, memory, memory_type)
   VALUES (new.id, new.memory, new.memory_type);
+END;
+"""
+
+_DDL_MEMORY_EPISODES_FTS = """
+CREATE VIRTUAL TABLE IF NOT EXISTS memory_episodes_fts USING fts5(
+    episode_title,
+    episode_summary,
+    topic_tags,
+    content='memory_episodes',
+    content_rowid='id',
+    tokenize='jieba'
+)
+"""
+
+_DDL_TRIGGER_EP_AI = """
+CREATE TRIGGER IF NOT EXISTS t_memory_episodes_ai AFTER INSERT ON memory_episodes BEGIN
+  INSERT INTO memory_episodes_fts(rowid, episode_title, episode_summary, topic_tags)
+  VALUES (new.id, new.episode_title, new.episode_summary, new.topic_tags);
+END;
+"""
+_DDL_TRIGGER_EP_AD = """
+CREATE TRIGGER IF NOT EXISTS t_memory_episodes_ad AFTER DELETE ON memory_episodes BEGIN
+  INSERT INTO memory_episodes_fts(memory_episodes_fts, rowid, episode_title, episode_summary, topic_tags)
+  VALUES ('delete', old.id, old.episode_title, old.episode_summary, old.topic_tags);
+END;
+"""
+_DDL_TRIGGER_EP_AU = """
+CREATE TRIGGER IF NOT EXISTS t_memory_episodes_au AFTER UPDATE ON memory_episodes BEGIN
+  INSERT INTO memory_episodes_fts(memory_episodes_fts, rowid, episode_title, episode_summary, topic_tags)
+  VALUES ('delete', old.id, old.episode_title, old.episode_summary, old.topic_tags);
+  INSERT INTO memory_episodes_fts(rowid, episode_title, episode_summary, topic_tags)
+  VALUES (new.id, new.episode_title, new.episode_summary, new.topic_tags);
 END;
 """
 
@@ -225,13 +305,24 @@ class DatabaseManager:
                 "scope": "TEXT NOT NULL DEFAULT 'user'",
                 "tokenized_memory": "TEXT NOT NULL DEFAULT ''",
                 "attention_score": "REAL NOT NULL DEFAULT 0.5",
+                "episode_id": "INTEGER NOT NULL DEFAULT 0",
+                "derived_from": "TEXT NOT NULL DEFAULT 'direct'",
+                "evidence_json": "TEXT NOT NULL DEFAULT ''",
+                "semantic_status": "TEXT NOT NULL DEFAULT 'active'",
+                "contradiction_of": "INTEGER NOT NULL DEFAULT 0",
             }
         )
         # Backfill summary_channel for existing rows: style → persona
-        conn.execute(
-            "UPDATE memories SET summary_channel = 'persona' "
-            "WHERE summary_channel = 'canonical' AND memory_type = 'style'"
-        )
+        if conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='memories'").fetchone():
+            conn.execute(
+                "UPDATE memories SET summary_channel = 'persona' "
+                "WHERE summary_channel = 'canonical' AND memory_type = 'style'"
+            )
+            # Backfill derived_from for pre-0.8.0 rows
+            conn.execute(
+                "UPDATE memories SET derived_from = 'legacy' "
+                "WHERE derived_from = 'direct' AND episode_id = 0"
+            )
         self._ensure_columns(
             conn,
             "conversation_cache",
@@ -243,10 +334,47 @@ class DatabaseManager:
                 "distilled_at": "TEXT NOT NULL DEFAULT ''",
                 "scope": "TEXT NOT NULL DEFAULT 'user'",
                 "persona_id": "TEXT NOT NULL DEFAULT ''",
+                "episode_id": "INTEGER NOT NULL DEFAULT 0",
+                "session_key": "TEXT NOT NULL DEFAULT ''",
+                "turn_index": "INTEGER NOT NULL DEFAULT 0",
+                "topic_hint": "TEXT NOT NULL DEFAULT ''",
+                "captured_at": "TEXT NOT NULL DEFAULT ''",
+            }
+        )
+        # Backfill captured_at and session_key for existing rows
+        if conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='conversation_cache'").fetchone():
+            conn.execute(
+                "UPDATE conversation_cache SET captured_at = created_at "
+                "WHERE captured_at = '' AND created_at != ''"
+            )
+            conn.execute(
+                "UPDATE conversation_cache SET session_key = unified_msg_origin "
+                "WHERE session_key = '' AND unified_msg_origin != ''"
+            )
+
+        if conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='memories'").fetchone():
+            conn.execute("UPDATE memories SET last_seen_at=COALESCE(NULLIF(last_seen_at, ''), updated_at, created_at)")
+
+        self._ensure_columns(
+            conn,
+            "memory_episodes",
+            {
+                "attention_score": "REAL NOT NULL DEFAULT 0.5",
             }
         )
 
-        conn.execute("UPDATE memories SET last_seen_at=COALESCE(NULLIF(last_seen_at, ''), updated_at, created_at)")
+        # Migrate episode_sources from pre-0.8.0 schema (auto-increment id → compound PK)
+        es_exists = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='episode_sources'"
+        ).fetchone()
+        if es_exists:
+            es_cols = {r["name"] for r in conn.execute("PRAGMA table_info(episode_sources)").fetchall()}
+            if "id" in es_cols or "canonical_user_id" not in es_cols:
+                logger.info("[tmemory] Migrating episode_sources to 0.8.0 compound-PK schema...")
+                conn.execute("DROP TABLE IF EXISTS episode_sources_old")
+                conn.execute("ALTER TABLE episode_sources RENAME TO episode_sources_old")
+                conn.execute(_DDL_EPISODE_SOURCES)
+                logger.info("[tmemory] episode_sources migrated, old data preserved in episode_sources_old")
 
         try:
             existing_dh = {
@@ -286,6 +414,8 @@ class DatabaseManager:
             conn.execute(_DDL_IDENTITY_MAPPINGS)
             conn.execute(_DDL_DISTILL_HISTORY)
             conn.execute(_DDL_CONVERSATION_CACHE)
+            conn.execute(_DDL_MEMORY_EPISODES)
+            conn.execute(_DDL_EPISODE_SOURCES)
 
             conn.execute("CREATE INDEX IF NOT EXISTS idx_identity_bindings_canonical ON identity_bindings (canonical_user_id)")
 
@@ -300,6 +430,11 @@ class DatabaseManager:
                 conn.execute(_DDL_TRIGGER_AI)
                 conn.execute(_DDL_TRIGGER_AD)
                 conn.execute(_DDL_TRIGGER_AU)
+
+                conn.execute(_DDL_MEMORY_EPISODES_FTS)
+                conn.execute(_DDL_TRIGGER_EP_AI)
+                conn.execute(_DDL_TRIGGER_EP_AD)
+                conn.execute(_DDL_TRIGGER_EP_AU)
 
                 # Data migration for empty tokenized_memory
                 untokenized = conn.execute("SELECT id, memory FROM memories WHERE tokenized_memory = ''").fetchall()
@@ -343,3 +478,21 @@ class DatabaseManager:
             # --- New indexes for scope/persona performance ---
             conn.execute("CREATE INDEX IF NOT EXISTS idx_memories_scope_persona ON memories (canonical_user_id, scope, persona_id)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_conversations_scope_persona ON conversations (canonical_user_id, scope, persona_id)")
+
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_memory_episodes_user_active ON memory_episodes (canonical_user_id, status)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_memory_episodes_session ON memory_episodes (session_key)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_memory_episodes_status ON memory_episodes (status, updated_at)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_memory_episodes_attention ON memory_episodes (attention_score)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_episode_sources_episode ON episode_sources (episode_id)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_episode_sources_conversation ON episode_sources (conversation_cache_id)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_episode_sources_user ON episode_sources (canonical_user_id)")
+
+            # --- Consolidation pipeline indexes ---
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_memory_episodes_consolidation ON memory_episodes (canonical_user_id, consolidation_status)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_cc_working_user_session ON conversation_cache (canonical_user_id, session_key)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_cc_episode_pending ON conversation_cache (episode_id, distilled)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_cc_captured_at ON conversation_cache (captured_at)")
+
+            # --- Memories new indexes ---
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_memories_episode ON memories (episode_id)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_memories_semantic_status ON memories (semantic_status)")

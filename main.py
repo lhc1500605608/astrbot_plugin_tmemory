@@ -9,10 +9,12 @@ from .core.db import DatabaseManager
 from .core.config import PluginConfig, PluginLifecycleMixin, parse_config
 from .core.capture import CaptureFilter
 from .core.distill import DistillManager, DistillRuntimeMixin
+from .core.consolidation import ConsolidationRuntimeMixin
 from .core.utils import MemoryLogger, PluginHelpersMixin, PluginHandlersMixin
 from .core.identity import IdentityManager
 
 from .search.retrieval import RetrievalManager
+from .core.injection import InjectionBuilder
 
 # 插件自身命令名集合，防止 AstrBot 剥离 wake_prefix(/)后控制命令文本进入 conversation_cache
 _CMD_FIRST_WORDS = frozenset({
@@ -29,7 +31,7 @@ _CMD_FIRST_WORDS = frozenset({
     "AstrBot 用户长期记忆插件(自动采集 + 定时LLM蒸馏 + 跨适配器合并)",
     "0.7.1",
 )
-class TMemoryPlugin(PluginLifecycleMixin, DistillRuntimeMixin, PluginHelpersMixin, PluginHandlersMixin, Star):
+class TMemoryPlugin(PluginLifecycleMixin, DistillRuntimeMixin, ConsolidationRuntimeMixin, PluginHelpersMixin, PluginHandlersMixin, Star):
     def __init__(self, context: Context, config=None):
         super().__init__(context)
         self.config = config or {}
@@ -70,6 +72,7 @@ class TMemoryPlugin(PluginLifecycleMixin, DistillRuntimeMixin, PluginHelpersMixi
         self._capture_filter = CaptureFilter(self._cfg)
         self._distill_mgr = DistillManager(self._cfg)
         self._retrieval_mgr = RetrievalManager(self._cfg, self._db_mgr)
+        self._injection_builder = InjectionBuilder(self._cfg, self._retrieval_mgr)
         self._memory_logger = MemoryLogger(self._db_mgr)
         self._identity_mgr = IdentityManager(self._db_mgr, self._cfg, self._memory_logger)
 

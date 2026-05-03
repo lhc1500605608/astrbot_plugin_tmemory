@@ -47,7 +47,7 @@ def test_migrate_schema_adds_missing_columns(plugin_module, tmp_path, monkeypatc
         }
 
     assert {"memory_type", "importance", "confidence", "is_active", "tokenized_memory"}.issubset(memory_columns)
-    assert {"source_adapter", "source_user_id", "unified_msg_origin", "distilled", "scope", "persona_id"}.issubset(cache_columns)
+    assert {"source_adapter", "source_user_id", "unified_msg_origin", "distilled", "scope", "persona_id", "episode_id", "session_key", "turn_index", "topic_hint", "captured_at"}.issubset(cache_columns)
     plugin._close_db()
 
 
@@ -749,3 +749,403 @@ def test_close_db_sets_conn_to_none(plugin):
     assert plugin._db_mgr._conn is not None
     plugin._close_db()
     assert plugin._db_mgr._conn is None
+
+
+# =============================================================================
+# MIG-001: Fresh DB init creates all 0.8.0 conversation_cache columns
+# =============================================================================
+
+
+def test_mig001_fresh_db_conversation_cache_columns(plugin_module, tmp_path, monkeypatch):
+    """Fresh init_db must create conversation_cache with all 0.8.0 columns
+    including session_key, turn_index, topic_hint, captured_at, episode_id."""
+    monkeypatch.chdir(tmp_path)
+    plugin = plugin_module.TMemoryPlugin(context=None, config={})
+    plugin._init_db()
+    plugin._migrate_schema()
+
+    required = {
+        "id", "canonical_user_id", "role", "content",
+        "source_adapter", "source_user_id", "unified_msg_origin",
+        "distilled", "distilled_at", "created_at",
+        "scope", "persona_id", "episode_id",
+        "session_key", "turn_index", "topic_hint", "captured_at",
+    }
+
+    with plugin._db() as conn:
+        columns = {
+            row["name"]
+            for row in conn.execute("PRAGMA table_info(conversation_cache)").fetchall()
+        }
+
+    missing = required - columns
+    assert not missing, f"MIG-001 FAIL: missing columns in fresh DB: {missing}"
+    plugin._close_db()
+
+
+# =============================================================================
+# MIG-002: Migration backfill for captured_at and session_key
+# =============================================================================
+
+
+def test_mig002_backfill_captured_at_and_session_key(plugin_module, tmp_path, monkeypatch):
+    """Existing rows without captured_at/session_key must be backfilled:
+    captured_at ← created_at, session_key ← unified_msg_origin."""
+    monkeypatch.chdir(tmp_path)
+    plugin = plugin_module.TMemoryPlugin(context=None, config={})
+    with sqlite3.connect(plugin.db_path) as conn:
+        conn.execute(
+            "CREATE TABLE memories (id INTEGER PRIMARY KEY, canonical_user_id TEXT, "
+            "source_adapter TEXT, source_user_id TEXT, memory TEXT, memory_hash TEXT, "
+            "score REAL, created_at TEXT, updated_at TEXT)"
+        )
+        conn.execute(
+            "CREATE TABLE conversation_cache ("
+            "id INTEGER PRIMARY KEY, canonical_user_id TEXT, role TEXT, content TEXT, "
+            "created_at TEXT, unified_msg_origin TEXT DEFAULT '')"
+        )
+        # Row with both populated
+        conn.execute(
+            "INSERT INTO conversation_cache(canonical_user_id, role, content, created_at, unified_msg_origin) "
+            "VALUES('user-a', 'user', 'hello', '2025-01-01T00:00:00', 'group:123')"
+        )
+        # Row with empty unified_msg_origin
+        conn.execute(
+            "INSERT INTO conversation_cache(canonical_user_id, role, content, created_at, unified_msg_origin) "
+            "VALUES('user-b', 'assistant', 'hi', '2025-01-02T00:00:00', '')"
+        )
+
+    plugin._migrate_schema()
+
+    with plugin._db() as conn:
+        row_a = conn.execute(
+            "SELECT captured_at, session_key FROM conversation_cache WHERE canonical_user_id='user-a'"
+        ).fetchone()
+        row_b = conn.execute(
+            "SELECT captured_at, session_key FROM conversation_cache WHERE canonical_user_id='user-b'"
+        ).fetchone()
+
+    assert row_a["captured_at"] == "2025-01-01T00:00:00", f"MIG-002 FAIL: captured_at={row_a['captured_at']}"
+    assert row_a["session_key"] == "group:123", f"MIG-002 FAIL: session_key={row_a['session_key']}"
+    assert row_b["captured_at"] == "2025-01-02T00:00:00", f"MIG-002 FAIL: captured_at={row_b['captured_at']}"
+    assert row_b["session_key"] == "", f"MIG-002 FAIL: session_key should stay empty: {row_b['session_key']}"
+
+    plugin._close_db()
+
+
+# =============================================================================
+# MIG-003: distill_history old-to-new schema migration preserves data
+# =============================================================================
+
+
+def test_mig003_distill_history_migration_preserves_old_data(plugin_module, tmp_path, monkeypatch):
+    """Old distill_history must be renamed to distill_history_old with data intact,
+    and new distill_history must have correct 0.8.0 schema (empty)."""
+    monkeypatch.chdir(tmp_path)
+    plugin = plugin_module.TMemoryPlugin(context=None, config={})
+    with sqlite3.connect(plugin.db_path) as conn:
+        conn.execute(
+            "CREATE TABLE memories (id INTEGER PRIMARY KEY, canonical_user_id TEXT, "
+            "source_adapter TEXT, source_user_id TEXT, memory TEXT, memory_hash TEXT, "
+            "score REAL, created_at TEXT, updated_at TEXT)"
+        )
+        conn.execute(
+            "CREATE TABLE conversation_cache ("
+            "id INTEGER PRIMARY KEY, canonical_user_id TEXT, role TEXT, content TEXT, "
+            "created_at TEXT)"
+        )
+        conn.execute(
+            "CREATE TABLE distill_history ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "run_at DATETIME DEFAULT CURRENT_TIMESTAMP, "
+            "canonical_user_id TEXT NOT NULL, "
+            "persona_id TEXT NOT NULL DEFAULT '', "
+            "scope TEXT NOT NULL DEFAULT 'user', "
+            "status TEXT NOT NULL, "
+            "messages_processed INTEGER NOT NULL DEFAULT 0, "
+            "memories_generated INTEGER NOT NULL DEFAULT 0, "
+            "error_msg TEXT"
+            ")"
+        )
+        conn.execute(
+            "INSERT INTO distill_history(canonical_user_id, status, messages_processed, "
+            "memories_generated) VALUES('user-old', 'ok', 50, 3)"
+        )
+        conn.execute(
+            "INSERT INTO distill_history(canonical_user_id, status, messages_processed, "
+            "memories_generated) VALUES('user-old-2', 'error', 20, 0)"
+        )
+
+    plugin._migrate_schema()
+
+    with plugin._db() as conn:
+        tables = {
+            row["name"]
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+
+        # Verify both tables exist
+        assert "distill_history_old" in tables, "MIG-003 FAIL: distill_history_old not created"
+        assert "distill_history" in tables, "MIG-003 FAIL: new distill_history not created"
+
+        # Old data preserved
+        old_count = conn.execute("SELECT COUNT(*) AS n FROM distill_history_old").fetchone()["n"]
+        assert old_count == 2, f"MIG-003 FAIL: expected 2 old rows, got {old_count}"
+
+        old_row = conn.execute(
+            "SELECT canonical_user_id, status, messages_processed "
+            "FROM distill_history_old WHERE canonical_user_id='user-old'"
+        ).fetchone()
+        assert old_row is not None, "MIG-003 FAIL: old data row missing"
+        assert old_row["status"] == "ok"
+        assert old_row["messages_processed"] == 50
+
+        # New table has empty data but correct schema
+        new_count = conn.execute("SELECT COUNT(*) AS n FROM distill_history").fetchone()["n"]
+        assert new_count == 0, f"MIG-003 FAIL: new distill_history should be empty, got {new_count}"
+
+        new_columns = {
+            row["name"]
+            for row in conn.execute("PRAGMA table_info(distill_history)").fetchall()
+        }
+        required_new = {"started_at", "finished_at", "trigger_type",
+                        "users_processed", "memories_created", "users_failed",
+                        "errors", "duration_sec"}
+        missing_new = required_new - new_columns
+        assert not missing_new, f"MIG-003 FAIL: new schema missing columns: {missing_new}"
+
+        # Old column names must NOT be in new table
+        old_markers = {"status", "run_at", "messages_processed", "error_msg"}
+        leaked = old_markers & new_columns
+        assert not leaked, f"MIG-003 FAIL: old columns leaked into new schema: {leaked}"
+
+    plugin._close_db()
+
+
+# =============================================================================
+# CFG-001: parse_config maps all layered injection fields
+# =============================================================================
+
+
+def test_cfg001_parse_config_layered_injection_fields(plugin_module):
+    """CFG-001: parse_config must map enable_layered_injection, inject_working_turns,
+    inject_episode_limit, inject_episode_max_chars, inject_style_max_chars from raw dict."""
+    from astrbot_plugin_tmemory.core.config import parse_config
+
+    raw = {
+        "enable_layered_injection": True,
+        "inject_working_turns": 10,
+        "inject_episode_limit": 5,
+        "inject_episode_max_chars": 800,
+        "inject_style_max_chars": 500,
+    }
+    cfg = parse_config(raw)
+
+    assert cfg.enable_layered_injection is True, "CFG-001 FAIL: enable_layered_injection not True"
+    assert cfg.inject_working_turns == 10, "CFG-001 FAIL: inject_working_turns not parsed"
+    assert cfg.inject_episode_limit == 5, "CFG-001 FAIL: inject_episode_limit not parsed"
+    assert cfg.inject_episode_max_chars == 800, "CFG-001 FAIL: inject_episode_max_chars not parsed"
+    assert cfg.inject_style_max_chars == 500, "CFG-001 FAIL: inject_style_max_chars not parsed"
+
+
+def test_cfg001_parse_config_layered_injection_defaults(plugin_module):
+    """CFG-001: When raw dict is empty, all layered injection fields get safe defaults."""
+    from astrbot_plugin_tmemory.core.config import parse_config
+
+    cfg = parse_config({})
+
+    assert cfg.enable_layered_injection is False
+    assert cfg.inject_working_turns == 5
+    assert cfg.inject_episode_limit == 3
+    assert cfg.inject_episode_max_chars == 600
+    assert cfg.inject_style_max_chars == 400
+
+
+def test_cfg001_parse_config_layered_injection_zero_clamped(plugin_module):
+    """CFG-001: Negative values for int fields clamp to 0."""
+    from astrbot_plugin_tmemory.core.config import parse_config
+
+    cfg = parse_config({
+        "inject_working_turns": -5,
+        "inject_episode_limit": -1,
+        "inject_episode_max_chars": -100,
+        "inject_style_max_chars": -50,
+    })
+
+    assert cfg.inject_working_turns == 0
+    assert cfg.inject_episode_limit == 0
+    assert cfg.inject_episode_max_chars == 0
+    assert cfg.inject_style_max_chars == 0
+
+
+# =============================================================================
+# CFG-003: enable_layered_injection gate controls injection path
+# =============================================================================
+
+
+class _DummyEvent:
+    """Minimal stub for AstrMessageEvent in injection tests."""
+    def __init__(self, group_id: str = ""):
+        self._group_id = group_id
+    def get_group_id(self):
+        return self._group_id
+    def get_message_type(self):
+        from enum import Enum
+        class _MT(str, Enum):
+            FRIEND_MESSAGE = "friend"
+            GROUP_MESSAGE = "group"
+        return _MT.FRIEND_MESSAGE if not self._group_id else _MT.GROUP_MESSAGE
+
+
+class _DummyProviderRequest:
+    """Minimal stub for ProviderRequest in injection tests."""
+    def __init__(self, prompt: str = "", system_prompt: str = ""):
+        self.prompt = prompt
+        self.system_prompt = system_prompt
+
+
+@pytest.mark.asyncio
+async def test_cfg003_layered_injection_gate_enabled(plugin_module, tmp_path, monkeypatch):
+    """CFG-003: When enable_layered_injection=True, the layered injection path is used."""
+    monkeypatch.chdir(tmp_path)
+    instance = plugin_module.TMemoryPlugin(context=None, config={
+        "enable_layered_injection": True,
+        "enable_memory_injection": True,
+    })
+    instance._init_db()
+    instance._migrate_schema()
+    instance._cfg.inject_working_turns = 3
+    instance._cfg.inject_episode_limit = 2
+
+    layered_called = []
+
+    async def fake_build_layered(canonical_id, query, session_key, **kwargs):
+        layered_called.append((canonical_id, query, session_key))
+        return "[LAYERED_BLOCK]"
+
+    instance._injection_builder.build_layered_injection = fake_build_layered
+    instance._identity_mgr.resolve_current_identity = staticmethod(lambda e: ("user-cfg3", "qq", "42"))
+
+    event = _DummyEvent()
+    req = _DummyProviderRequest(prompt="测试查询", system_prompt="你是AI助手。")
+    await instance._handle_on_llm_request(event, req)
+
+    assert len(layered_called) == 1, "CFG-003 FAIL: layered path not called"
+    assert layered_called[0][1] == "测试查询"
+    assert "[LAYERED_BLOCK]" in req.system_prompt
+    instance._close_db()
+
+
+@pytest.mark.asyncio
+async def test_cfg003_layered_injection_gate_disabled_uses_flat(plugin_module, tmp_path, monkeypatch):
+    """CFG-003: When enable_layered_injection=False, the flat injection path is used."""
+    monkeypatch.chdir(tmp_path)
+    instance = plugin_module.TMemoryPlugin(context=None, config={
+        "enable_layered_injection": False,
+        "enable_memory_injection": True,
+    })
+    instance._init_db()
+    instance._migrate_schema()
+
+    flat_called = []
+
+    async def fake_flat_injection(canonical_id, query, limit, **kwargs):
+        flat_called.append((canonical_id, query, limit))
+        return "[FLAT_BLOCK]"
+
+    instance._build_knowledge_injection = fake_flat_injection
+    instance._identity_mgr.resolve_current_identity = staticmethod(lambda e: ("user-cfg3b", "qq", "42"))
+
+    event = _DummyEvent()
+    req = _DummyProviderRequest(prompt="测试查询", system_prompt="你是AI助手。")
+    await instance._handle_on_llm_request(event, req)
+
+    assert len(flat_called) == 1, "CFG-003 FAIL: flat path not called"
+    assert "[FLAT_BLOCK]" in req.system_prompt
+    instance._close_db()
+
+
+@pytest.mark.asyncio
+async def test_cfg003_layered_injection_gate_disabled_when_memory_injection_off(plugin_module, tmp_path, monkeypatch):
+    """CFG-003: When enable_memory_injection=False, neither path is invoked."""
+    monkeypatch.chdir(tmp_path)
+    instance = plugin_module.TMemoryPlugin(context=None, config={
+        "enable_layered_injection": True,
+        "enable_memory_injection": False,
+    })
+    instance._init_db()
+    instance._migrate_schema()
+
+    layered_called = []
+
+    async def fake_build_layered(**kwargs):
+        layered_called.append(1)
+        return "BLOCK"
+
+    instance._injection_builder.build_layered_injection = fake_build_layered
+    instance._identity_mgr.resolve_current_identity = staticmethod(lambda e: ("user-off", "qq", "42"))
+
+    event = _DummyEvent()
+    req = _DummyProviderRequest(prompt="测试查询", system_prompt="原始prompt")
+    await instance._handle_on_llm_request(event, req)
+
+    assert len(layered_called) == 0, "CFG-003 FAIL: injection should be skipped when disabled"
+    instance._close_db()
+
+
+# =============================================================================
+# HOT-001: on_llm_request performs zero consolidation LLM calls
+# =============================================================================
+
+
+@pytest.mark.asyncio
+async def test_hot001_on_llm_request_zero_llm_calls(plugin_module, tmp_path, monkeypatch):
+    """HOT-001: The entire on_llm_request code path must make zero LLM calls.
+
+    This verifies the ADR-006 hot-path boundary: consolidation LLM work is
+    confined to the background worker loop.
+    """
+    monkeypatch.chdir(tmp_path)
+
+    llm_call_count = [0]
+
+    class _MockContext:
+        async def llm_generate(self, **kwargs):
+            llm_call_count[0] += 1
+            raise RuntimeError("LLM should not be called in hot path")
+
+        async def get_current_chat_provider_id(self, **kwargs):
+            llm_call_count[0] += 1
+            return None
+
+    ctx = _MockContext()
+    instance = plugin_module.TMemoryPlugin(context=ctx, config={
+        "enable_layered_injection": True,
+        "enable_memory_injection": True,
+    })
+    instance._init_db()
+    instance._migrate_schema()
+
+    instance._identity_mgr.resolve_current_identity = staticmethod(lambda e: ("user-hot1", "qq", "42"))
+    instance._identity_mgr.bind_identity("qq", "42", "user-hot1")
+
+    # Insert some data so retrieval has something to return
+    instance._insert_memory(
+        canonical_id="user-hot1",
+        adapter="qq", adapter_user="42",
+        memory="用户喜欢咖啡",
+        score=0.8, memory_type="preference",
+        importance=0.7, confidence=0.8,
+    )
+
+    event = _DummyEvent()
+    req = _DummyProviderRequest(prompt="我想喝咖啡", system_prompt="你是AI助手。")
+    await instance._handle_on_llm_request(event, req)
+
+    assert llm_call_count[0] == 0, (
+        f"HOT-001 FAIL: on_llm_request made {llm_call_count[0]} LLM calls, "
+        f"expected 0. Consolidation LLM work must be confined to background worker."
+    )
+    instance._close_db()

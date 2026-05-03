@@ -60,6 +60,19 @@ class PluginConfig:
     # Active Tool Mode
     memory_mode: str = "hybrid"  # distill_only | active_only | hybrid
 
+    # ── Consolidation Pipeline ──
+    enable_consolidation_pipeline: bool = False
+    enable_episodic_summarization: bool = True
+    enable_episode_semantic_distill: bool = True
+    distill_max_users_per_cycle: int = 10
+    stage_timeout_sec: int = 120
+    use_independent_consolidation_model: bool = False
+    consolidation_provider_id: str = ""
+    consolidation_model_id: str = ""
+    episode_summary_min_messages: int = 5
+    episode_summary_max_input_tokens: int = 3000
+    episode_session_gap_minutes: int = 60
+
     # Injection & Scope
     enable_memory_injection: bool = True
     memory_scope: str = "user"
@@ -68,6 +81,11 @@ class PluginConfig:
     inject_slot_marker: str = "{{tmemory}}"
     inject_memory_limit: int = 5
     inject_max_chars: int = 0
+    enable_layered_injection: bool = False
+    inject_working_turns: int = 5
+    inject_episode_limit: int = 3
+    inject_episode_max_chars: int = 600
+    inject_style_max_chars: int = 400
 
 
 def _safe_int(value, default: int, *, label: str = "") -> int:
@@ -174,6 +192,21 @@ def parse_config(raw_config: dict) -> PluginConfig:
     if c.memory_mode not in {"distill_only", "active_only", "hybrid"}:
         c.memory_mode = "hybrid"
 
+    # ── Consolidation Pipeline ──
+    c.enable_consolidation_pipeline = _safe_bool(raw_config.get("enable_consolidation_pipeline", False), False, label="enable_consolidation_pipeline")
+    c.enable_episodic_summarization = _safe_bool(raw_config.get("enable_episodic_summarization", True), True, label="enable_episodic_summarization")
+    c.enable_episode_semantic_distill = _safe_bool(raw_config.get("enable_episode_semantic_distill", True), True, label="enable_episode_semantic_distill")
+    c.distill_max_users_per_cycle = max(1, _safe_int(raw_config.get("distill_max_users_per_cycle", 10), 10, label="distill_max_users_per_cycle"))
+    c.stage_timeout_sec = max(30, _safe_int(raw_config.get("stage_timeout_sec", 120), 120, label="stage_timeout_sec"))
+    c.episode_summary_min_messages = max(2, _safe_int(raw_config.get("episode_summary_min_messages", 5), 5, label="episode_summary_min_messages"))
+    c.episode_summary_max_input_tokens = max(500, _safe_int(raw_config.get("episode_summary_max_input_tokens", 3000), 3000, label="episode_summary_max_input_tokens"))
+    c.episode_session_gap_minutes = max(5, _safe_int(raw_config.get("episode_session_gap_minutes", 60), 60, label="episode_session_gap_minutes"))
+
+    consolidation_cfg = raw_config.get("consolidation_model_settings", {})
+    c.use_independent_consolidation_model = _safe_bool(consolidation_cfg.get("use_independent_consolidation_model", False), False, label="use_independent_consolidation_model")
+    c.consolidation_provider_id = str(consolidation_cfg.get("consolidation_provider_id", raw_config.get("consolidation_provider_id", ""))).strip()
+    c.consolidation_model_id = str(consolidation_cfg.get("consolidation_model_id", raw_config.get("consolidation_model_id", ""))).strip()
+
     # ── 注入与隔离 ──
     c.enable_memory_injection = _safe_bool(raw_config.get("enable_memory_injection", True), True, label="enable_memory_injection")
     c.memory_scope = str(raw_config.get("memory_scope", "user")).strip().lower()
@@ -187,7 +220,12 @@ def parse_config(raw_config: dict) -> PluginConfig:
     c.inject_slot_marker = str(raw_config.get("inject_slot_marker", "{{tmemory}}")).strip()
     c.inject_memory_limit = _safe_int(raw_config.get("inject_memory_limit", 5), 5, label="inject_memory_limit")
     c.inject_max_chars = _safe_int(raw_config.get("inject_max_chars", 0), 0, label="inject_max_chars")
-    
+    c.enable_layered_injection = _safe_bool(raw_config.get("enable_layered_injection", False), False, label="enable_layered_injection")
+    c.inject_working_turns = max(0, _safe_int(raw_config.get("inject_working_turns", 5), 5, label="inject_working_turns"))
+    c.inject_episode_limit = max(0, _safe_int(raw_config.get("inject_episode_limit", 3), 3, label="inject_episode_limit"))
+    c.inject_episode_max_chars = max(0, _safe_int(raw_config.get("inject_episode_max_chars", 600), 600, label="inject_episode_max_chars"))
+    c.inject_style_max_chars = max(0, _safe_int(raw_config.get("inject_style_max_chars", 400), 400, label="inject_style_max_chars"))
+
     return c
 
 
@@ -244,6 +282,22 @@ def apply_safe_defaults(plugin) -> None:
     c.inject_slot_marker = "{{tmemory}}"
     c.inject_memory_limit = 5
     c.inject_max_chars = 0
+    c.enable_layered_injection = False
+    c.inject_working_turns = 5
+    c.inject_episode_limit = 3
+    c.inject_episode_max_chars = 600
+    c.inject_style_max_chars = 400
+    c.enable_consolidation_pipeline = False
+    c.enable_episodic_summarization = True
+    c.enable_episode_semantic_distill = True
+    c.distill_max_users_per_cycle = 10
+    c.stage_timeout_sec = 120
+    c.use_independent_consolidation_model = False
+    c.consolidation_provider_id = ""
+    c.consolidation_model_id = ""
+    c.episode_summary_min_messages = 5
+    c.episode_summary_max_input_tokens = 3000
+    c.episode_session_gap_minutes = 60
     plugin._sanitize_patterns = []
     plugin._distill_task = None
     plugin._worker_running = False

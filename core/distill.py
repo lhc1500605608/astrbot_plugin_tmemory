@@ -180,10 +180,26 @@ from astrbot.api import logger
 
 class DistillRuntimeMixin:
     async def _distill_worker_loop(self):
-        """后台定时蒸馏循环。"""
+        """后台定时蒸馏循环（含可选三阶段巩固管线）。"""
         await asyncio.sleep(8)
         while self._worker_running:
             if not self._cfg.distill_pause and self._cfg.memory_mode != "active_only":
+                # ── 巩固管线 (Stage B + C) ──
+                if self._cfg.enable_consolidation_pipeline:
+                    try:
+                        episodes, extracted = await self._run_consolidation_cycle(
+                            force=False, trigger="auto"
+                        )
+                        if episodes > 0 or extracted > 0:
+                            logger.info(
+                                "[tmemory] consolidation cycle done: episodes=%s extracted_memories=%s",
+                                episodes,
+                                extracted,
+                            )
+                    except Exception as e:
+                        logger.warning("[tmemory] consolidation worker error: %s", e)
+
+                # ── 现有直接蒸馏 (flat distill, 在管线未启用或作为补充) ──
                 try:
                     users, memories = await self._run_distill_cycle(
                         force=False, trigger="auto"
