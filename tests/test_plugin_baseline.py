@@ -1149,3 +1149,215 @@ async def test_hot001_on_llm_request_zero_llm_calls(plugin_module, tmp_path, mon
         f"expected 0. Consolidation LLM work must be confined to background worker."
     )
     instance._close_db()
+
+
+# =============================================================================
+# CFG-002: conf_schema exposes consolidation pipeline + layered injection config
+# =============================================================================
+
+
+def test_cfg002_parse_config_consolidation_fields(plugin_module):
+    """CFG-002: parse_config must map all consolidation pipeline fields from raw dict."""
+    from astrbot_plugin_tmemory.core.config import parse_config
+
+    raw = {
+        "enable_consolidation_pipeline": True,
+        "enable_episodic_summarization": False,
+        "enable_episode_semantic_distill": False,
+        "distill_max_users_per_cycle": 20,
+        "stage_timeout_sec": 180,
+        "episode_summary_min_messages": 10,
+        "episode_summary_max_input_tokens": 5000,
+        "episode_session_gap_minutes": 120,
+    }
+    cfg = parse_config(raw)
+
+    assert cfg.enable_consolidation_pipeline is True
+    assert cfg.enable_episodic_summarization is False
+    assert cfg.enable_episode_semantic_distill is False
+    assert cfg.distill_max_users_per_cycle == 20
+    assert cfg.stage_timeout_sec == 180
+    assert cfg.episode_summary_min_messages == 10
+    assert cfg.episode_summary_max_input_tokens == 5000
+    assert cfg.episode_session_gap_minutes == 120
+
+
+def test_cfg002_parse_config_consolidation_defaults(plugin_module):
+    """CFG-002: When raw dict is empty, all consolidation fields get safe defaults."""
+    from astrbot_plugin_tmemory.core.config import parse_config
+
+    cfg = parse_config({})
+
+    assert cfg.enable_consolidation_pipeline is False
+    assert cfg.enable_episodic_summarization is True
+    assert cfg.enable_episode_semantic_distill is True
+    assert cfg.distill_max_users_per_cycle == 10
+    assert cfg.stage_timeout_sec == 120
+    assert cfg.episode_summary_min_messages == 5
+    assert cfg.episode_summary_max_input_tokens == 3000
+    assert cfg.episode_session_gap_minutes == 60
+
+
+def test_cfg002_parse_config_consolidation_clamping(plugin_module):
+    """CFG-002: Consolidation int fields clamp to safe minimums."""
+    from astrbot_plugin_tmemory.core.config import parse_config
+
+    cfg = parse_config({
+        "distill_max_users_per_cycle": 0,
+        "stage_timeout_sec": 10,
+        "episode_summary_min_messages": 0,
+        "episode_summary_max_input_tokens": 100,
+        "episode_session_gap_minutes": 0,
+    })
+
+    assert cfg.distill_max_users_per_cycle == 1   # min 1
+    assert cfg.stage_timeout_sec == 30              # min 30
+    assert cfg.episode_summary_min_messages == 2    # min 2
+    assert cfg.episode_summary_max_input_tokens == 500  # min 500
+    assert cfg.episode_session_gap_minutes == 5     # min 5
+
+
+def test_cfg002_parse_config_consolidation_model_settings(plugin_module):
+    """CFG-002: parse_config handles nested consolidation_model_settings."""
+    from astrbot_plugin_tmemory.core.config import parse_config
+
+    raw = {
+        "consolidation_model_settings": {
+            "use_independent_consolidation_model": True,
+            "consolidation_provider_id": "provider-c",
+            "consolidation_model_id": "model-c",
+        }
+    }
+    cfg = parse_config(raw)
+
+    assert cfg.use_independent_consolidation_model is True
+    assert cfg.consolidation_provider_id == "provider-c"
+    assert cfg.consolidation_model_id == "model-c"
+
+
+def test_cfg002_parse_config_consolidation_model_defaults(plugin_module):
+    """CFG-002: Consolidation model defaults: no independent model, empty provider/model."""
+    from astrbot_plugin_tmemory.core.config import parse_config
+
+    cfg = parse_config({})
+
+    assert cfg.use_independent_consolidation_model is False
+    assert cfg.consolidation_provider_id == ""
+    assert cfg.consolidation_model_id == ""
+
+
+def test_cfg002_schema_exposes_all_consolidation_fields(plugin_module):
+    """CFG-002: _conf_schema.json must contain all consolidation pipeline config keys."""
+    import json
+    from pathlib import Path
+
+    schema_path = Path(__file__).resolve().parents[1] / "_conf_schema.json"
+    schema = json.loads(schema_path.read_text())
+
+    # Top-level consolidation sections
+    assert "consolidation_pipeline" in schema, "CFG-002 FAIL: consolidation_pipeline section missing"
+    assert "consolidation_model_settings" in schema, "CFG-002 FAIL: consolidation_model_settings section missing"
+
+    cp = schema["consolidation_pipeline"]
+    assert cp["type"] == "object"
+    items = cp["items"]
+
+    required = [
+        "enable_consolidation_pipeline",
+        "enable_episodic_summarization",
+        "enable_episode_semantic_distill",
+        "distill_max_users_per_cycle",
+        "stage_timeout_sec",
+        "episode_summary_min_messages",
+        "episode_summary_max_input_tokens",
+        "episode_session_gap_minutes",
+    ]
+    for key in required:
+        assert key in items, f"CFG-002 FAIL: consolidation_pipeline.items missing '{key}'"
+
+    # Verify defaults match runtime
+    assert items["enable_consolidation_pipeline"]["default"] is False
+    assert items["enable_episodic_summarization"]["default"] is True
+    assert items["enable_episode_semantic_distill"]["default"] is True
+    assert items["distill_max_users_per_cycle"]["default"] == 10
+    assert items["stage_timeout_sec"]["default"] == 120
+    assert items["episode_summary_min_messages"]["default"] == 5
+    assert items["episode_summary_max_input_tokens"]["default"] == 3000
+    assert items["episode_session_gap_minutes"]["default"] == 60
+
+    cms = schema["consolidation_model_settings"]
+    assert cms["type"] == "object"
+    cms_items = cms["items"]
+
+    required_cms = [
+        "use_independent_consolidation_model",
+        "consolidation_provider_id",
+        "consolidation_model_id",
+    ]
+    for key in required_cms:
+        assert key in cms_items, f"CFG-002 FAIL: consolidation_model_settings.items missing '{key}'"
+
+    assert cms_items["use_independent_consolidation_model"]["default"] is False
+    assert cms_items["consolidation_provider_id"]["default"] == ""
+    assert cms_items["consolidation_provider_id"]["_special"] == "select_provider"
+    assert cms_items["consolidation_model_id"]["default"] == ""
+
+
+def test_cfg002_schema_exposes_all_layered_injection_fields(plugin_module):
+    """CFG-002: _conf_schema.json must contain all layered injection config keys."""
+    import json
+    from pathlib import Path
+
+    schema_path = Path(__file__).resolve().parents[1] / "_conf_schema.json"
+    schema = json.loads(schema_path.read_text())
+
+    required = [
+        "enable_layered_injection",
+        "inject_working_turns",
+        "inject_episode_limit",
+        "inject_episode_max_chars",
+        "inject_style_max_chars",
+    ]
+    for key in required:
+        assert key in schema, f"CFG-002 FAIL: schema missing '{key}'"
+
+    assert schema["enable_layered_injection"]["default"] is False
+    assert schema["inject_working_turns"]["default"] == 5
+    assert schema["inject_episode_limit"]["default"] == 3
+    assert schema["inject_episode_max_chars"]["default"] == 600
+    assert schema["inject_style_max_chars"]["default"] == 400
+
+
+def test_cfg002_schema_defaults_match_parse_config_defaults(plugin_module):
+    """CFG-002: Every new schema field default must match parse_config({}) output."""
+    import json
+    from pathlib import Path
+    from astrbot_plugin_tmemory.core.config import parse_config
+
+    schema_path = Path(__file__).resolve().parents[1] / "_conf_schema.json"
+    schema = json.loads(schema_path.read_text())
+    cfg = parse_config({})
+
+    # Consolidation pipeline
+    cp = schema["consolidation_pipeline"]["items"]
+    assert cp["enable_consolidation_pipeline"]["default"] == cfg.enable_consolidation_pipeline
+    assert cp["enable_episodic_summarization"]["default"] == cfg.enable_episodic_summarization
+    assert cp["enable_episode_semantic_distill"]["default"] == cfg.enable_episode_semantic_distill
+    assert cp["distill_max_users_per_cycle"]["default"] == cfg.distill_max_users_per_cycle
+    assert cp["stage_timeout_sec"]["default"] == cfg.stage_timeout_sec
+    assert cp["episode_summary_min_messages"]["default"] == cfg.episode_summary_min_messages
+    assert cp["episode_summary_max_input_tokens"]["default"] == cfg.episode_summary_max_input_tokens
+    assert cp["episode_session_gap_minutes"]["default"] == cfg.episode_session_gap_minutes
+
+    # Consolidation model settings
+    cms = schema["consolidation_model_settings"]["items"]
+    assert cms["use_independent_consolidation_model"]["default"] == cfg.use_independent_consolidation_model
+    assert cms["consolidation_provider_id"]["default"] == cfg.consolidation_provider_id
+    assert cms["consolidation_model_id"]["default"] == cfg.consolidation_model_id
+
+    # Layered injection
+    assert schema["enable_layered_injection"]["default"] == cfg.enable_layered_injection
+    assert schema["inject_working_turns"]["default"] == cfg.inject_working_turns
+    assert schema["inject_episode_limit"]["default"] == cfg.inject_episode_limit
+    assert schema["inject_episode_max_chars"]["default"] == cfg.inject_episode_max_chars
+    assert schema["inject_style_max_chars"]["default"] == cfg.inject_style_max_chars
