@@ -424,6 +424,14 @@ def get_global_stats(plugin) -> Dict[str, Any]:
             "SELECT finished_at FROM distill_history ORDER BY id DESC LIMIT 1"
         ).fetchone()
 
+        # ── profile metrics ─────────────────────────────────────────────
+        profile_user_count = conn.execute(
+            "SELECT COUNT(*) FROM user_profiles"
+        ).fetchone()[0]
+        profile_item_count = conn.execute(
+            "SELECT COUNT(*) FROM profile_items WHERE status='active'"
+        ).fetchone()[0]
+
     return {
         "total_users": int(total_users),
         "total_active_memories": int(active_memories),
@@ -440,6 +448,9 @@ def get_global_stats(plugin) -> Dict[str, Any]:
         "episodic_layer_count": int(total_episodes),
         "semantic_layer_count": int(semantic_layer),
         "last_consolidation_at": str(last_consolidation_row["finished_at"]) if last_consolidation_row else None,
+        # profile
+        "profile_user_count": int(profile_user_count),
+        "profile_item_count": int(profile_item_count),
     }
 
 

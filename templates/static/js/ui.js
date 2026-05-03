@@ -16,14 +16,14 @@ function closeModal(id) { document.getElementById(id).classList.remove('show'); 
 function switchTab(tab, btn) {
   document.querySelectorAll('.tab-bar button').forEach(b => b.classList.remove('active'));
   btn.classList.add('active');
-  ['panelMindmap','panelTable','panelPending','panelEvents','panelIdentity','panelHealth','panelRefine'].forEach(id => {
+  ['panelProfile','panelTable','panelPending','panelEvents','panelIdentity','panelHealth','panelRefine'].forEach(id => {
     document.getElementById(id).style.display = 'none';
   });
-  const panelMap = { mindmap:'panelMindmap', table:'panelTable', pending:'panelPending', events:'panelEvents', identity:'panelIdentity', health:'panelHealth', refine:'panelRefine' };
+  const panelMap = { profile:'panelProfile', table:'panelTable', pending:'panelPending', events:'panelEvents', identity:'panelIdentity', health:'panelHealth', refine:'panelRefine' };
   const panelId = panelMap[tab];
   if (!panelId) return;
   document.getElementById(panelId).style.display = '';
-  if (tab === 'mindmap') requestAnimationFrame(() => renderMindmap(mindmapData, currentUser));
+  if (tab === 'profile' && currentUser) { loadProfileSummary(currentUser); loadProfileItems(currentUser); }
   if (tab === 'pending') loadPendingQueue();
   if (tab === 'identity') loadIdentities();
   if (tab === 'health') loadHealth();

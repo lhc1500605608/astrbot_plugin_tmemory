@@ -114,3 +114,45 @@ def plugin(tmp_path, monkeypatch, plugin_module):
     instance._migrate_schema()
     yield instance
     instance._close_db()
+
+
+@pytest.fixture()
+def admin_svc(plugin):
+    """AdminService instance for testing profile API methods."""
+    from astrbot_plugin_tmemory.core.admin_service import AdminService
+    return AdminService(plugin)
+
+
+@pytest.fixture()
+def seeded_profile_items(plugin, admin_svc):
+    """Seed 4 profile items with different facet_types for a test user."""
+    from astrbot_plugin_tmemory.core.memory_ops import ProfileItemOps
+    ops = ProfileItemOps(plugin)
+    ops.upsert_profile_item("test-user", "preference", "偏好Python", "用户偏好使用Python", 0.9, 0.8)
+    ops.upsert_profile_item("test-user", "preference", "偏好VS Code", "用户偏好使用VS Code", 0.85, 0.7)
+    ops.upsert_profile_item("test-user", "fact", "职业", "用户是一名软件工程师", 0.95, 0.9)
+    ops.upsert_profile_item("test-user", "fact", "已归档事实", "users obsolete fact", 0.5, 0.4)
+    # Archive the last one manually
+    with plugin._db() as conn:
+        items = conn.execute(
+            "SELECT id FROM profile_items WHERE canonical_user_id='test-user' ORDER BY id"
+        ).fetchall()
+    ops.archive_item(items[-1]["id"])
+    return items  # return ids
+
+
+@pytest.fixture()
+def seeded_profile_items_with_evidence(plugin, admin_svc):
+    """Seed a profile item with evidence from conversation_cache."""
+    from astrbot_plugin_tmemory.core.memory_ops import ProfileItemOps
+    ops = ProfileItemOps(plugin)
+    now = plugin._now()
+    with plugin._db() as conn:
+        conn.execute(
+            "INSERT INTO conversation_cache(canonical_user_id, role, content, created_at) VALUES(?, ?, ?, ?)",
+            ("evidence-user", "user", "I like Python", now),
+        )
+        cid = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+    item_id = ops.upsert_profile_item("evidence-user", "preference", "偏好Python", "用户偏好Python", 0.9, 0.8)
+    ops.add_evidence(item_id, "evidence-user", [cid], "user", "conversation")
+    return item_id

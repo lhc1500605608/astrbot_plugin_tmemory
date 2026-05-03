@@ -7,33 +7,23 @@ async function loadStats() {
   document.getElementById('statDeactivated').textContent = data.total_deactivated_memories ?? '-';
   document.getElementById('statPending').textContent = data.pending_cached_rows ?? '-';
   document.getElementById('statPendingUsers').textContent = data.pending_users ?? '-';
-  // three-tier
-  document.getElementById('statWorking').textContent = data.working_layer_count ?? '-';
-  document.getElementById('statEpisodic').textContent = data.episodic_layer_count ?? '-';
-  document.getElementById('statSemantic').textContent = data.semantic_layer_count ?? '-';
-  // episode consolidation
-  document.getElementById('statEpisodes').textContent = data.total_episodes ?? '-';
-  document.getElementById('statActiveEpisodes').textContent = data.active_episodes ?? '-';
-  document.getElementById('statPendingConsolidation').textContent = data.pending_consolidation ?? '-';
-  document.getElementById('statProcessedConsolidation').textContent = data.processed_consolidation ?? '-';
-  document.getElementById('statLastConsolidation').textContent =
-    data.last_consolidation_at ? '上次合并: ' + data.last_consolidation_at : '上次合并: 暂无记录';
+  // profile stats
+  document.getElementById('statProfiles').textContent = data.profile_user_count ?? '-';
+  document.getElementById('statProfileItems').textContent = data.profile_item_count ?? '-';
 }
-
-let mindmapData = {working:[], episodic:[], semantic:[]};
 
 async function loadUserData(userId) {
   currentUser = userId;
-  const [memData, mmData, evtData] = await Promise.all([
+  const [memData, evtData] = await Promise.all([
     api('/memories?user=' + encodeURIComponent(userId)),
-    api('/mindmap?user=' + encodeURIComponent(userId)),
     api('/events?user=' + encodeURIComponent(userId))
   ]);
   allMemories = memData?.memories || [];
-  mindmapData = mmData || {working:[], episodic:[], semantic:[]};
   renderMemoryTable(allMemories);
-  renderMindmap(mindmapData, userId);
   renderEvents(evtData?.events || []);
+  // Load profile data for the profile workbench tab
+  await loadProfileSummary(userId);
+  await loadProfileItems(userId);
 }
 
 async function refreshAll() {

@@ -175,6 +175,13 @@ class TMemoryWebServer:
         app.router.add_post("/api/identity/rebind", self._handle_rebind_user)
         app.router.add_get("/api/distill/history", self._handle_distill_history)
         app.router.add_post("/api/distill/pause", self._handle_distill_pause)
+        # ── 用户画像 API ──────────────────────────────────────────────
+        app.router.add_get("/api/profile/summary", self._handle_profile_summary)
+        app.router.add_get("/api/profile/items", self._handle_profile_items)
+        app.router.add_get("/api/profile/items/{id}/evidence", self._handle_profile_item_evidence)
+        app.router.add_post("/api/profile/item/update", self._handle_update_profile_item)
+        app.router.add_post("/api/profile/item/archive", self._handle_archive_profile_item)
+        app.router.add_post("/api/profile/items/merge", self._handle_merge_profile_items)
         app.router.add_post("/api/user/export", self._handle_export_user)
         app.router.add_post("/api/user/purge", self._handle_purge_user)
         app.router.add_post("/api/memory/pin", self._handle_pin_memory)
@@ -423,6 +430,64 @@ class TMemoryWebServer:
         admin = self._get_admin()
         admin.set_distill_pause(pause)
         return web.json_response({"ok": True, "distill_pause": pause})
+
+    # ── 用户画像 handlers ──────────────────────────────────────────────────
+
+    async def _handle_profile_summary(self, request: web.Request):
+        admin = self._get_admin()
+        user = request.query.get("user", "")
+        summary = admin.get_profile_summary(user)
+        return web.json_response(summary)
+
+    async def _handle_profile_items(self, request: web.Request):
+        admin = self._get_admin()
+        user = request.query.get("user", "")
+        facet_type = request.query.get("facet_type", "")
+        status = request.query.get("status", "active")
+        items = admin.get_profile_items(user, facet_type, status)
+        return web.json_response({"items": items})
+
+    async def _handle_profile_item_evidence(self, request: web.Request):
+        admin = self._get_admin()
+        item_id = int(request.match_info.get("id", 0))
+        if not item_id:
+            return web.json_response({"error": "id is required"}, status=400)
+        evidence = admin.get_profile_item_evidence(item_id)
+        return web.json_response({"evidence": evidence})
+
+    async def _handle_update_profile_item(self, request: web.Request):
+        data = await request.json()
+        item_id = int(data.get("id", 0))
+        if not item_id:
+            return web.json_response({"error": "id is required"}, status=400)
+        admin = self._get_admin()
+        try:
+            admin.update_profile_item(item_id, data)
+        except ValueError as e:
+            return web.json_response({"error": str(e)}, status=400)
+        return web.json_response({"ok": True})
+
+    async def _handle_archive_profile_item(self, request: web.Request):
+        data = await request.json()
+        item_id = int(data.get("id", 0))
+        if not item_id:
+            return web.json_response({"error": "id is required"}, status=400)
+        admin = self._get_admin()
+        ok = admin.archive_profile_item(item_id)
+        return web.json_response({"ok": ok})
+
+    async def _handle_merge_profile_items(self, request: web.Request):
+        data = await request.json()
+        user = str(data.get("user", "")).strip()
+        ids = data.get("ids", [])
+        if not user or not isinstance(ids, list) or len(ids) < 2:
+            return web.json_response({"error": "user and ids(>=2) are required"}, status=400)
+        admin = self._get_admin()
+        try:
+            result = admin.merge_profile_items(user, ids)
+        except ValueError as e:
+            return web.json_response({"error": str(e)}, status=400)
+        return web.json_response({"ok": True, **result})
 
     async def _handle_merge_users(self, request: web.Request):
         data = await request.json()

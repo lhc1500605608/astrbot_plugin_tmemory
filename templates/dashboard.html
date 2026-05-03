@@ -58,29 +58,18 @@
         </div>
       </div>
       <div class="sidebar-section">
-        <h3>三层架构</h3>
-        <div class="stats-grid stats-grid-3col">
-          <div class="stat-card layer-working"><div class="label">Working 层</div><div class="value" id="statWorking">-</div></div>
-          <div class="stat-card layer-episodic"><div class="label">Episodic 层</div><div class="value" id="statEpisodic">-</div></div>
-          <div class="stat-card layer-semantic"><div class="label">Semantic 层</div><div class="value" id="statSemantic">-</div></div>
-        </div>
-      </div>
-      <div class="sidebar-section">
-        <h3>Episode 合并</h3>
+        <h3>用户画像统计</h3>
         <div class="stats-grid">
-          <div class="stat-card"><div class="label">Episode 总数</div><div class="value" id="statEpisodes">-</div></div>
-          <div class="stat-card"><div class="label">活跃中</div><div class="value" id="statActiveEpisodes">-</div></div>
-          <div class="stat-card"><div class="label">待合并</div><div class="value" id="statPendingConsolidation">-</div></div>
-          <div class="stat-card"><div class="label">已合并</div><div class="value" id="statProcessedConsolidation">-</div></div>
+          <div class="stat-card"><div class="label">用户画像数</div><div class="value" id="statProfiles">-</div></div>
+          <div class="stat-card"><div class="label">画像条目</div><div class="value" id="statProfileItems">-</div></div>
         </div>
-        <div class="consolidation-time" id="statLastConsolidation" style="font-size:11px;color:var(--text2);margin-top:6px">上次合并: -</div>
       </div>
     </div>
 
     <!-- Content -->
     <div class="content">
       <div class="tab-bar">
-        <button class="active" onclick="switchTab('mindmap',this)">🗺️ 思维导图</button>
+        <button class="active" onclick="switchTab('profile',this)">👤 画像工作台</button>
         <button onclick="switchTab('table',this)">📋 记忆列表</button>
         <button onclick="switchTab('pending',this)">⏳ 待蒸馏队列</button>
         <button onclick="switchTab('events',this)">📜 审计日志</button>
@@ -89,35 +78,33 @@
         <button onclick="switchTab('health',this)">💊 系统健康</button>
       </div>
 
-      <!-- Mindmap View -->
-      <div class="mindmap-container" id="panelMindmap">
-        <svg id="mindmapSvg"></svg>
-        <div class="mindmap-legend">
-          <span class="legend-section">
-            <span class="legend-label">层级</span>
-            <span><span class="dot" style="background:#f0ad4e"></span>Working</span>
-            <span><span class="dot" style="background:#5bc0de"></span>Episodic</span>
-            <span><span class="dot" style="background:var(--brand)"></span>Semantic</span>
-          </span>
-          <span class="legend-sep"></span>
-          <span class="legend-section">
-            <span class="legend-label">加工链路</span>
-            <span style="font-size:10px;color:var(--text2)">Capture → Summarization → Extraction → Retrieval</span>
-          </span>
-          <span class="legend-sep"></span>
-          <span class="legend-section">
-            <span class="legend-label">语义类型</span>
-            <span><span class="dot" style="background:#58a6ff"></span>pref</span>
-            <span><span class="dot" style="background:#3fb950"></span>fact</span>
-            <span><span class="dot" style="background:#d29922"></span>task</span>
-            <span><span class="dot" style="background:#f85149"></span>restr</span>
-            <span><span class="dot" style="background:#bc8cff"></span>style</span>
-          </span>
+      <!-- Profile Workbench -->
+      <div class="table-panel" id="panelProfile" style="display:flex;flex-direction:column">
+        <div id="profileSummary" style="margin-bottom:14px"></div>
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:12px;flex-wrap:wrap">
+          <div class="tab-bar" id="profileFacetTabs" style="border:none;background:none"></div>
+          <select class="search-box" style="max-width:110px" id="profileStatusFilter" onchange="filterProfileItems(profileFacetFilter, this.value)">
+            <option value="active">活跃</option>
+            <option value="superseded">已取代</option>
+            <option value="contradicted">矛盾</option>
+            <option value="archived">已归档</option>
+          </select>
+          <button class="btn btn-sm btn-primary" onclick="mergeSelectedProfileItems()">🔀 合并选中</button>
         </div>
-        <div class="mindmap-toolbar">
-          <button class="btn btn-icon btn-sm" onclick="zoomIn()" title="放大">+</button>
-          <button class="btn btn-icon btn-sm" onclick="zoomOut()" title="缩小">−</button>
-          <button class="btn btn-icon btn-sm" onclick="resetZoom()" title="重置">⟲</button>
+        <div style="flex:1;overflow:auto">
+          <table class="mem-table">
+            <thead><tr>
+              <th style="width:40px">ID</th>
+              <th style="width:70px">类型</th>
+              <th>标题 / 内容</th>
+              <th style="width:60px">状态</th>
+              <th style="width:70px">置信度</th>
+              <th style="width:70px">重要度</th>
+              <th style="width:50px">证据</th>
+              <th style="width:130px">操作</th>
+            </tr></thead>
+            <tbody id="profileItemBody"></tbody>
+          </table>
         </div>
       </div>
 
@@ -335,15 +322,61 @@
 
 <div class="toast-container" id="toastContainer"></div>
 
-<!-- vendor -->
-<script src="/static/vendor/d3.v7.min.js"></script>
+<!-- Profile Edit Modal -->
+<div class="modal-backdrop" id="profileEditModal">
+  <div class="modal">
+    <div class="modal-header"><h3>编辑画像条目</h3><button class="btn btn-icon btn-sm" onclick="closeModal('profileEditModal')">✕</button></div>
+    <div class="modal-body">
+      <input type="hidden" id="profileEditId">
+      <div class="form-group"><label>标题</label><input id="profileEditTitle" type="text" placeholder="条目标题（可选）"></div>
+      <div class="form-group"><label>内容</label><textarea id="profileEditContent" rows="3"></textarea></div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+        <div class="form-group"><label>类型</label>
+          <select id="profileEditFacet">
+            <option value="preference">preference（偏好）</option>
+            <option value="fact">fact（事实）</option>
+            <option value="style">style（风格）</option>
+            <option value="restriction">restriction（约束）</option>
+            <option value="task_pattern">task_pattern（任务模式）</option>
+          </select>
+        </div>
+        <div class="form-group"><label>状态</label>
+          <select id="profileEditStatus">
+            <option value="active">active（活跃）</option>
+            <option value="superseded">superseded（已取代）</option>
+            <option value="contradicted">contradicted（矛盾）</option>
+            <option value="archived">archived（已归档）</option>
+          </select>
+        </div>
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+        <div class="form-group"><label>置信度</label><input id="profileEditConfidence" type="number" step="0.01" min="0" max="1"></div>
+        <div class="form-group"><label>重要度</label><input id="profileEditImportance" type="number" step="0.01" min="0" max="1"></div>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn" onclick="closeModal('profileEditModal')">取消</button>
+      <button class="btn btn-primary" onclick="saveProfileItem()">保存</button>
+    </div>
+  </div>
+</div>
+
+<!-- Evidence Modal -->
+<div class="modal-backdrop" id="evidenceModal">
+  <div class="modal" style="width:540px">
+    <div class="modal-header"><h3 id="evidenceTitle">证据链</h3><button class="btn btn-icon btn-sm" onclick="closeModal('evidenceModal')">✕</button></div>
+    <div class="modal-body" id="evidenceBody" style="max-height:50vh;overflow-y:auto"></div>
+    <div class="modal-footer"><button class="btn" onclick="closeModal('evidenceModal')">关闭</button></div>
+  </div>
+</div>
+
 <!-- app modules -->
 <script src="/static/js/api.js"></script>
 <script src="/static/js/ui.js"></script>
 <script src="/static/js/avatar.js"></script>
 <script src="/static/js/users.js"></script>
 <script src="/static/js/memories.js"></script>
-<script src="/static/js/mindmap.js"></script>
+<script src="/static/js/profile.js"></script>
 <script src="/static/js/identities.js"></script>
 <script src="/static/js/health.js"></script>
 <script src="/static/js/distill.js"></script>
