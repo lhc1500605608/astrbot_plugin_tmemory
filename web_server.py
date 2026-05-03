@@ -161,6 +161,7 @@ class TMemoryWebServer:
         app.router.add_post("/api/login", self._handle_login)
         app.router.add_get("/api/users", self._handle_get_users)
         app.router.add_get("/api/stats", self._handle_get_stats)
+        app.router.add_get("/api/mindmap", self._handle_get_mindmap)
         app.router.add_get("/api/memories", self._handle_get_memories)
         app.router.add_get("/api/events", self._handle_get_events)
         app.router.add_post("/api/memory/add", self._handle_add_memory)
@@ -286,6 +287,12 @@ class TMemoryWebServer:
         admin = self._get_admin()
         stats = admin.get_global_stats()
         return web.json_response(stats)
+
+    async def _handle_get_mindmap(self, request: web.Request):
+        admin = self._get_admin()
+        user = request.query.get("user", "")
+        data = admin.get_mindmap_data(user)
+        return web.json_response(data)
 
     async def _handle_get_memories(self, request: web.Request):
         admin = self._get_admin()

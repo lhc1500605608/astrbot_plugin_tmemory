@@ -161,6 +161,110 @@ class AdminService:
             for r in rows
         ]
 
+    def get_mindmap_data(self, user: str) -> Dict[str, Any]:
+        """返回三层记忆导图的投影数据。
+
+        Returns
+        -------
+        dict: {"working": [...], "episodic": [...], "semantic": [...]}
+        """
+        if not user:
+            return {"working": [], "episodic": [], "semantic": []}
+        with self._db() as conn:
+            # Working layer: 最近 conversation_cache turns
+            working_rows = conn.execute(
+                """
+                SELECT id, role, content, session_key, turn_index,
+                       distilled, episode_id, captured_at, created_at
+                FROM conversation_cache
+                WHERE canonical_user_id = ?
+                ORDER BY id DESC LIMIT 30
+                """,
+                (user,),
+            ).fetchall()
+            # Episodic layer: memory_episodes with source_count
+            episodic_rows = conn.execute(
+                """
+                SELECT id, episode_title, episode_summary, topic_tags,
+                       key_entities, status, consolidation_status,
+                       importance, confidence, source_count,
+                       first_source_at, last_source_at, created_at, updated_at
+                FROM memory_episodes
+                WHERE canonical_user_id = ?
+                ORDER BY updated_at DESC LIMIT 30
+                """,
+                (user,),
+            ).fetchall()
+            # Semantic layer: same as get_memories but with episode provenance
+            semantic_rows = conn.execute(
+                """
+                SELECT id, memory_type, memory, score, importance, confidence,
+                       reinforce_count, is_active,
+                       COALESCE(is_pinned, 0) AS is_pinned,
+                       episode_id, derived_from, semantic_status,
+                       last_seen_at, created_at, updated_at
+                FROM memories WHERE canonical_user_id = ? AND is_active = 1
+                ORDER BY importance DESC, score DESC, updated_at DESC LIMIT 200
+                """,
+                (user,),
+            ).fetchall()
+
+        return {
+            "working": [
+                {
+                    "id": int(r["id"]),
+                    "role": str(r["role"]),
+                    "content": str(r["content"]),
+                    "session_key": str(r["session_key"]),
+                    "turn_index": int(r["turn_index"]),
+                    "distilled": int(r["distilled"]),
+                    "episode_id": int(r["episode_id"]),
+                    "captured_at": str(r["captured_at"]),
+                    "created_at": str(r["created_at"]),
+                }
+                for r in working_rows
+            ],
+            "episodic": [
+                {
+                    "id": int(r["id"]),
+                    "episode_title": str(r["episode_title"]),
+                    "episode_summary": str(r["episode_summary"]),
+                    "topic_tags": str(r["topic_tags"]),
+                    "key_entities": str(r["key_entities"]),
+                    "status": str(r["status"]),
+                    "consolidation_status": str(r["consolidation_status"]),
+                    "importance": float(r["importance"]),
+                    "confidence": float(r["confidence"]),
+                    "source_count": int(r["source_count"]),
+                    "first_source_at": str(r["first_source_at"]),
+                    "last_source_at": str(r["last_source_at"]),
+                    "created_at": str(r["created_at"]),
+                    "updated_at": str(r["updated_at"]),
+                }
+                for r in episodic_rows
+            ],
+            "semantic": [
+                {
+                    "id": int(r["id"]),
+                    "memory_type": str(r["memory_type"]),
+                    "memory": str(r["memory"]),
+                    "score": float(r["score"]),
+                    "importance": float(r["importance"]),
+                    "confidence": float(r["confidence"]),
+                    "reinforce_count": int(r["reinforce_count"]),
+                    "is_active": int(r["is_active"]),
+                    "is_pinned": int(r["is_pinned"]),
+                    "episode_id": int(r["episode_id"]),
+                    "derived_from": str(r["derived_from"]),
+                    "semantic_status": str(r["semantic_status"]),
+                    "last_seen_at": str(r["last_seen_at"]),
+                    "created_at": str(r["created_at"]),
+                    "updated_at": str(r["updated_at"]),
+                }
+                for r in semantic_rows
+            ],
+        }
+
     def get_events(self, user: str) -> List[Dict[str, Any]]:
         """返回指定用户的审计事件列表。"""
         if not user:

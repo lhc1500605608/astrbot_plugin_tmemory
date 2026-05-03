@@ -23,7 +23,7 @@ function switchTab(tab, btn) {
   const panelId = panelMap[tab];
   if (!panelId) return;
   document.getElementById(panelId).style.display = '';
-  if (tab === 'mindmap') requestAnimationFrame(() => renderMindmap(allMemories, currentUser));
+  if (tab === 'mindmap') requestAnimationFrame(() => renderMindmap(mindmapData, currentUser));
   if (tab === 'pending') loadPendingQueue();
   if (tab === 'identity') loadIdentities();
   if (tab === 'health') loadHealth();
