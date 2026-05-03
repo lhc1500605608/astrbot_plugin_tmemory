@@ -4,6 +4,7 @@ import re
 import struct
 from pathlib import Path
 
+import pytest
 from aiohttp import web
 
 
@@ -84,6 +85,90 @@ def test_web_middleware_enforces_ip_whitelist_and_authentication(web_module, plu
     assert authorized.status == 200
 
 
+def test_web_middleware_allows_favicon_without_auth_and_route_is_registered(
+    web_module, plugin
+):
+    server = web_module.TMemoryWebServer(
+        plugin,
+        {
+            "webui_enabled": True,
+            "webui_password": "secret",
+        },
+    )
+    server._app = web.Application()
+    server._setup_routes()
+
+    routes = {
+        route.resource.canonical
+        for route in server._app.router.routes()
+        if hasattr(route.resource, "canonical")
+    }
+    assert "/favicon.ico" in routes
+
+    async def favicon_handler(_request):
+        return web.Response(status=204)
+
+    class Request:
+        def __init__(self, path):
+            self.path = path
+            self.headers = {}
+            self.query = {}
+            self.method = "GET"
+            self.transport = self
+            self._storage = {}
+
+        def get_extra_info(self, name):
+            if name == "peername":
+                return ("127.0.0.1", 12345)
+            return None
+
+        def __setitem__(self, key, value):
+            self._storage[key] = value
+
+        def __getitem__(self, key):
+            return self._storage[key]
+
+    response = asyncio.run(server._middleware(Request("/favicon.ico"), favicon_handler))
+    assert response.status == 204
+
+
+def test_web_middleware_preserves_http_not_found_from_handler(web_module, plugin):
+    server = web_module.TMemoryWebServer(
+        plugin,
+        {
+            "webui_enabled": True,
+            "webui_password": "secret",
+        },
+    )
+    token = web_module.jwt_encode({"user": "admin"}, server._jwt_secret, 3600)
+
+    async def missing_handler(_request):
+        raise web.HTTPNotFound(text="missing route")
+
+    class Request:
+        def __init__(self):
+            self.path = "/api/missing"
+            self.headers = {"Authorization": f"Bearer {token}"}
+            self.query = {}
+            self.method = "GET"
+            self.transport = self
+            self._storage = {}
+
+        def get_extra_info(self, name):
+            if name == "peername":
+                return ("127.0.0.1", 12345)
+            return None
+
+        def __setitem__(self, key, value):
+            self._storage[key] = value
+
+        def __getitem__(self, key):
+            return self._storage[key]
+
+    with pytest.raises(web.HTTPNotFound):
+        asyncio.run(server._middleware(Request(), missing_handler))
+
+
 def test_dashboard_memoryforge_brand_assets_are_consistent_and_lightweight():
     """MemoryForge WebUI should not ship mismatched or oversized icon assets."""
     dashboard_path = Path("templates/dashboard.html")
@@ -146,6 +231,47 @@ def test_dashboard_switch_tab_only_references_rendered_panels():
     referenced_panel_ids = {panel_id.strip("'") for panel_id in referenced_panel_ids}
 
     assert referenced_panel_ids <= rendered_panel_ids
+
+
+def test_dashboard_does_not_reference_removed_profile_creation_ui():
+    html = Path("templates/dashboard.html").read_text(encoding="utf-8")
+
+    assert "createProfile()" not in html
+    assert 'id="profileModal"' not in html
+
+
+def test_get_config_returns_plugin_config_not_global(web_module, plugin):
+    """GET /api/config 应返回 tmemory 插件配置，而非 AstrBot 全局配置。"""
+    server = web_module.TMemoryWebServer(
+        plugin,
+        {
+            "webui_enabled": True,
+            "webui_password": "secret",
+        },
+    )
+
+    class _Req:
+        def __init__(self, query_keys=""):
+            self.query = {"keys": query_keys}
+
+    # ── 无 keys 参数：返回完整插件配置 ──
+    resp_full = asyncio.run(server._handle_get_config(_Req()))
+    assert resp_full.status == 200
+    body_full = json.loads(resp_full.text)
+    assert "memory_mode" in body_full
+    assert "distill_pause" in body_full
+    assert "platform" not in body_full, "不应包含 AstrBot 全局配置键"
+
+    # ── 带 keys 参数：仅返回请求的键 ──
+    resp_keys = asyncio.run(
+        server._handle_get_config(_Req("memory_mode,distill_pause"))
+    )
+    assert resp_keys.status == 200
+    body_keys = json.loads(resp_keys.text)
+    assert "memory_mode" in body_keys
+    assert "distill_pause" in body_keys
+    assert body_keys["memory_mode"] == "hybrid"
+    assert body_keys["distill_pause"] is False
 
 
 def _png_size(path):
