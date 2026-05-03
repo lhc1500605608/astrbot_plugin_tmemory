@@ -721,7 +721,7 @@ class PluginHelpersMixin:
                 """
                 SELECT canonical_user_id, COUNT(*) as cnt
                 FROM conversation_cache
-                WHERE distilled=0
+                WHERE distilled=0 AND episode_id=0
                 GROUP BY canonical_user_id
                 HAVING cnt >= ?
                 ORDER BY cnt DESC
@@ -738,7 +738,7 @@ class PluginHelpersMixin:
                 """
                 SELECT id, canonical_user_id, role, content, source_adapter, source_user_id, unified_msg_origin, scope, persona_id
                 FROM conversation_cache
-                WHERE canonical_user_id=? AND distilled=0
+                WHERE canonical_user_id=? AND distilled=0 AND episode_id=0
                 ORDER BY id ASC
                 LIMIT ?
                 """,
@@ -761,14 +761,14 @@ class PluginHelpersMixin:
     def _count_pending_users(self) -> int:
         with self._db() as conn:
             row = conn.execute(
-                "SELECT COUNT(1) AS n FROM (SELECT canonical_user_id FROM conversation_cache WHERE distilled=0 GROUP BY canonical_user_id)"
+                "SELECT COUNT(1) AS n FROM (SELECT canonical_user_id FROM conversation_cache WHERE distilled=0 AND episode_id=0 GROUP BY canonical_user_id)"
             ).fetchone()
         return int(row["n"] if row else 0)
 
     def _count_pending_rows(self) -> int:
         with self._db() as conn:
             row = conn.execute(
-                "SELECT COUNT(1) AS n FROM conversation_cache WHERE distilled=0"
+                "SELECT COUNT(1) AS n FROM conversation_cache WHERE distilled=0 AND episode_id=0"
             ).fetchone()
         return int(row["n"] if row else 0)
 
@@ -922,14 +922,24 @@ class PluginHandlersMixin:
             persona_id = await self._get_current_persona_async(event)
             is_group = self._is_group_event(event)
             exclude_private = (is_group and not self._cfg.private_memory_in_group)
+            session_key = self._safe_get_unified_msg_origin(event)
 
-            # ── 知识记忆注入：遵循 inject_position ──
-            knowledge_block = await self._build_knowledge_injection(
-                canonical_id, query, self._cfg.inject_memory_limit,
-                scope=scope, persona_id=persona_id, exclude_private=exclude_private,
-            )
-            if knowledge_block:
-                self._inject_block_by_position(req, knowledge_block)
+            if self._cfg.enable_layered_injection:
+                # ── Layered injection: Working → Episodic → Semantic → Style ──
+                block = await self._injection_builder.build_layered_injection(
+                    canonical_id, query, session_key,
+                    scope=scope, persona_id=persona_id, exclude_private=exclude_private,
+                )
+                if block:
+                    self._inject_block_by_position(req, block)
+            else:
+                # ── Flat injection (backward compatible) ──
+                knowledge_block = await self._build_knowledge_injection(
+                    canonical_id, query, self._cfg.inject_memory_limit,
+                    scope=scope, persona_id=persona_id, exclude_private=exclude_private,
+                )
+                if knowledge_block:
+                    self._inject_block_by_position(req, knowledge_block)
         except Exception as e:
             logger.warning("[tmemory] on_llm_request inject failed: %s", e)
 

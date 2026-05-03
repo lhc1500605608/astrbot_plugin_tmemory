@@ -456,8 +456,9 @@ def insert_conversation_sync(
                 """
                 INSERT INTO conversation_cache(
                     canonical_user_id, role, content, source_adapter, source_user_id,
-                    unified_msg_origin, distilled, distilled_at, created_at, scope, persona_id
-                ) VALUES(?, ?, ?, ?, ?, ?, 0, '', ?, ?, ?)
+                    unified_msg_origin, distilled, distilled_at, created_at, scope,
+                    persona_id, session_key
+                ) VALUES(?, ?, ?, ?, ?, ?, 0, '', ?, ?, ?, ?)
                 """,
                 (
                     canonical_id,
@@ -469,6 +470,7 @@ def insert_conversation_sync(
                     plugin._now(),
                     scope,
                     persona_id,
+                    unified_msg_origin,
                 ),
             )
     except Exception as e:

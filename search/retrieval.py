@@ -145,6 +145,161 @@ class RetrievalManager:
         scored.sort(key=lambda x: float(x.get("final_score", x.get("_retrieval_score", 0.0))), reverse=True)
         return scored, []
 
+    def retrieve_working_context(
+        self,
+        canonical_id: str,
+        session_key: str,
+        limit: int,
+    ) -> List[Dict[str, object]]:
+        """Retrieve recent conversation_cache turns for working memory injection.
+
+        Returns list of {role, content} dicts ordered by id DESC (most recent first),
+        then reversed so they appear in chronological order for prompt assembly.
+        """
+        if not session_key or limit <= 0:
+            return []
+
+        with self._db_mgr.db() as conn:
+            rows = conn.execute(
+                """
+                SELECT role, content FROM conversation_cache
+                WHERE canonical_user_id = ? AND session_key = ?
+                ORDER BY id DESC
+                LIMIT ?
+                """,
+                (canonical_id, session_key, limit),
+            ).fetchall()
+        result = [{"role": r["role"], "content": r["content"]} for r in rows]
+        result.reverse()
+        return result
+
+    def retrieve_episodes(
+        self,
+        canonical_id: str,
+        query: str,
+        limit: int,
+        max_chars: int,
+        scope: str = "user",
+        persona_id: str = "",
+    ) -> List[Dict[str, object]]:
+        """Retrieve episode summaries for injection.
+
+        Strategy:
+        1. Current ongoing episode for this session (if any) — highest priority
+        2. FTS / title match on query for related episodes
+        3. High-attention recent episodes as fallback
+        Respects per-episode max_chars truncation.
+        """
+        if limit <= 0:
+            return []
+
+        persona_cond = "AND (e.persona_id=? OR e.persona_id='')"
+        scope_cond = "AND (e.scope=? OR e.scope='user')"
+
+        with self._db_mgr.db() as conn:
+            episodes: Dict[int, dict] = {}
+            seen: set = set()
+
+            # Priority 1: ongoing episodes ordered by last_source_at DESC
+            ongoing_rows = conn.execute(
+                f"""
+                SELECT e.id, e.episode_title, e.episode_summary, e.attention_score,
+                       e.last_source_at, 1.0 AS priority
+                FROM memory_episodes e
+                WHERE e.canonical_user_id = ? AND e.status = 'ongoing'
+                  {scope_cond} {persona_cond}
+                ORDER BY e.last_source_at DESC
+                LIMIT ?
+                """,
+                (canonical_id, scope, persona_id, limit),
+            ).fetchall()
+            for r in ongoing_rows:
+                if r["id"] not in seen:
+                    episodes[r["id"]] = dict(r)
+                    seen.add(r["id"])
+
+            # Priority 2: query-driven episode search (title / summary FTS-like)
+            if query and len(episodes) < limit:
+                remaining = limit - len(episodes)
+                search_rows = conn.execute(
+                    f"""
+                    SELECT e.id, e.episode_title, e.episode_summary, e.attention_score,
+                           e.last_source_at, 0.7 AS priority
+                    FROM memory_episodes e
+                    WHERE e.canonical_user_id = ? AND e.id NOT IN ({','.join('?' * len(seen))})
+                      AND (e.episode_title LIKE ? OR e.episode_summary LIKE ?)
+                      {scope_cond} {persona_cond}
+                    ORDER BY e.attention_score DESC
+                    LIMIT ?
+                    """,
+                    (
+                        canonical_id,
+                        *list(seen),
+                        f"%{query}%",
+                        f"%{query}%",
+                        scope,
+                        persona_id,
+                        remaining,
+                    ),
+                ).fetchall() if seen else conn.execute(
+                    f"""
+                    SELECT e.id, e.episode_title, e.episode_summary, e.attention_score,
+                           e.last_source_at, 0.7 AS priority
+                    FROM memory_episodes e
+                    WHERE e.canonical_user_id = ?
+                      AND (e.episode_title LIKE ? OR e.episode_summary LIKE ?)
+                      {scope_cond} {persona_cond}
+                    ORDER BY e.attention_score DESC
+                    LIMIT ?
+                    """,
+                    (canonical_id, f"%{query}%", f"%{query}%", scope, persona_id, remaining),
+                ).fetchall()
+                for r in search_rows:
+                    if r["id"] not in seen:
+                        episodes[r["id"]] = dict(r)
+                        seen.add(r["id"])
+
+            # Priority 3: high-attention recent episodes
+            if len(episodes) < limit:
+                remaining = limit - len(episodes)
+                fallback_rows = conn.execute(
+                    f"""
+                    SELECT e.id, e.episode_title, e.episode_summary, e.attention_score,
+                           e.last_source_at, 0.4 AS priority
+                    FROM memory_episodes e
+                    WHERE e.canonical_user_id = ? AND e.id NOT IN ({','.join('?' * len(seen))})
+                      {scope_cond} {persona_cond}
+                    ORDER BY e.attention_score DESC, e.last_source_at DESC
+                    LIMIT ?
+                    """,
+                    (
+                        canonical_id,
+                        *list(seen),
+                        scope,
+                        persona_id,
+                        remaining,
+                    ),
+                ).fetchall()
+                for r in fallback_rows:
+                    if r["id"] not in seen:
+                        episodes[r["id"]] = dict(r)
+                        seen.add(r["id"])
+
+        # Sort by priority DESC then attention_score DESC
+        result = sorted(
+            episodes.values(),
+            key=lambda x: (float(x.get("priority", 0)), float(x.get("attention_score", 0.5))),
+            reverse=True,
+        )
+
+        # Truncate per-episode summary to max_chars
+        for ep in result:
+            summary = str(ep.get("episode_summary", ""))
+            if max_chars > 0 and len(summary) > max_chars:
+                ep["episode_summary"] = summary[:max_chars] + "…"
+
+        return result[:limit]
+
     def tokenize(self, text: str) -> List[str]:
         # Import dynamically if not using distill manager
         import re
