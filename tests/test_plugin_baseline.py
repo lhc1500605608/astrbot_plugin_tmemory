@@ -1198,6 +1198,61 @@ def test_cfg002_parse_config_consolidation_defaults(plugin_module):
     assert cfg.episode_session_gap_minutes == 60
 
 
+def test_cfg002_parse_config_consolidation_nested(plugin_module):
+    """CFG-002: parse_config must parse nested consolidation_pipeline dict matching schema."""
+    from astrbot_plugin_tmemory.core.config import parse_config
+
+    nested = parse_config({
+        "consolidation_pipeline": {
+            "enable_consolidation_pipeline": True,
+            "stage_timeout_sec": 45,
+            "enable_episodic_summarization": False,
+            "distill_max_users_per_cycle": 25,
+        }
+    })
+    flat = parse_config({
+        "enable_consolidation_pipeline": True,
+        "stage_timeout_sec": 45,
+        "enable_episodic_summarization": False,
+        "distill_max_users_per_cycle": 25,
+    })
+
+    assert nested.enable_consolidation_pipeline is True
+    assert nested.stage_timeout_sec == 45
+    assert nested.enable_episodic_summarization is False
+    assert nested.distill_max_users_per_cycle == 25
+
+    assert flat.enable_consolidation_pipeline is True
+    assert flat.stage_timeout_sec == 45
+    assert flat.enable_episodic_summarization is False
+    assert flat.distill_max_users_per_cycle == 25
+
+    # Unspecified nested fields get defaults
+    assert nested.enable_episode_semantic_distill is True
+    assert nested.episode_summary_min_messages == 5
+
+
+def test_cfg002_parse_config_consolidation_nested_merges_top_level_fallback(plugin_module):
+    """CFG-002: Nested consolidation_pipeline merges top-level fallback for backwards compat."""
+    from astrbot_plugin_tmemory.core.config import parse_config
+
+    cfg = parse_config({
+        "consolidation_pipeline": {
+            "enable_consolidation_pipeline": True,
+            "stage_timeout_sec": 45,
+        },
+        "enable_episodic_summarization": False,  # top-level fallback
+        "distill_max_users_per_cycle": 15,        # top-level fallback
+    })
+
+    # Nested values take priority
+    assert cfg.enable_consolidation_pipeline is True
+    assert cfg.stage_timeout_sec == 45
+    # Top-level keys fill in gaps not in nested
+    assert cfg.enable_episodic_summarization is False
+    assert cfg.distill_max_users_per_cycle == 15
+
+
 def test_cfg002_parse_config_consolidation_clamping(plugin_module):
     """CFG-002: Consolidation int fields clamp to safe minimums."""
     from astrbot_plugin_tmemory.core.config import parse_config
