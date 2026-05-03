@@ -193,14 +193,25 @@ def parse_config(raw_config: dict) -> PluginConfig:
         c.memory_mode = "hybrid"
 
     # ── Consolidation Pipeline ──
-    c.enable_consolidation_pipeline = _safe_bool(raw_config.get("enable_consolidation_pipeline", False), False, label="enable_consolidation_pipeline")
-    c.enable_episodic_summarization = _safe_bool(raw_config.get("enable_episodic_summarization", True), True, label="enable_episodic_summarization")
-    c.enable_episode_semantic_distill = _safe_bool(raw_config.get("enable_episode_semantic_distill", True), True, label="enable_episode_semantic_distill")
-    c.distill_max_users_per_cycle = max(1, _safe_int(raw_config.get("distill_max_users_per_cycle", 10), 10, label="distill_max_users_per_cycle"))
-    c.stage_timeout_sec = max(30, _safe_int(raw_config.get("stage_timeout_sec", 120), 120, label="stage_timeout_sec"))
-    c.episode_summary_min_messages = max(2, _safe_int(raw_config.get("episode_summary_min_messages", 5), 5, label="episode_summary_min_messages"))
-    c.episode_summary_max_input_tokens = max(500, _safe_int(raw_config.get("episode_summary_max_input_tokens", 3000), 3000, label="episode_summary_max_input_tokens"))
-    c.episode_session_gap_minutes = max(5, _safe_int(raw_config.get("episode_session_gap_minutes", 60), 60, label="episode_session_gap_minutes"))
+    cp = raw_config.get("consolidation_pipeline", {})
+    if not isinstance(cp, dict):
+        cp = {}
+    cp_merged = dict(cp)
+    for key in ("enable_consolidation_pipeline", "enable_episodic_summarization",
+                "enable_episode_semantic_distill", "distill_max_users_per_cycle",
+                "stage_timeout_sec", "episode_summary_min_messages",
+                "episode_summary_max_input_tokens", "episode_session_gap_minutes"):
+        if key not in cp_merged and key in raw_config:
+            cp_merged[key] = raw_config.get(key)
+
+    c.enable_consolidation_pipeline = _safe_bool(cp_merged.get("enable_consolidation_pipeline", False), False, label="enable_consolidation_pipeline")
+    c.enable_episodic_summarization = _safe_bool(cp_merged.get("enable_episodic_summarization", True), True, label="enable_episodic_summarization")
+    c.enable_episode_semantic_distill = _safe_bool(cp_merged.get("enable_episode_semantic_distill", True), True, label="enable_episode_semantic_distill")
+    c.distill_max_users_per_cycle = max(1, _safe_int(cp_merged.get("distill_max_users_per_cycle", 10), 10, label="distill_max_users_per_cycle"))
+    c.stage_timeout_sec = max(30, _safe_int(cp_merged.get("stage_timeout_sec", 120), 120, label="stage_timeout_sec"))
+    c.episode_summary_min_messages = max(2, _safe_int(cp_merged.get("episode_summary_min_messages", 5), 5, label="episode_summary_min_messages"))
+    c.episode_summary_max_input_tokens = max(500, _safe_int(cp_merged.get("episode_summary_max_input_tokens", 3000), 3000, label="episode_summary_max_input_tokens"))
+    c.episode_session_gap_minutes = max(5, _safe_int(cp_merged.get("episode_session_gap_minutes", 60), 60, label="episode_session_gap_minutes"))
 
     consolidation_cfg = raw_config.get("consolidation_model_settings", {})
     c.use_independent_consolidation_model = _safe_bool(consolidation_cfg.get("use_independent_consolidation_model", False), False, label="use_independent_consolidation_model")
