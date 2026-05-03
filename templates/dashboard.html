@@ -300,23 +300,6 @@
   </div>
 </div>
 
-<!-- Profile Create Modal -->
-<div class="modal-backdrop" id="profileModal">
-  <div class="modal" style="width:480px">
-    <div class="modal-header"><h3>新建人格档案</h3><button class="btn btn-icon btn-sm" onclick="closeModal('profileModal')">✕</button></div>
-    <div class="modal-body">
-      <p style="font-size:12px;color:var(--text2);margin-bottom:14px">人格档案包含一段 prompt_supplement，绑定到具体会话后会被追加到 system_prompt 尾部。</p>
-      <div class="form-group"><label>档案名称</label><input id="profileName" type="text" placeholder="例如: 简洁风、客服风"></div>
-      <div class="form-group"><label>人格补充提示词 (prompt_supplement)</label><textarea id="profilePrompt" rows="4" placeholder="描述 Bot 应采用的人格风格，例如: 你是一个简洁高效的助手，回复不超过三句话。"></textarea></div>
-      <div class="form-group"><label>描述 (可选)</label><input id="profileDesc" type="text" placeholder="简短说明此档案的用途"></div>
-    </div>
-    <div class="modal-footer">
-      <button class="btn" onclick="closeModal('profileModal')">取消</button>
-      <button class="btn btn-primary" onclick="createProfile()">确认创建</button>
-    </div>
-  </div>
-</div>
-
 <!-- Merge Modal -->
 <div class="modal-backdrop" id="mergeModal">
   <div class="modal" style="width:420px">

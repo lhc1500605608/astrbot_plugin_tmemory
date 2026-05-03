@@ -1,6 +1,6 @@
 name: astrbot_plugin_tmemory
 display_name: MemoryForge
 desc: AstrBot 记忆插件，支持自动采集、LLM 蒸馏、向量检索、冲突检测与跨适配器用户记忆合并。
-version: v0.8.0
+version: v0.8.2
 author: Tango
 repo: https://github.com/lhc1500605608/astrbot_plugin_tmemory

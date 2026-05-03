@@ -158,6 +158,7 @@ class TMemoryWebServer:
         )
         app.router.add_static("/static", static_dir, name="static")
         app.router.add_get("/", self._handle_page)
+        app.router.add_get("/favicon.ico", self._handle_favicon)
         app.router.add_post("/api/login", self._handle_login)
         app.router.add_get("/api/users", self._handle_get_users)
         app.router.add_get("/api/stats", self._handle_get_stats)
@@ -198,12 +199,24 @@ class TMemoryWebServer:
 
         path = request.path
 
-        # 登录接口、首页和静态资源不需要 token
-        if path in ("/", "/api/login") or path.startswith("/static/"):
+        # 登录接口、首页和浏览器自动资源请求不需要 token
+        if path in ("/", "/favicon.ico", "/api/login") or path.startswith("/static/"):
             try:
                 return await handler(request)
+            except web.HTTPException as exc:
+                if exc.status == 404:
+                    _astrbot_logger.warning(
+                        "[tmemory-web] route not found: %s %s",
+                        request.method,
+                        request.path,
+                    )
+                raise
             except Exception as exc:
-                _astrbot_logger.exception("[tmemory-web] handler error: %s %s", request.method, request.path)
+                _astrbot_logger.exception(
+                    "[tmemory-web] handler error: %s %s",
+                    request.method,
+                    request.path,
+                )
                 return web.json_response(
                     {"error": f"内部错误: {type(exc).__name__}: {exc}"},
                     status=500,
@@ -227,8 +240,20 @@ class TMemoryWebServer:
         request["user"] = payload.get("user", "")
         try:
             return await handler(request)
+        except web.HTTPException as exc:
+            if exc.status == 404:
+                _astrbot_logger.warning(
+                    "[tmemory-web] route not found after auth: %s %s",
+                    request.method,
+                    request.path,
+                )
+            raise
         except Exception as exc:
-            _astrbot_logger.exception("[tmemory-web] handler error: %s %s", request.method, request.path)
+            _astrbot_logger.exception(
+                "[tmemory-web] handler error: %s %s",
+                request.method,
+                request.path,
+            )
             return web.json_response(
                 {"error": f"内部错误: {type(exc).__name__}: {exc}"},
                 status=500,
@@ -260,6 +285,18 @@ class TMemoryWebServer:
                 )
         except FileNotFoundError:
             return web.Response(text="dashboard.html not found", status=500)
+
+    async def _handle_favicon(self, request: web.Request):
+        icon_path = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)),
+            "templates",
+            "static",
+            "icons",
+            "favicon.ico",
+        )
+        if os.path.exists(icon_path):
+            return web.FileResponse(icon_path)
+        return web.Response(status=204)
 
     async def _handle_login(self, request: web.Request):
         try:
@@ -486,32 +523,30 @@ class TMemoryWebServer:
         self._get_admin()  # ensure auth
         keys = request.query.get("keys", "").split(",")
         keys = [k.strip() for k in keys if k.strip()]
-        
-        ctx = self.plugin.context
-        if not ctx:
-            return web.json_response({"error": "Plugin not initialized"}, status=500)
 
-        current_config = ctx.get_config()
+        from dataclasses import asdict
+
+        config_dict = asdict(self.plugin._cfg)
+        # capture_skip_regex is a compiled re.Pattern, not JSON-serializable
+        config_dict.pop("capture_skip_regex", None)
+
         if not keys:
-            return web.json_response(current_config)
+            return web.json_response(config_dict)
 
-        return web.json_response({k: current_config.get(k) for k in keys if k in current_config})
+        return web.json_response({k: config_dict[k] for k in keys if k in config_dict})
 
     async def _handle_update_config(self, request: web.Request):
         self._get_admin()  # ensure auth
         try:
             data = await request.json()
-            ctx = self.plugin.context
-            if not ctx:
-                return web.json_response({"error": "Plugin not initialized"}, status=500)
 
-            current_config = ctx.get_config()
+            current_config = self.plugin.config
 
-            # update only provided keys
             for k, v in data.items():
                 current_config[k] = v
 
-            current_config.save_config()
+            if hasattr(current_config, "save_config"):
+                current_config.save_config()
             from .core.config import parse_config
             self.plugin._cfg = parse_config(current_config)
 
