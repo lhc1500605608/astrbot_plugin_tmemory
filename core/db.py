@@ -152,6 +152,77 @@ CREATE TABLE IF NOT EXISTS conversation_cache (
 )
 """
 
+# ── Profile Tables (ADR user-profile-model) ────────────────────────────────────
+
+_DDL_USER_PROFILES = """
+CREATE TABLE IF NOT EXISTS user_profiles (
+    canonical_user_id TEXT NOT NULL PRIMARY KEY,
+    display_name TEXT NOT NULL DEFAULT '',
+    profile_version INTEGER NOT NULL DEFAULT 1,
+    summary_text TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+)
+"""
+
+_DDL_PROFILE_ITEMS = """
+CREATE TABLE IF NOT EXISTS profile_items (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    canonical_user_id TEXT NOT NULL,
+    facet_type TEXT NOT NULL CHECK (facet_type IN ('preference', 'fact', 'style', 'restriction', 'task_pattern')),
+    title TEXT NOT NULL DEFAULT '',
+    content TEXT NOT NULL,
+    normalized_content TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'superseded', 'contradicted', 'archived')),
+    confidence REAL NOT NULL DEFAULT 0.5,
+    importance REAL NOT NULL DEFAULT 0.5,
+    stability REAL NOT NULL DEFAULT 0.5,
+    usage_count INTEGER NOT NULL DEFAULT 0,
+    last_used_at TEXT NOT NULL DEFAULT '',
+    last_confirmed_at TEXT NOT NULL DEFAULT '',
+    source_scope TEXT NOT NULL DEFAULT 'user',
+    persona_id TEXT NOT NULL DEFAULT '',
+    embedding_status TEXT NOT NULL DEFAULT 'pending' CHECK (embedding_status IN ('pending', 'ready', 'disabled', 'failed')),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE (canonical_user_id, facet_type, normalized_content, persona_id, source_scope)
+)
+"""
+
+_DDL_PROFILE_ITEM_EVIDENCE = """
+CREATE TABLE IF NOT EXISTS profile_item_evidence (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    profile_item_id INTEGER NOT NULL,
+    conversation_cache_id INTEGER NOT NULL DEFAULT 0,
+    canonical_user_id TEXT NOT NULL,
+    source_excerpt TEXT NOT NULL DEFAULT '',
+    source_role TEXT NOT NULL DEFAULT 'user' CHECK (source_role IN ('user', 'assistant', 'system', 'manual', 'import')),
+    source_timestamp TEXT NOT NULL DEFAULT '',
+    evidence_kind TEXT NOT NULL DEFAULT 'conversation' CHECK (evidence_kind IN ('conversation', 'manual', 'import', 'merge')),
+    confidence_delta REAL NOT NULL DEFAULT 0.0,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (profile_item_id) REFERENCES profile_items(id)
+)
+"""
+
+_DDL_PROFILE_RELATIONS = """
+CREATE TABLE IF NOT EXISTS profile_relations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    canonical_user_id TEXT NOT NULL,
+    from_item_id INTEGER NOT NULL,
+    to_item_id INTEGER NOT NULL,
+    relation_type TEXT NOT NULL CHECK (relation_type IN ('supports', 'contradicts', 'depends_on', 'context_for', 'supersedes')),
+    status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'archived')),
+    weight REAL NOT NULL DEFAULT 0.5,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE (canonical_user_id, from_item_id, to_item_id, relation_type),
+    FOREIGN KEY (from_item_id) REFERENCES profile_items(id),
+    FOREIGN KEY (to_item_id) REFERENCES profile_items(id),
+    CHECK (from_item_id != to_item_id)
+)
+"""
+
 _DDL_FTS5 = """
 CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
     memory,
@@ -417,6 +488,12 @@ class DatabaseManager:
             conn.execute(_DDL_MEMORY_EPISODES)
             conn.execute(_DDL_EPISODE_SOURCES)
 
+            # ── Profile tables ──
+            conn.execute(_DDL_USER_PROFILES)
+            conn.execute(_DDL_PROFILE_ITEMS)
+            conn.execute(_DDL_PROFILE_ITEM_EVIDENCE)
+            conn.execute(_DDL_PROFILE_RELATIONS)
+
             conn.execute("CREATE INDEX IF NOT EXISTS idx_identity_bindings_canonical ON identity_bindings (canonical_user_id)")
 
             self.migrate_schema(conn)
@@ -435,6 +512,36 @@ class DatabaseManager:
                 conn.execute(_DDL_TRIGGER_EP_AI)
                 conn.execute(_DDL_TRIGGER_EP_AD)
                 conn.execute(_DDL_TRIGGER_EP_AU)
+
+                conn.execute("""
+                    CREATE VIRTUAL TABLE IF NOT EXISTS profile_items_fts USING fts5(
+                        content,
+                        facet_type,
+                        content='profile_items',
+                        content_rowid='id',
+                        tokenize='jieba'
+                    )
+                """)
+                conn.execute("""
+                    CREATE TRIGGER IF NOT EXISTS t_profile_items_ai AFTER INSERT ON profile_items BEGIN
+                      INSERT INTO profile_items_fts(rowid, content, facet_type)
+                      VALUES (new.id, new.content, new.facet_type);
+                    END;
+                """)
+                conn.execute("""
+                    CREATE TRIGGER IF NOT EXISTS t_profile_items_ad AFTER DELETE ON profile_items BEGIN
+                      INSERT INTO profile_items_fts(profile_items_fts, rowid, content, facet_type)
+                      VALUES ('delete', old.id, old.content, old.facet_type);
+                    END;
+                """)
+                conn.execute("""
+                    CREATE TRIGGER IF NOT EXISTS t_profile_items_au AFTER UPDATE ON profile_items BEGIN
+                      INSERT INTO profile_items_fts(profile_items_fts, rowid, content, facet_type)
+                      VALUES ('delete', old.id, old.content, old.facet_type);
+                      INSERT INTO profile_items_fts(rowid, content, facet_type)
+                      VALUES (new.id, new.content, new.facet_type);
+                    END;
+                """)
 
                 # Data migration for empty tokenized_memory
                 untokenized = conn.execute("SELECT id, memory FROM memories WHERE tokenized_memory = ''").fetchall()
@@ -467,8 +574,12 @@ class DatabaseManager:
                         f"CREATE VIRTUAL TABLE IF NOT EXISTS memory_vectors "
                         f"USING vec0(memory_id INTEGER PRIMARY KEY, embedding float[{embed_dim}])"
                     )
+                    conn.execute(
+                        f"CREATE VIRTUAL TABLE IF NOT EXISTS profile_item_vectors "
+                        f"USING vec0(profile_item_id INTEGER PRIMARY KEY, embedding float[{embed_dim}])"
+                    )
                 except Exception as _ve:
-                    logger.warning("[tmemory] failed to create memory_vectors: %s", _ve)
+                    logger.warning("[tmemory] failed to create vector tables: %s", _ve)
 
             # --- Existing indexes ---
             conn.execute("CREATE INDEX IF NOT EXISTS idx_conversations_user ON conversations (canonical_user_id, timestamp)")
@@ -496,3 +607,14 @@ class DatabaseManager:
             # --- Memories new indexes ---
             conn.execute("CREATE INDEX IF NOT EXISTS idx_memories_episode ON memories (episode_id)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_memories_semantic_status ON memories (semantic_status)")
+
+            # --- Profile table indexes ---
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_profile_items_user_status ON profile_items (canonical_user_id, status, updated_at)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_profile_items_retrieval ON profile_items (canonical_user_id, facet_type, status, importance, updated_at)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_profile_items_scope_persona ON profile_items (canonical_user_id, source_scope, persona_id, status)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_profile_items_embedding ON profile_items (embedding_status, updated_at)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_profile_evidence_item ON profile_item_evidence (profile_item_id, created_at)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_profile_evidence_conversation ON profile_item_evidence (conversation_cache_id)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_profile_evidence_user ON profile_item_evidence (canonical_user_id, created_at)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_profile_relations_from ON profile_relations (canonical_user_id, from_item_id, status)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_profile_relations_to ON profile_relations (canonical_user_id, to_item_id, status)")

@@ -184,7 +184,21 @@ class DistillRuntimeMixin:
         await asyncio.sleep(8)
         while self._worker_running:
             if not self._cfg.distill_pause and self._cfg.memory_mode != "active_only":
-                # ── 巩固管线 (Stage B + C) ──
+                # ── 画像提取 (替代旧 Stage B + C) ──
+                if self._cfg.profile_extraction_enabled:
+                    try:
+                        items = await self._run_profile_extraction_cycle(
+                            force=False, trigger="auto"
+                        )
+                        if items > 0:
+                            logger.info(
+                                "[tmemory] profile extraction cycle done: items=%s",
+                                items,
+                            )
+                    except Exception as e:
+                        logger.warning("[tmemory] profile extraction worker error: %s", e)
+
+                # ── 巩固管线 (Stage B + C) [已废弃，保留兼容] ──
                 if self._cfg.enable_consolidation_pipeline:
                     try:
                         episodes, extracted = await self._run_consolidation_cycle(

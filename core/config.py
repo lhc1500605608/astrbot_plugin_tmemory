@@ -60,7 +60,16 @@ class PluginConfig:
     # Active Tool Mode
     memory_mode: str = "hybrid"  # distill_only | active_only | hybrid
 
-    # ── Consolidation Pipeline ──
+    # ── Profile Storage ──
+    profile_extraction_enabled: bool = False
+    profile_extraction_min_messages: int = 8
+    profile_extraction_max_users_per_cycle: int = 10
+    profile_extraction_timeout_sec: int = 120
+    profile_stability_default: float = 0.5
+    profile_auto_archive_threshold: float = 0.0
+    profile_max_items_per_user: int = 200
+
+    # ── Consolidation Pipeline (deprecated: replaced by profile extraction) ──
     enable_consolidation_pipeline: bool = False
     enable_episodic_summarization: bool = True
     enable_episode_semantic_distill: bool = True
@@ -81,6 +90,8 @@ class PluginConfig:
     inject_slot_marker: str = "{{tmemory}}"
     inject_memory_limit: int = 5
     inject_max_chars: int = 0
+
+    # ── Deprecated injection configs (no longer drive main logic; kept for backward compat) ──
     enable_layered_injection: bool = False
     inject_working_turns: int = 5
     inject_episode_limit: int = 3
@@ -192,7 +203,19 @@ def parse_config(raw_config: dict) -> PluginConfig:
     if c.memory_mode not in {"distill_only", "active_only", "hybrid"}:
         c.memory_mode = "hybrid"
 
-    # ── Consolidation Pipeline ──
+    # ── Profile Storage ──
+    ps = raw_config.get("profile_storage", {})
+    if not isinstance(ps, dict):
+        ps = {}
+    c.profile_extraction_enabled = _safe_bool(ps.get("profile_extraction_enabled", False), False, label="profile_extraction_enabled")
+    c.profile_extraction_min_messages = max(2, _safe_int(ps.get("profile_extraction_min_messages", 8), 8, label="profile_extraction_min_messages"))
+    c.profile_extraction_max_users_per_cycle = max(1, _safe_int(ps.get("profile_extraction_max_users_per_cycle", 10), 10, label="profile_extraction_max_users_per_cycle"))
+    c.profile_extraction_timeout_sec = max(30, _safe_int(ps.get("profile_extraction_timeout_sec", 120), 120, label="profile_extraction_timeout_sec"))
+    c.profile_stability_default = max(0.0, min(1.0, _safe_float(ps.get("profile_stability_default", 0.5), 0.5, label="profile_stability_default")))
+    c.profile_auto_archive_threshold = max(0.0, min(1.0, _safe_float(ps.get("profile_auto_archive_threshold", 0.0), 0.0, label="profile_auto_archive_threshold")))
+    c.profile_max_items_per_user = max(10, _safe_int(ps.get("profile_max_items_per_user", 200), 200, label="profile_max_items_per_user"))
+
+    # ── Consolidation Pipeline (deprecated) ──
     cp = raw_config.get("consolidation_pipeline", {})
     if not isinstance(cp, dict):
         cp = {}
@@ -301,6 +324,13 @@ def apply_safe_defaults(plugin) -> None:
     c.enable_consolidation_pipeline = False
     c.enable_episodic_summarization = True
     c.enable_episode_semantic_distill = True
+    c.profile_extraction_enabled = False
+    c.profile_extraction_min_messages = 8
+    c.profile_extraction_max_users_per_cycle = 10
+    c.profile_extraction_timeout_sec = 120
+    c.profile_stability_default = 0.5
+    c.profile_auto_archive_threshold = 0.0
+    c.profile_max_items_per_user = 200
     c.distill_max_users_per_cycle = 10
     c.stage_timeout_sec = 120
     c.use_independent_consolidation_model = False

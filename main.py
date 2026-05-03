@@ -9,7 +9,7 @@ from .core.db import DatabaseManager
 from .core.config import PluginConfig, PluginLifecycleMixin, parse_config
 from .core.capture import CaptureFilter
 from .core.distill import DistillManager, DistillRuntimeMixin
-from .core.consolidation import ConsolidationRuntimeMixin
+from .core.consolidation import ConsolidationRuntimeMixin, ProfileExtractionRuntimeMixin
 from .core.utils import MemoryLogger, PluginHelpersMixin, PluginHandlersMixin
 from .core.identity import IdentityManager
 
@@ -31,7 +31,7 @@ _CMD_FIRST_WORDS = frozenset({
     "AstrBot 用户长期记忆插件(自动采集 + 定时LLM蒸馏 + 跨适配器合并)",
     "0.8.2",
 )
-class TMemoryPlugin(PluginLifecycleMixin, DistillRuntimeMixin, ConsolidationRuntimeMixin, PluginHelpersMixin, PluginHandlersMixin, Star):
+class TMemoryPlugin(PluginLifecycleMixin, DistillRuntimeMixin, ConsolidationRuntimeMixin, ProfileExtractionRuntimeMixin, PluginHelpersMixin, PluginHandlersMixin, Star):
     def __init__(self, context: Context, config=None):
         super().__init__(context)
         self.config = config or {}

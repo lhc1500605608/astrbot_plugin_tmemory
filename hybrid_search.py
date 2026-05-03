@@ -45,8 +45,9 @@ class SQLiteVecKNNRetriever:
 
 class FTSMemoryDB:
     """基于 SQLite FTS5 的全文检索"""
-    def __init__(self, conn: sqlite3.Connection):
+    def __init__(self, conn: sqlite3.Connection, table_name: str = "memories_fts"):
         self.conn = conn
+        self.table_name = table_name
 
     def _tokenize(self, text: str) -> str:
         if not text:
@@ -54,16 +55,18 @@ class FTSMemoryDB:
         tokens = jieba.cut_for_search(text)
         return " ".join(tokens)
 
-    def search_fts(self, query: str, canonical_user_id: str, limit: int = 10) -> List[Dict[str, Any]]:
+    def search_fts(self, query: str, canonical_user_id: str, limit: int = 10,
+                   fts_table: Optional[str] = None) -> List[Dict[str, Any]]:
+        table = fts_table or self.table_name
         query_tokens = [token.strip() for token in jieba.cut_for_search(query) if token.strip()]
         fts_query = " AND ".join(query_tokens)
         if not fts_query:
             return []
 
-        sql = """
+        sql = f"""
             SELECT rowid, rank
-            FROM memories_fts
-            WHERE memories_fts MATCH ? AND canonical_user_id = ?
+            FROM {table}
+            WHERE {table} MATCH ? AND canonical_user_id = ?
             ORDER BY rank LIMIT ?
         """
         params = [fts_query, canonical_user_id, limit]
@@ -71,7 +74,7 @@ class FTSMemoryDB:
         try:
             cursor = self.conn.cursor()
             cursor.execute(sql, params)
-            
+
             results = []
             for row in cursor.fetchall():
                 results.append({
@@ -115,34 +118,48 @@ class RRFSearchFusion:
 
 
 class HybridMemorySystem:
-    """混合检索内存系统集成"""
-    def __init__(self, conn: sqlite3.Connection, vector_dim: int):
+    """混合检索系统集成 — 支持 memories 和 profile_items 两种表。
+
+    table_prefix 决定使用的表名:
+      - 默认 "memory" → memory_vectors, memories_fts
+      - "profile_item" → profile_item_vectors, profile_items_fts
+    """
+
+    def __init__(self, conn: sqlite3.Connection, vector_dim: int, table_prefix: str = "memory"):
         self.conn = conn
         self.vector_dim = vector_dim
-        
-        self.knn_retriever = SQLiteVecKNNRetriever(self.conn, vector_dim, table_name="memory_vectors")
-        self.fts_db = FTSMemoryDB(self.conn)
+        self._prefix = table_prefix
+
+        if table_prefix == "profile_item":
+            vec_table = "profile_item_vectors"
+            fts_table = "profile_items_fts"
+        else:
+            vec_table = "memory_vectors"
+            fts_table = "memories_fts"
+
+        self.knn_retriever = SQLiteVecKNNRetriever(self.conn, vector_dim, table_name=vec_table)
+        self.fts_db = FTSMemoryDB(self.conn, table_name=fts_table)
         self.rrf_fusion = RRFSearchFusion(k=60)
 
     def hybrid_search(self, query: str, query_vector: Optional[List[float]], canonical_user_id: str, top_k: int = 80, recall_ratio: int = 1) -> List[Dict]:
         """融合检索：先分别召回，再RRF重排。"""
         recall_k = top_k * recall_ratio
-        
+
         vec_results = []
         if query_vector:
             vec_results = self.knn_retriever.search_knn(query_vector, top_k=recall_k)
-            
+
         fts_results = []
         if query:
             fts_results = self.fts_db.search_fts(query, canonical_user_id=canonical_user_id, limit=recall_k)
-            
+
         fused = self.rrf_fusion.fuse(vec_results, fts_results, top_k=top_k)
-        
+
         # 归一化 RRF 分数到 0~1 方便后续加权
         if fused:
             max_rrf = max(item["rrf_score"] for item in fused)
             if max_rrf > 0:
                 for item in fused:
                     item["rrf_score"] /= max_rrf
-                    
+
         return fused

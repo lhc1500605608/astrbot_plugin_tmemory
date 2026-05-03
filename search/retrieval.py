@@ -300,6 +300,147 @@ class RetrievalManager:
 
         return result[:limit]
 
+    # Per-facet quota weights: higher weight = more slots allocated
+    _FACET_QUOTA_WEIGHT = {
+        "restriction": 2.0,
+        "preference": 1.5,
+        "fact": 1.0,
+        "style": 0.5,
+        "task_pattern": 0.5,
+    }
+
+    def retrieve_profile_items(
+        self,
+        canonical_id: str,
+        query: str,
+        limit: int,
+        query_vec: Optional[List[float]] = None,
+        scope: str = "user",
+        persona_id: str = "",
+        exclude_private: bool = False,
+    ) -> List[Dict[str, object]]:
+        """Retrieve active profile items for injection with hybrid search + per-facet quota.
+
+        When query is non-empty, uses FTS (+ optional vector + RRF fusion) against
+        profile_items_fts / profile_item_vectors.  Otherwise falls back to a
+        facet-priority sort.
+
+        Per-facet quota ensures diverse coverage: restriction and preference get
+        proportionally more slots than style and task_pattern.
+        """
+        now_ts = int(time.time())
+        scope_cond = "AND (pi.source_scope=? OR pi.source_scope='user')"
+        persona_cond = "AND (pi.persona_id=? OR pi.persona_id='')"
+        private_cond = "AND pi.source_scope != 'private'" if exclude_private else ""
+
+        def _sync_retrieve():
+            with self._db_mgr.db() as conn:
+                hybrid_system = HybridMemorySystem(
+                    conn, self._cfg.embed_dim, table_prefix="profile_item"
+                )
+                fused_results = hybrid_system.hybrid_search(
+                    query=query,
+                    query_vector=query_vec,
+                    canonical_user_id=canonical_id,
+                    top_k=80,
+                ) if query else []
+
+                if not query or not fused_results:
+                    rows = conn.execute(
+                        f"""
+                        SELECT pi.id, pi.facet_type, pi.content, pi.confidence, pi.importance,
+                               pi.stability, pi.usage_count, pi.last_confirmed_at, pi.updated_at
+                        FROM profile_items pi
+                        WHERE pi.canonical_user_id = ? AND pi.status = 'active'
+                          {scope_cond} {persona_cond} {private_cond}
+                        ORDER BY
+                          CASE pi.facet_type
+                            WHEN 'restriction' THEN 0
+                            WHEN 'preference' THEN 1
+                            WHEN 'fact' THEN 2
+                            WHEN 'style' THEN 3
+                            WHEN 'task_pattern' THEN 4
+                            ELSE 5
+                          END,
+                          pi.importance DESC,
+                          pi.confidence DESC,
+                          pi.last_confirmed_at DESC
+                        LIMIT ?
+                        """,
+                        (canonical_id, scope, persona_id, limit * 3),
+                    ).fetchall()
+                    return [dict(r) | {"_retrieval_score": float(r["importance"])} for r in rows], {}
+
+                rrf_scores = {item["id"]: item["rrf_score"] for item in fused_results}
+                hit_ids = [str(r["id"]) for r in fused_results]
+                placeholders = ",".join("?" * len(hit_ids))
+
+                rows = conn.execute(
+                    f"""
+                    SELECT pi.id, pi.facet_type, pi.content, pi.confidence, pi.importance,
+                           pi.stability, pi.usage_count, pi.last_confirmed_at, pi.updated_at
+                    FROM profile_items pi
+                    WHERE pi.id IN ({placeholders}) AND pi.status = 'active'
+                      {scope_cond} {persona_cond} {private_cond}
+                    """,
+                    [*hit_ids, scope, persona_id],
+                ).fetchall()
+                candidates = {int(r["id"]): dict(r) for r in rows}
+                return candidates, rrf_scores
+
+        fallback_rows, rrf_scores_or_candidates = _sync_retrieve()
+
+        if isinstance(fallback_rows, list):
+            rows = fallback_rows
+            scored = []
+            for row in rows:
+                scored.append({
+                    "id": int(row["id"]),
+                    "facet_type": str(row["facet_type"]),
+                    "content": str(row["content"]),
+                    "confidence": float(row["confidence"]),
+                    "importance": float(row["importance"]),
+                    "stability": float(row["stability"]),
+                    "final_score": float(row.get("_retrieval_score", row["importance"])),
+                })
+        else:
+            candidates = fallback_rows
+            rrf_scores = rrf_scores_or_candidates
+
+            scored = []
+            for row_id, row in candidates.items():
+                search_relevance = rrf_scores.get(row_id, 0.0)
+
+                if query:
+                    final_score = (
+                        0.25 * float(row["confidence"])
+                        + 0.25 * float(row["importance"])
+                        + 0.10 * float(row["stability"])
+                        + 0.40 * search_relevance
+                    )
+                else:
+                    final_score = (
+                        0.35 * float(row["confidence"])
+                        + 0.35 * float(row["importance"])
+                        + 0.30 * float(row["stability"])
+                    )
+
+                scored.append({
+                    "id": row_id,
+                    "facet_type": str(row["facet_type"]),
+                    "content": str(row["content"]),
+                    "confidence": float(row["confidence"]),
+                    "importance": float(row["importance"]),
+                    "stability": float(row["stability"]),
+                    "final_score": float(final_score),
+                })
+
+        scored.sort(key=lambda x: float(x.get("final_score", 0.0)), reverse=True)
+
+        # Per-facet quota distribution
+        quota = _compute_facet_quota(limit, self._FACET_QUOTA_WEIGHT)
+        return _profile_dedup_with_quota(scored, limit, quota)
+
     def tokenize(self, text: str) -> List[str]:
         # Import dynamically if not using distill manager
         import re
@@ -336,3 +477,86 @@ class RetrievalManager:
                 accepted.append(item)
                 accepted_words.append(mem_words)
         return accepted
+
+
+def _compute_facet_quota(
+    total: int, weights: Dict[str, float]
+) -> Dict[str, int]:
+    """Distribute *total* slots across facets proportionally to *weights*.
+
+    Each facet gets at least 1 slot if its weight > 0 and total >= facet_count.
+    Remaining slots are distributed by weight proportion.
+    """
+    active = {k: v for k, v in weights.items() if v > 0}
+    if not active:
+        return {}
+    total_weight = sum(active.values())
+    quota: Dict[str, int] = {}
+    allocated = 0
+    # First pass: floor allocation
+    for facet, w in active.items():
+        q = max(1, int(total * w / total_weight))
+        quota[facet] = q
+        allocated += q
+    # Second pass: distribute remainder to highest-weight facets
+    remaining = total - allocated
+    if remaining > 0:
+        sorted_facets = sorted(active, key=lambda f: active[f], reverse=True)
+        for i in range(remaining):
+            quota[sorted_facets[i % len(sorted_facets)]] += 1
+    return quota
+
+
+def _profile_dedup_with_quota(
+    items: List[Dict[str, object]],
+    total_limit: int,
+    quota: Dict[str, int],
+) -> List[Dict[str, object]]:
+    """Dedup profile items respecting per-facet quotas.
+
+    Within each facet, skip items with near-identical content prefix.
+    Unused quota in one facet does NOT spill to other facets.
+    """
+    if not items:
+        return []
+    accepted: List[Dict[str, object]] = []
+    facet_counts: Dict[str, int] = {}
+    seen_prefixes: set = set()
+
+    for item in items:
+        if len(accepted) >= total_limit:
+            break
+        facet = str(item.get("facet_type", "fact"))
+        facet_limit = quota.get(facet, 0)
+        if facet_limit <= 0:
+            continue
+        current = facet_counts.get(facet, 0)
+        if current >= facet_limit:
+            continue
+        prefix = str(item.get("content", ""))[:20].lower().strip()
+        if not prefix or prefix in seen_prefixes:
+            continue
+        seen_prefixes.add(prefix)
+        accepted.append(item)
+        facet_counts[facet] = current + 1
+
+    return accepted
+
+
+def _profile_dedup(
+    items: List[Dict[str, object]], limit: int
+) -> List[Dict[str, object]]:
+    """Lightweight dedup for profile items: skip items with near-identical content prefix."""
+    if not items:
+        return []
+    accepted = []
+    seen_prefixes: set = set()
+    for item in items:
+        if len(accepted) >= limit:
+            break
+        prefix = str(item.get("content", ""))[:20].lower().strip()
+        if not prefix or prefix in seen_prefixes:
+            continue
+        seen_prefixes.add(prefix)
+        accepted.append(item)
+    return accepted

@@ -194,8 +194,8 @@ async def test_merge_identity_moves_cache_rebinds_accounts_and_merges_duplicate_
     assert memories[0]["reinforce_count"] == 2
     assert memories[0]["importance"] == 0.6
     assert memories[0]["confidence"] == 0.7
-    assert event["event_type"] == "merge"
-    assert '"moved_count": 0' in event["payload_json"]
+    assert event["event_type"] == "profile_identity_merged"
+    assert '"legacy_memories": 0' in event["payload_json"]
 
 
 @pytest.mark.asyncio
@@ -1007,8 +1007,8 @@ class _DummyProviderRequest:
 
 
 @pytest.mark.asyncio
-async def test_cfg003_layered_injection_gate_enabled(plugin_module, tmp_path, monkeypatch):
-    """CFG-003: When enable_layered_injection=True, the layered injection path is used."""
+async def test_cfg003_injection_uses_profile_path(plugin_module, tmp_path, monkeypatch):
+    """CFG-003: Injection always uses build_profile_injection regardless of enable_layered_injection."""
     monkeypatch.chdir(tmp_path)
     instance = plugin_module.TMemoryPlugin(context=None, config={
         "enable_layered_injection": True,
@@ -1017,30 +1017,29 @@ async def test_cfg003_layered_injection_gate_enabled(plugin_module, tmp_path, mo
     instance._init_db()
     instance._migrate_schema()
     instance._cfg.inject_working_turns = 3
-    instance._cfg.inject_episode_limit = 2
 
-    layered_called = []
+    called = []
 
-    async def fake_build_layered(canonical_id, query, session_key, **kwargs):
-        layered_called.append((canonical_id, query, session_key))
-        return "[LAYERED_BLOCK]"
+    async def fake_build_profile(canonical_id, query, session_key, **kwargs):
+        called.append((canonical_id, query, session_key))
+        return "[PROFILE_BLOCK]"
 
-    instance._injection_builder.build_layered_injection = fake_build_layered
+    instance._injection_builder.build_profile_injection = fake_build_profile
     instance._identity_mgr.resolve_current_identity = staticmethod(lambda e: ("user-cfg3", "qq", "42"))
 
     event = _DummyEvent()
     req = _DummyProviderRequest(prompt="测试查询", system_prompt="你是AI助手。")
     await instance._handle_on_llm_request(event, req)
 
-    assert len(layered_called) == 1, "CFG-003 FAIL: layered path not called"
-    assert layered_called[0][1] == "测试查询"
-    assert "[LAYERED_BLOCK]" in req.system_prompt
+    assert len(called) == 1, "CFG-003 FAIL: profile injection path not called"
+    assert called[0][1] == "测试查询"
+    assert "[PROFILE_BLOCK]" in req.system_prompt
     instance._close_db()
 
 
 @pytest.mark.asyncio
-async def test_cfg003_layered_injection_gate_disabled_uses_flat(plugin_module, tmp_path, monkeypatch):
-    """CFG-003: When enable_layered_injection=False, the flat injection path is used."""
+async def test_cfg003_injection_unified_regardless_of_layered_flag(plugin_module, tmp_path, monkeypatch):
+    """CFG-003: enable_layered_injection=False still uses unified profile injection path."""
     monkeypatch.chdir(tmp_path)
     instance = plugin_module.TMemoryPlugin(context=None, config={
         "enable_layered_injection": False,
@@ -1049,27 +1048,27 @@ async def test_cfg003_layered_injection_gate_disabled_uses_flat(plugin_module, t
     instance._init_db()
     instance._migrate_schema()
 
-    flat_called = []
+    called = []
 
-    async def fake_flat_injection(canonical_id, query, limit, **kwargs):
-        flat_called.append((canonical_id, query, limit))
-        return "[FLAT_BLOCK]"
+    async def fake_build_profile(canonical_id, query, session_key, **kwargs):
+        called.append((canonical_id, query, session_key))
+        return "[PROFILE_BLOCK]"
 
-    instance._build_knowledge_injection = fake_flat_injection
+    instance._injection_builder.build_profile_injection = fake_build_profile
     instance._identity_mgr.resolve_current_identity = staticmethod(lambda e: ("user-cfg3b", "qq", "42"))
 
     event = _DummyEvent()
     req = _DummyProviderRequest(prompt="测试查询", system_prompt="你是AI助手。")
     await instance._handle_on_llm_request(event, req)
 
-    assert len(flat_called) == 1, "CFG-003 FAIL: flat path not called"
-    assert "[FLAT_BLOCK]" in req.system_prompt
+    assert len(called) == 1, "CFG-003 FAIL: unified profile path not called"
+    assert "[PROFILE_BLOCK]" in req.system_prompt
     instance._close_db()
 
 
 @pytest.mark.asyncio
-async def test_cfg003_layered_injection_gate_disabled_when_memory_injection_off(plugin_module, tmp_path, monkeypatch):
-    """CFG-003: When enable_memory_injection=False, neither path is invoked."""
+async def test_cfg003_injection_skipped_when_disabled(plugin_module, tmp_path, monkeypatch):
+    """CFG-003: When enable_memory_injection=False, injection is skipped."""
     monkeypatch.chdir(tmp_path)
     instance = plugin_module.TMemoryPlugin(context=None, config={
         "enable_layered_injection": True,
@@ -1078,20 +1077,20 @@ async def test_cfg003_layered_injection_gate_disabled_when_memory_injection_off(
     instance._init_db()
     instance._migrate_schema()
 
-    layered_called = []
+    called = []
 
-    async def fake_build_layered(**kwargs):
-        layered_called.append(1)
+    async def fake_build_profile(**kwargs):
+        called.append(1)
         return "BLOCK"
 
-    instance._injection_builder.build_layered_injection = fake_build_layered
+    instance._injection_builder.build_profile_injection = fake_build_profile
     instance._identity_mgr.resolve_current_identity = staticmethod(lambda e: ("user-off", "qq", "42"))
 
     event = _DummyEvent()
     req = _DummyProviderRequest(prompt="测试查询", system_prompt="原始prompt")
     await instance._handle_on_llm_request(event, req)
 
-    assert len(layered_called) == 0, "CFG-003 FAIL: injection should be skipped when disabled"
+    assert len(called) == 0, "CFG-003 FAIL: injection should be skipped when disabled"
     instance._close_db()
 
 
@@ -1131,14 +1130,16 @@ async def test_hot001_on_llm_request_zero_llm_calls(plugin_module, tmp_path, mon
     instance._identity_mgr.resolve_current_identity = staticmethod(lambda e: ("user-hot1", "qq", "42"))
     instance._identity_mgr.bind_identity("qq", "42", "user-hot1")
 
-    # Insert some data so retrieval has something to return
-    instance._insert_memory(
-        canonical_id="user-hot1",
-        adapter="qq", adapter_user="42",
-        memory="用户喜欢咖啡",
-        score=0.8, memory_type="preference",
-        importance=0.7, confidence=0.8,
-    )
+    # Insert a profile item so retrieval has something to return
+    now = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+    with instance._db() as conn:
+        conn.execute(
+            "INSERT INTO profile_items(canonical_user_id, facet_type, content, "
+            "normalized_content, status, confidence, importance, stability, "
+            "created_at, updated_at) VALUES(?, ?, ?, ?, 'active', ?, ?, ?, ?, ?)",
+            ("user-hot1", "preference", "用户喜欢咖啡", "用户喜欢咖啡",
+             0.8, 0.7, 0.5, now, now),
+        )
 
     event = _DummyEvent()
     req = _DummyProviderRequest(prompt="我想喝咖啡", system_prompt="你是AI助手。")
@@ -1416,3 +1417,251 @@ def test_cfg002_schema_defaults_match_parse_config_defaults(plugin_module):
     assert schema["inject_episode_limit"]["default"] == cfg.inject_episode_limit
     assert schema["inject_episode_max_chars"]["default"] == cfg.inject_episode_max_chars
     assert schema["inject_style_max_chars"]["default"] == cfg.inject_style_max_chars
+
+
+# =============================================================================
+# PROF-001: Profile retrieval with per-facet quota and dedup
+# =============================================================================
+
+
+def test_prof001_compute_facet_quota_distributes_slots():
+    """PROF-001: _compute_facet_quota distributes total across facets by weight."""
+    from astrbot_plugin_tmemory.search.retrieval import _compute_facet_quota
+
+    weights = {
+        "restriction": 2.0,
+        "preference": 1.5,
+        "fact": 1.0,
+        "style": 0.5,
+        "task_pattern": 0.5,
+    }
+
+    quota = _compute_facet_quota(5, weights)
+    assert sum(quota.values()) >= 5, f"PROF-001 FAIL: total slots {sum(quota.values())} < 5"
+    # Higher-weight facets should get at least as many slots as lower-weight
+    assert quota.get("restriction", 0) >= quota.get("style", 0)
+    assert quota.get("preference", 0) >= quota.get("task_pattern", 0)
+
+
+def test_prof001_compute_facet_quota_single_facet():
+    """PROF-001: With only one facet having weight, all slots go there."""
+    from astrbot_plugin_tmemory.search.retrieval import _compute_facet_quota
+
+    quota = _compute_facet_quota(3, {"fact": 1.0, "style": 0.0})
+    assert quota.get("fact", 0) == 3
+    assert quota.get("style", 0) == 0
+
+
+def test_prof001_compute_facet_quota_empty_weights():
+    """PROF-001: Empty or zero-weight dict returns empty quota."""
+    from astrbot_plugin_tmemory.search.retrieval import _compute_facet_quota
+    assert _compute_facet_quota(5, {}) == {}
+    assert _compute_facet_quota(5, {"x": 0.0}) == {}
+
+
+def test_prof001_profile_dedup_with_quota_respects_facet_limits():
+    """PROF-001: _profile_dedup_with_quota enforces per-facet limits and dedups prefixes."""
+    from astrbot_plugin_tmemory.search.retrieval import _profile_dedup_with_quota
+
+    items = [
+        {"facet_type": "preference", "content": "喜欢咖啡"},
+        {"facet_type": "preference", "content": "喜欢咖啡加奶"},  # same prefix "喜欢咖啡" → dedup
+        {"facet_type": "fact", "content": "职业是程序员"},
+        {"facet_type": "fact", "content": "住在北京"},
+        {"facet_type": "fact", "content": "喜欢跑步"},
+    ]
+    quota = {"preference": 1, "fact": 2, "style": 1, "restriction": 1, "task_pattern": 1}
+
+    result = _profile_dedup_with_quota(items, 5, quota)
+
+    # preference: only 1 slot, first "喜欢咖啡" takes it, "喜欢咖啡加奶" deduped by prefix
+    prefs = [r for r in result if r["facet_type"] == "preference"]
+    assert len(prefs) == 1
+    # fact: 2 slots, all 3 are unique but quota=2
+    facts = [r for r in result if r["facet_type"] == "fact"]
+    assert len(facts) == 2
+
+
+def test_prof001_profile_dedup_with_quota_skips_empty_prefix():
+    """PROF-001: Items with empty content prefix are skipped."""
+    from astrbot_plugin_tmemory.search.retrieval import _profile_dedup_with_quota
+
+    items = [
+        {"facet_type": "fact", "content": ""},
+        {"facet_type": "fact", "content": "   "},
+        {"facet_type": "fact", "content": "有效内容"},
+    ]
+    quota = {"fact": 5}
+    result = _profile_dedup_with_quota(items, 5, quota)
+    assert len(result) == 1
+    assert result[0]["content"] == "有效内容"
+
+
+# =============================================================================
+# INJ-001: Profile injection output format
+# =============================================================================
+
+
+def test_inj001_assemble_profile_blocks_groups_by_facet():
+    """INJ-001: _assemble_profile_blocks groups items by facet with correct headings."""
+    from astrbot_plugin_tmemory.core.injection import InjectionBuilder
+
+    items = [
+        {"facet_type": "fact", "content": "用户是程序员"},
+        {"facet_type": "preference", "content": "喜欢黑咖啡"},
+        {"facet_type": "restriction", "content": "不吃海鲜"},
+        {"facet_type": "fact", "content": "住在上海"},
+        {"facet_type": "style", "content": "回答简洁"},
+    ]
+
+    block = InjectionBuilder._assemble_profile_blocks(items)
+    assert "[用户画像·限制]" in block
+    assert "[用户画像·偏好]" in block
+    assert "[用户画像·事实]" in block
+    assert "[用户画像·风格指导]" in block
+    # task_pattern should NOT appear since no items of that facet
+    assert "[用户画像·任务模式]" not in block
+    # Content checks
+    assert "不吃海鲜" in block
+    assert "喜欢黑咖啡" in block
+    assert "用户是程序员" in block
+    assert "回答简洁" in block
+
+
+def test_inj001_assemble_profile_blocks_empty_input():
+    """INJ-001: Empty item list returns empty string."""
+    from astrbot_plugin_tmemory.core.injection import InjectionBuilder
+    assert InjectionBuilder._assemble_profile_blocks([]) == ""
+
+
+def test_inj001_assemble_profile_blocks_skips_empty_content():
+    """INJ-001: Items with empty content are skipped."""
+    from astrbot_plugin_tmemory.core.injection import InjectionBuilder
+
+    items = [
+        {"facet_type": "fact", "content": ""},
+        {"facet_type": "fact", "content": "有效"},
+    ]
+    block = InjectionBuilder._assemble_profile_blocks(items)
+    assert "有效" in block
+    # Should not have two fact entries
+    assert block.count("- 有效") == 1
+
+
+def test_inj001_assemble_profile_blocks_facet_ordering():
+    """INJ-001: Facets appear in priority order: restriction > preference > fact > style > task_pattern."""
+    from astrbot_plugin_tmemory.core.injection import InjectionBuilder
+
+    items = [
+        {"facet_type": "task_pattern", "content": "每天写日报"},
+        {"facet_type": "restriction", "content": "素食"},
+        {"facet_type": "fact", "content": "程序员"},
+    ]
+
+    block = InjectionBuilder._assemble_profile_blocks(items)
+    # restriction must appear before fact, which must appear before task_pattern
+    r_pos = block.find("[用户画像·限制]")
+    f_pos = block.find("[用户画像·事实]")
+    t_pos = block.find("[用户画像·任务模式]")
+    assert r_pos < f_pos < t_pos, (
+        f"INJ-001 FAIL: facet order wrong: restriction={r_pos}, fact={f_pos}, task_pattern={t_pos}"
+    )
+
+
+# =============================================================================
+# INJ-002: build_profile_injection integration
+# =============================================================================
+
+
+@pytest.mark.asyncio
+async def test_inj002_build_profile_injection_with_profile_items(plugin_module, tmp_path, monkeypatch):
+    """INJ-002: build_profile_injection returns profile blocks + working context when data exists."""
+    monkeypatch.chdir(tmp_path)
+    instance = plugin_module.TMemoryPlugin(context=None, config={
+        "enable_memory_injection": True,
+    })
+    instance._init_db()
+    instance._migrate_schema()
+
+    now = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+    # Insert profile items
+    with instance._db() as conn:
+        conn.execute(
+            "INSERT INTO profile_items(canonical_user_id, facet_type, content, "
+            "normalized_content, status, confidence, importance, stability, "
+            "created_at, updated_at) VALUES(?, ?, ?, ?, 'active', ?, ?, ?, ?, ?)",
+            ("user-inj2", "preference", "喜欢黑咖啡", "喜欢黑咖啡", 0.9, 0.8, 0.7, now, now),
+        )
+        conn.execute(
+            "INSERT INTO profile_items(canonical_user_id, facet_type, content, "
+            "normalized_content, status, confidence, importance, stability, "
+            "created_at, updated_at) VALUES(?, ?, ?, ?, 'active', ?, ?, ?, ?, ?)",
+            ("user-inj2", "fact", "职业是程序员", "职业是程序员", 0.8, 0.7, 0.6, now, now),
+        )
+        # Insert working context (conversation)
+        conn.execute(
+            "INSERT INTO conversation_cache(canonical_user_id, role, content, "
+            "session_key, created_at) VALUES(?, ?, ?, ?, ?)",
+            ("user-inj2", "user", "今天喝什么？", "session-1", now),
+        )
+        conn.execute(
+            "INSERT INTO conversation_cache(canonical_user_id, role, content, "
+            "session_key, created_at) VALUES(?, ?, ?, ?, ?)",
+            ("user-inj2", "assistant", "你可以喝咖啡", "session-1", now),
+        )
+
+    instance._cfg.inject_working_turns = 3
+    instance._cfg.inject_memory_limit = 5
+
+    block = await instance._injection_builder.build_profile_injection(
+        "user-inj2", "咖啡", "session-1",
+    )
+
+    assert "[当前对话]" in block
+    assert "今天喝什么？" in block
+    assert "你可以喝咖啡" in block
+    assert "[用户画像·偏好]" in block
+    assert "喜欢黑咖啡" in block
+    assert "[用户画像·事实]" in block
+    assert "职业是程序员" in block
+    instance._close_db()
+
+
+@pytest.mark.asyncio
+async def test_inj002_build_profile_injection_empty_when_no_data(plugin_module, tmp_path, monkeypatch):
+    """INJ-002: build_profile_injection returns empty string when no data exists."""
+    monkeypatch.chdir(tmp_path)
+    instance = plugin_module.TMemoryPlugin(context=None, config={})
+    instance._init_db()
+    instance._migrate_schema()
+
+    block = await instance._injection_builder.build_profile_injection(
+        "no-user", "", "no-session",
+    )
+    assert block == ""
+    instance._close_db()
+
+
+@pytest.mark.asyncio
+async def test_inj002_build_layered_injection_alias_works(plugin_module, tmp_path, monkeypatch):
+    """INJ-002: build_layered_injection is a backward-compat alias for build_profile_injection."""
+    monkeypatch.chdir(tmp_path)
+    instance = plugin_module.TMemoryPlugin(context=None, config={})
+    instance._init_db()
+    instance._migrate_schema()
+
+    now = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+    with instance._db() as conn:
+        conn.execute(
+            "INSERT INTO profile_items(canonical_user_id, facet_type, content, "
+            "normalized_content, status, confidence, importance, stability, "
+            "created_at, updated_at) VALUES(?, ?, ?, ?, 'active', ?, ?, ?, ?, ?)",
+            ("user-alias", "style", "回答简洁明了", "回答简洁明了", 0.7, 0.6, 0.5, now, now),
+        )
+
+    block = await instance._injection_builder.build_layered_injection(
+        "user-alias", "", "session-x",
+    )
+    assert "[用户画像·风格指导]" in block
+    assert "回答简洁明了" in block
+    instance._close_db()

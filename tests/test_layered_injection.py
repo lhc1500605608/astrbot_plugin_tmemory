@@ -1,7 +1,7 @@
-"""Integration tests for layered injection (TMEAAA-255).
+"""Integration tests for profile-aware injection (TMEAAA-284).
 
-Covers: Working/Episodic/Semantic/Style retrieval, block assembly,
-empty layer omission, cap enforcement, backward compatibility.
+Covers: working context retrieval, profile-item block assembly with facet grouping,
+empty facet omission, cap enforcement.
 """
 
 import pytest
@@ -26,6 +26,25 @@ async def _insert_conversation(plugin, canonical_id: str, role: str, content: st
     )
 
 
+def _insert_profile_item(plugin, canonical_id: str, content: str,
+                         facet_type: str = "preference", confidence: float = 0.8,
+                         importance: float = 0.7, stability: float = 0.5,
+                         persona_id: str = "", scope: str = "user"):
+    now = plugin._now()
+    with plugin._db() as conn:
+        cur = conn.execute(
+            """INSERT INTO profile_items
+               (canonical_user_id, facet_type, content, normalized_content,
+                status, confidence, importance, stability,
+                created_at, updated_at, persona_id, source_scope)
+               VALUES (?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?, ?)""",
+            (canonical_id, facet_type, content, content,
+             confidence, importance, stability,
+             now, now, persona_id, scope),
+        )
+        return cur.lastrowid
+
+
 def _insert_episode(plugin, canonical_id: str, title: str, summary: str,
                     attention_score: float = 0.6, status: str = "ongoing",
                     scope: str = "user", persona_id: str = "",
@@ -43,23 +62,6 @@ def _insert_episode(plugin, canonical_id: str, title: str, summary: str,
              now, now, now, now),
         )
         return cur.lastrowid
-
-
-def _insert_memory(plugin, canonical_id: str, memory: str,
-                   memory_type: str = "preference", score: float = 0.8,
-                   persona_id: str = "", scope: str = "user"):
-    return plugin._insert_memory(
-        canonical_id=canonical_id,
-        adapter="qq",
-        adapter_user="42",
-        memory=memory,
-        score=score,
-        memory_type=memory_type,
-        importance=0.7,
-        confidence=0.8,
-        persona_id=persona_id,
-        scope=scope,
-    )
 
 
 class DummyReq:
@@ -168,130 +170,91 @@ def test_retrieve_episodes_zero_limit(plugin):
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Layered Injection Block Assembly
+# Profile Injection Block Assembly
 # ──────────────────────────────────────────────────────────────────────────────
 
 @pytest.mark.asyncio
-async def test_layered_injection_only_semantic_when_no_working_or_episodes(plugin):
-    """When no working context or episodes exist, only semantic + style blocks appear."""
-    plugin._cfg.enable_layered_injection = True
-    _insert_memory(plugin, "u-li1", "用户喜欢咖啡", memory_type="preference")
+async def test_profile_injection_only_profile_when_no_working_context(plugin):
+    """When no working context exists, only profile blocks appear."""
+    _insert_profile_item(plugin, "u-pi1", "用户喜欢咖啡", facet_type="preference")
 
-    block = await plugin._injection_builder.build_layered_injection(
-        "u-li1", "咖啡", session_key="s1",
+    block = await plugin._injection_builder.build_profile_injection(
+        "u-pi1", "咖啡", session_key="s1",
     )
-    assert "[用户记忆]" in block
+    assert "[用户画像·偏好]" in block
     assert "用户喜欢咖啡" in block
-    assert "[当前对话背景]" not in block
+    assert "[当前对话]" not in block
 
 
 @pytest.mark.asyncio
-async def test_layered_injection_includes_working_context(plugin):
-    """Working context appears as [当前对话背景] before memories."""
-    plugin._cfg.enable_layered_injection = True
+async def test_profile_injection_includes_working_context(plugin):
+    """Working context appears as [当前对话] before profile blocks."""
     plugin._cfg.inject_working_turns = 5
-    await _insert_conversation(plugin, "u-li2", "user", "今天我想喝咖啡", session_key="s1")
-    _insert_memory(plugin, "u-li2", "用户喜欢咖啡", memory_type="preference")
+    await _insert_conversation(plugin, "u-pi2", "user", "今天我想喝咖啡", session_key="s1")
+    _insert_profile_item(plugin, "u-pi2", "用户喜欢咖啡", facet_type="preference")
 
-    block = await plugin._injection_builder.build_layered_injection(
-        "u-li2", "咖啡", session_key="s1",
+    block = await plugin._injection_builder.build_profile_injection(
+        "u-pi2", "咖啡", session_key="s1",
     )
-    assert "[当前对话背景]" in block
+    assert "[当前对话]" in block
     assert "今天我想喝咖啡" in block
-    assert "[用户记忆]" in block
+    assert "[用户画像·偏好]" in block
     assert "喜欢咖啡" in block
 
 
 @pytest.mark.asyncio
-async def test_layered_injection_includes_episodes(plugin):
-    """Episode summaries appear in context block."""
-    plugin._cfg.enable_layered_injection = True
-    _insert_episode(plugin, "u-li3", "Python学习", "用户在学习Python", attention_score=0.8)
+async def test_profile_injection_groups_multiple_facets(plugin):
+    """Profile items are grouped by facet type with correct headings."""
+    _insert_profile_item(plugin, "u-pi3", "用户是程序员", facet_type="fact")
+    _insert_profile_item(plugin, "u-pi3", "用户喜欢安静的环境", facet_type="preference")
+    _insert_profile_item(plugin, "u-pi3", "用户不吃辣", facet_type="restriction")
 
-    block = await plugin._injection_builder.build_layered_injection(
-        "u-li3", "Python", session_key="s1",
+    block = await plugin._injection_builder.build_profile_injection(
+        "u-pi3", "", session_key="s1",
     )
-    assert "[当前对话背景]" in block
-    assert "Python学习" in block
-    assert "用户在学习Python" in block
+    assert "[用户画像·限制]" in block
+    assert "[用户画像·偏好]" in block
+    assert "[用户画像·事实]" in block
+    assert "不吃辣" in block
+    assert "安静" in block
+    assert "程序员" in block
 
 
 @pytest.mark.asyncio
-async def test_layered_injection_all_layers(plugin):
-    """Full layered injection: Working + Episodic + Semantic + Style."""
-    plugin._cfg.enable_layered_injection = True
-    plugin._cfg.inject_working_turns = 5
-    plugin._cfg.inject_episode_limit = 3
-
-    await _insert_conversation(plugin, "u-li4", "user", "今天想喝点什么", session_key="s1")
-    _insert_episode(plugin, "u-li4", "饮食探索", "用户最近在尝试不同饮品", attention_score=0.7)
-    _insert_memory(plugin, "u-li4", "用户喜欢咖啡", memory_type="preference")
-    _insert_memory(plugin, "u-li4", "用户沟通风格简洁", memory_type="style")
-
-    block = await plugin._injection_builder.build_layered_injection(
-        "u-li4", "咖啡", session_key="s1",
-    )
-    assert "[当前对话背景]" in block
-    assert "[用户记忆]" in block
-    assert "[用户风格指导]" in block
-
-
-@pytest.mark.asyncio
-async def test_layered_injection_style_cap_enforced(plugin):
-    """Style block respects inject_style_max_chars."""
-    plugin._cfg.enable_layered_injection = True
-    plugin._cfg.inject_style_max_chars = 20
-    _insert_memory(plugin, "u-li5", "用户沟通风格非常活泼，喜欢用各种emoji和感叹号表达情绪",
-                   memory_type="style")
-
-    block = await plugin._injection_builder.build_layered_injection(
-        "u-li5", "test", session_key="s1",
-    )
-    # Style block should be truncated or not exceed the cap significantly
-    if "[用户风格指导]" in block:
-        style_start = block.index("[用户风格指导]")
-        style_content = block[style_start:]
-        # Allow some overhead for the header line
-        assert len(style_content) < 20 + 50, f"Style cap not enforced: {len(style_content)} chars"
-
-
-@pytest.mark.asyncio
-async def test_layered_injection_empty_all_layers_returns_empty(plugin):
-    """No data in any layer → empty block."""
-    plugin._cfg.enable_layered_injection = True
-    block = await plugin._injection_builder.build_layered_injection(
+async def test_profile_injection_empty_when_no_data(plugin):
+    """No profile items and no working context → empty block."""
+    block = await plugin._injection_builder.build_profile_injection(
         "u-none", "query", session_key="s1",
     )
     assert block == ""
 
 
 @pytest.mark.asyncio
-async def test_layered_injection_respects_inject_max_chars(plugin):
+async def test_profile_injection_respects_inject_max_chars(plugin):
     """Total block truncated when inject_max_chars > 0."""
-    plugin._cfg.enable_layered_injection = True
-    plugin._cfg.inject_max_chars = 50
+    plugin._cfg.inject_max_chars = 60
     for i in range(5):
-        _insert_memory(plugin, "u-li6", f"用户记忆条目{i}", memory_type="preference")
+        _insert_profile_item(plugin, "u-pi4", f"用户记忆条目{i}", facet_type="preference")
 
-    block = await plugin._injection_builder.build_layered_injection(
-        "u-li6", "条目", session_key="s1",
+    block = await plugin._injection_builder.build_profile_injection(
+        "u-pi4", "条目", session_key="s1",
     )
-    assert len(block) <= 53  # 50 + "…"
+    assert len(block) <= 63  # 60 + "…"
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Backward Compatibility
+# Backward Compat: build_layered_injection alias
 # ──────────────────────────────────────────────────────────────────────────────
 
 @pytest.mark.asyncio
-async def test_flat_injection_still_works_with_layered_disabled(plugin):
-    """When enable_layered_injection=False, flat injection path is used (unchanged)."""
-    plugin._cfg.enable_layered_injection = False
-    plugin._cfg.enable_memory_injection = True
-    _insert_memory(plugin, "u-bc1", "用户喜欢跑步", memory_type="preference")
+async def test_build_layered_injection_alias_works(plugin):
+    """build_layered_injection delegates to build_profile_injection."""
+    _insert_profile_item(plugin, "u-bc1", "用户喜欢跑步", facet_type="preference")
 
-    block = await plugin._build_knowledge_injection("u-bc1", "跑步", limit=5)
-    assert "[用户记忆]" in block
+    block = await plugin._injection_builder.build_layered_injection(
+        "u-bc1", "跑步", session_key="s1",
+    )
+    assert "[用户画像·偏好]" in block
     assert "用户喜欢跑步" in block
 
 

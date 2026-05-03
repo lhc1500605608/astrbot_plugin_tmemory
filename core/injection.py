@@ -1,4 +1,4 @@
-"""Layered injection assembly: Working -> Episodic -> Semantic -> Style context blocks.
+"""Profile-aware injection assembly: facet-grouped user profile blocks.
 
 Hot-path constraint: on_llm_request path must be zero LLM calls, SQLite reads only.
 """
@@ -9,14 +9,65 @@ from typing import Dict, List, Optional
 
 from .config import PluginConfig
 
+# Facet → block heading mapping
+_FACET_HEADINGS: Dict[str, str] = {
+    "fact": "[用户画像·事实]",
+    "preference": "[用户画像·偏好]",
+    "restriction": "[用户画像·限制]",
+    "task_pattern": "[用户画像·任务模式]",
+    "style": "[用户画像·风格指导]",
+}
+
 
 class InjectionBuilder:
-    """Assembles structured prompt blocks for layered memory injection."""
+    """Assembles structured prompt blocks for profile-aware injection."""
 
     def __init__(self, cfg: PluginConfig, retrieval_mgr):
         self._cfg = cfg
         self._retrieval = retrieval_mgr
 
+    async def build_profile_injection(
+        self,
+        canonical_id: str,
+        query: str,
+        session_key: str,
+        scope: str = "user",
+        persona_id: str = "",
+        exclude_private: bool = False,
+    ) -> str:
+        """Build the profile-aware injection block.
+
+        Returns empty string if both context and profile blocks are empty.
+        Zero LLM calls — reads from SQLite only.
+        """
+        blocks: List[str] = []
+
+        # ── Working context from recent conversation turns ──
+        context_block = self._build_context_block(canonical_id, session_key)
+        if context_block:
+            blocks.append(context_block)
+
+        # ── Profile items grouped by facet ──
+        items = self._retrieval.retrieve_profile_items(
+            canonical_id,
+            query,
+            self._cfg.inject_memory_limit,
+            scope=scope,
+            persona_id=persona_id,
+            exclude_private=exclude_private,
+        )
+        if items:
+            profile_block = self._assemble_profile_blocks(items)
+            if profile_block:
+                blocks.append(profile_block)
+
+        block = "\n\n".join(blocks)
+        if self._cfg.inject_max_chars > 0 and len(block) > self._cfg.inject_max_chars:
+            cutoff = max(self._cfg.inject_max_chars - 3, 1)
+            block = block[:cutoff] + "\u2026"
+        return block
+
+    # Backward-compat alias used by existing callers that haven't been updated yet
     async def build_layered_injection(
         self,
         canonical_id: str,
@@ -26,160 +77,72 @@ class InjectionBuilder:
         persona_id: str = "",
         exclude_private: bool = False,
     ) -> str:
-        """Build the full layered injection block.
-
-        Returns empty string if all layers are empty.
-        """
-        blocks: List[str] = []
-
-        # ── Working + Episodic → 当前对话背景 ──
-        context_block = await self._build_context_block(
-            canonical_id, query, session_key, scope, persona_id
+        """Deprecated alias. Delegates to build_profile_injection."""
+        return await self.build_profile_injection(
+            canonical_id, query, session_key,
+            scope=scope, persona_id=persona_id, exclude_private=exclude_private,
         )
-        if context_block:
-            blocks.append(context_block)
 
-        # ── Semantic → 用户记忆 ──
-        memory_block = await self._build_memory_block(
-            canonical_id, query, scope, persona_id, exclude_private
-        )
-        if memory_block:
-            blocks.append(memory_block)
-
-        # ── Style → 用户风格指导 ──
-        style_block = await self._build_style_block(
-            canonical_id, scope, persona_id, exclude_private
-        )
-        if style_block:
-            blocks.append(style_block)
-
-        block = "\n\n".join(blocks)
-        if self._cfg.inject_max_chars > 0 and len(block) > self._cfg.inject_max_chars:
-            cutoff = max(self._cfg.inject_max_chars - 3, 1)
-            block = block[:cutoff] + "…"
-        return block
-
-    async def _build_context_block(
+    def _build_context_block(
         self,
         canonical_id: str,
-        query: str,
         session_key: str,
-        scope: str,
-        persona_id: str,
     ) -> str:
-        """Build [当前对话背景] from working + episodic layers."""
-        parts: List[str] = []
-
-        # Working layer: recent conversation turns
+        """Build [当前对话] block from recent conversation turns."""
         working_turns = self._retrieval.retrieve_working_context(
             canonical_id, session_key, self._cfg.inject_working_turns
         )
-        if working_turns:
-            lines = ["[当前对话背景]"]
-            for turn in working_turns:
-                role = str(turn.get("role", "user"))
-                content = str(turn.get("content", ""))
-                role_label = "用户" if role == "user" else "助手"
-                lines.append(f"- {role_label}: {content}")
-            parts.append("\n".join(lines))
-
-        # Episodic layer: episode summaries
-        episodes = self._retrieval.retrieve_episodes(
-            canonical_id,
-            query,
-            self._cfg.inject_episode_limit,
-            self._cfg.inject_episode_max_chars,
-            scope=scope,
-            persona_id=persona_id,
-        )
-        if episodes:
-            ep_lines: List[str] = []
-            if not working_turns:
-                ep_lines.append("[当前对话背景]")
-            for ep in episodes:
-                title = str(ep.get("episode_title", ""))
-                summary = str(ep.get("episode_summary", ""))
-                ep_lines.append(f"- [情节] {title}: {summary}")
-            parts.append("\n".join(ep_lines))
-
-        return "\n".join(parts) if parts else ""
-
-    async def _build_memory_block(
-        self,
-        canonical_id: str,
-        query: str,
-        scope: str,
-        persona_id: str,
-        exclude_private: bool,
-    ) -> str:
-        """Build [用户记忆] from semantic memory layer."""
-        rows = await self._retrieval.retrieve_memories(
-            canonical_id,
-            query,
-            self._cfg.inject_memory_limit,
-            query_vec=None,
-            scope=scope,
-            persona_id=persona_id,
-            exclude_private=exclude_private,
-            summary_channel="canonical",
-        )
-        scored, _ = rows
-        if not scored:
+        if not working_turns:
             return ""
 
-        deduped = self._retrieval.deduplicate_results(
-            scored, self._cfg.inject_memory_limit
-        )
-        if not deduped:
-            return ""
-
-        lines = ["[用户记忆]"]
-        for row in deduped:
-            lines.append(f"- ({row['memory_type']}) {row['memory']}")
+        lines = ["[当前对话]"]
+        for turn in working_turns:
+            role = str(turn.get("role", "user"))
+            content = str(turn.get("content", ""))
+            role_label = "用户" if role == "user" else "助手"
+            lines.append(f"- {role_label}: {content}")
         return "\n".join(lines)
 
-    async def _build_style_block(
-        self,
-        canonical_id: str,
-        scope: str,
-        persona_id: str,
-        exclude_private: bool,
+    @staticmethod
+    def _assemble_profile_blocks(
+        items: List[Dict[str, object]],
     ) -> str:
-        """Build [用户风格指导] from style/persona memory layer."""
-        rows = await self._retrieval.retrieve_memories(
-            canonical_id,
-            "",
-            min(self._cfg.inject_memory_limit, 3),
-            query_vec=None,
-            scope=scope,
-            persona_id=persona_id,
-            exclude_private=exclude_private,
-            summary_channel="persona",
-        )
-        scored, _ = rows
-        if not scored:
+        """Group profile items by facet_type into labeled blocks.
+
+        Facets with no items are omitted. Items already arrive sorted by
+        relevance/importance from the retrieval layer.
+        """
+        groups: Dict[str, List[str]] = {}
+        for item in items:
+            facet = str(item.get("facet_type", "fact"))
+            content = str(item.get("content", ""))
+            if not content:
+                continue
+            groups.setdefault(facet, []).append(content)
+
+        if not groups:
             return ""
 
-        lines = ["[用户风格指导]"]
-        char_count = 0
-        max_chars = self._cfg.inject_style_max_chars
-        for row in scored:
-            mem = str(row["memory"])
-            if max_chars > 0:
-                char_count += len(mem)
-                if char_count > max_chars:
-                    break
-            lines.append(f"- {mem}")
-        return "\n".join(lines) if len(lines) > 1 else ""
+        # Order facets by priority: restriction > preference > fact > style > task_pattern
+        facet_order = ["restriction", "preference", "fact", "style", "task_pattern"]
+        blocks: List[str] = []
+        for facet in facet_order:
+            contents = groups.get(facet)
+            if not contents:
+                continue
+            heading = _FACET_HEADINGS.get(facet, f"[用户画像·{facet}]")
+            lines = [heading]
+            for c in contents:
+                lines.append(f"- {c}")
+            blocks.append("\n".join(lines))
+
+        return "\n".join(blocks)
 
     @staticmethod
     def inject_block_by_position(
         req, block: str, position: str, slot_marker: str
     ) -> None:
-        """Inject a text block into a ProviderRequest at the configured position.
-
-        Static method so it can be used by both layered and flat injection paths.
-        """
+        """Inject a text block into a ProviderRequest at the configured position."""
         if position == "slot":
             existing = getattr(req, "system_prompt", "") or ""
             if slot_marker in existing:

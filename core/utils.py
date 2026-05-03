@@ -82,56 +82,19 @@ class PluginHelpersMixin:
         persona_id: str = "",
         exclude_private: bool = False,
     ) -> str:
-        """构建知识/偏好记忆注入块。
-
-        双通道设计:
-        - canonical 通道: 用查询语义搜索事实/偏好/任务/限制类记忆
-        - persona 通道: 按重要性取 top 风格记忆，不参与查询匹配
-        避免风格噪音污染可搜索的事实记忆。
-        """
-        # 通道 1: 事实导向记忆，用查询做语义匹配
-        canonical_rows = await self._retrieve_memories(
-            canonical_user_id,
-            query,
-            limit,
-            scope=scope,
-            persona_id=persona_id,
-            exclude_private=exclude_private,
-            summary_channel="canonical",
+        """构建用户画像注入块 — always via profile_items."""
+        items = self._retrieval_mgr.retrieve_profile_items(
+            canonical_user_id, query, limit,
+            scope=scope, persona_id=persona_id, exclude_private=exclude_private,
         )
-
-        # 通道 2: 人格风格记忆，不参与查询匹配，取最重要的几条
-        persona_rows = await self._retrieve_memories(
-            canonical_user_id,
-            "",  # 空查询:按 score/importance 排序，不做语义匹配
-            min(limit, 3),  # 风格记忆不宜过多
-            scope=scope,
-            persona_id=persona_id,
-            exclude_private=exclude_private,
-            summary_channel="persona",
-        )
-
-        if not canonical_rows and not persona_rows:
+        if not items:
             return ""
 
-        blocks: list[str] = []
-
-        if canonical_rows:
-            knowledge_lines = ["[用户记忆]"]
-            for row in canonical_rows:
-                knowledge_lines.append(f"- ({row['memory_type']}) {row['memory']}")
-            blocks.append("\n".join(knowledge_lines))
-
-        if persona_rows:
-            style_lines = ["[用户风格指导]"]
-            for row in persona_rows:
-                style_lines.append(f"- {row['memory']}")
-            blocks.append("\n".join(style_lines))
-
-        block = "\n\n".join(blocks)
+        from .injection import InjectionBuilder
+        block = InjectionBuilder._assemble_profile_blocks(items)
         if self._cfg.inject_max_chars > 0 and len(block) > self._cfg.inject_max_chars:
             cutoff = max(self._cfg.inject_max_chars - 3, 1)
-            block = block[:cutoff] + "…"
+            block = block[:cutoff] + "\u2026"
         return block
 
     def _inject_block_by_position(self, req: ProviderRequest, block: str) -> None:
@@ -245,6 +208,9 @@ class PluginHelpersMixin:
 
     async def _upsert_vector(self, memory_id: int, text: str) -> bool:
         return await _vector.upsert_vector(self, memory_id, text)
+
+    async def _upsert_profile_vector(self, profile_item_id: int, text: str) -> bool:
+        return await _vector.upsert_profile_vector(self, profile_item_id, text)
 
     def _delete_vector(self, memory_id: int, conn=None) -> None:
         from . import vector as _vec
@@ -911,7 +877,7 @@ class PluginHandlersMixin:
             logger.warning("[tmemory] on_llm_response capture failed: %s", e)
 
     async def _handle_on_llm_request(self, event: AstrMessageEvent, req: ProviderRequest):
-        """在 LLM 调用前注入记忆。"""
+        """在 LLM 调用前注入用户画像。热路径 zero-LLM。"""
         if not self._cfg.enable_memory_injection:
             return
 
@@ -924,22 +890,12 @@ class PluginHandlersMixin:
             exclude_private = (is_group and not self._cfg.private_memory_in_group)
             session_key = self._safe_get_unified_msg_origin(event)
 
-            if self._cfg.enable_layered_injection:
-                # ── Layered injection: Working → Episodic → Semantic → Style ──
-                block = await self._injection_builder.build_layered_injection(
-                    canonical_id, query, session_key,
-                    scope=scope, persona_id=persona_id, exclude_private=exclude_private,
-                )
-                if block:
-                    self._inject_block_by_position(req, block)
-            else:
-                # ── Flat injection (backward compatible) ──
-                knowledge_block = await self._build_knowledge_injection(
-                    canonical_id, query, self._cfg.inject_memory_limit,
-                    scope=scope, persona_id=persona_id, exclude_private=exclude_private,
-                )
-                if knowledge_block:
-                    self._inject_block_by_position(req, knowledge_block)
+            block = await self._injection_builder.build_profile_injection(
+                canonical_id, query, session_key,
+                scope=scope, persona_id=persona_id, exclude_private=exclude_private,
+            )
+            if block:
+                self._inject_block_by_position(req, block)
         except Exception as e:
             logger.warning("[tmemory] on_llm_request inject failed: %s", e)
 

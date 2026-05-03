@@ -235,32 +235,32 @@
   },
   "enable_layered_injection": {
     "type": "bool",
-    "description": "启用分层记忆注入",
-    "hint": "开启后将按 Working → Episodic → Semantic → Style 四层结构注入记忆上下文。默认关闭，保持向后兼容。",
+    "description": "启用分层记忆注入 [已废弃]",
+    "hint": "已被统一的 profile_items 注入替代。保留以保持向后兼容，不再驱动主逻辑。",
     "default": false
   },
   "inject_working_turns": {
     "type": "int",
-    "description": "Working 层：注入最近对话轮数",
-    "hint": "注入当前会话最近 N 轮对话作为即时上下文。仅 enable_layered_injection 开启时生效。",
+    "description": "Working 层：注入最近对话轮数 [已废弃 — 仅 working context 仍使用此值]",
+    "hint": "保留以控制当前对话上下文注入轮数。其他分层注入逻辑已废弃。",
     "default": 5
   },
   "inject_episode_limit": {
     "type": "int",
-    "description": "Episodic 层：注入情节摘要数量",
-    "hint": "最多注入多少条情节摘要到上下文中。仅 enable_layered_injection 开启时生效。",
+    "description": "Episodic 层：注入情节摘要数量 [已废弃]",
+    "hint": "已被 profile_items 检索替代。保留以保持向后兼容，不再驱动主逻辑。",
     "default": 3
   },
   "inject_episode_max_chars": {
     "type": "int",
-    "description": "Episodic 层：单条情节摘要最大字符数",
-    "hint": "单条情节摘要的字符上限，超出部分截断。仅 enable_layered_injection 开启时生效。",
+    "description": "Episodic 层：单条情节摘要最大字符数 [已废弃]",
+    "hint": "已被 profile_items 检索替代。保留以保持向后兼容，不再驱动主逻辑。",
     "default": 600
   },
   "inject_style_max_chars": {
     "type": "int",
-    "description": "Style 层：风格指导最大字符数",
-    "hint": "用户风格/人设记忆块的字符上限。仅 enable_layered_injection 开启时生效。",
+    "description": "Style 层：风格指导最大字符数 [已废弃]",
+    "hint": "已被 profile_items 检索替代。保留以保持向后兼容，不再驱动主逻辑。",
     "default": 400
   },
   "distill_model_settings": {
@@ -302,58 +302,102 @@
       }
     }
   },
+  "profile_storage": {
+    "type": "object",
+    "description": "用户画像存储与提取",
+    "hint": "控制画像提取、存储和管理的核心配置。替代旧的三层整合流水线。",
+    "items": {
+      "profile_extraction_enabled": {
+        "type": "bool",
+        "default": false,
+        "description": "启用画像提取",
+        "hint": "开启后，后台worker将从对话缓存中提取用户画像条目(profile items)，替代旧的 episodic + semantic 两阶段流水线。默认关闭以保持向后兼容。"
+      },
+      "profile_extraction_min_messages": {
+        "type": "int",
+        "default": 8,
+        "description": "画像提取最少消息数",
+        "hint": "单用户未处理消息数低于此值时不触发画像提取。建议 >= 8。"
+      },
+      "profile_extraction_max_users_per_cycle": {
+        "type": "int",
+        "default": 10,
+        "description": "每轮最多处理用户数",
+        "hint": "单次提取周期内最多处理多少用户。"
+      },
+      "profile_extraction_timeout_sec": {
+        "type": "int",
+        "default": 120,
+        "description": "提取超时（秒）",
+        "hint": "画像提取阶段的最大执行时间，超时后跳过。"
+      },
+      "profile_stability_default": {
+        "type": "float",
+        "default": 0.5,
+        "description": "默认稳定性",
+        "hint": "新建画像条目的初始稳定性值。越高越不容易被单条新证据覆盖。范围 [0, 1]。"
+      },
+      "profile_auto_archive_threshold": {
+        "type": "float",
+        "default": 0.0,
+        "description": "自动归档阈值",
+        "hint": "当画像条目的 confidence 低于此阈值时自动归档。0=不自动归档。范围 [0, 1]。"
+      },
+      "profile_max_items_per_user": {
+        "type": "int",
+        "default": 200,
+        "description": "每用户画像条目上限",
+        "hint": "超出时优先合并低质量条目。范围 >= 10。"
+      }
+    }
+  },
   "consolidation_pipeline": {
     "type": "object",
-    "description": "三层记忆整合流水线",
-    "hint": "控制 Stage B（情节摘要）和 Stage C（语义提取）的开关与参数。总开关 enable_consolidation_pipeline 默认关闭，保持向后兼容。",
+    "description": "三层记忆整合流水线 [已废弃]",
+    "hint": "已被 profile_storage 替代。仅保留配置项以保持向后兼容，不再驱动任何实现逻辑。",
     "items": {
       "enable_consolidation_pipeline": {
         "type": "bool",
         "default": false,
-        "description": "启用整合流水线",
-        "hint": "三层记忆整合的总开关。开启后按 Worker → Episodic → Semantic 顺序依次处理。默认关闭以保持向后兼容。"
+        "description": "启用整合流水线 [已废弃]",
+        "hint": "已被 profile_extraction_enabled 替代。"
       },
       "enable_episodic_summarization": {
         "type": "bool",
         "default": true,
-        "description": "Stage B：情节摘要",
-        "hint": "将对话按时间间隔切分为情节(episode)并用 LLM 生成摘要。依赖 enable_consolidation_pipeline。"
+        "description": "Stage B：情节摘要 [已废弃]",
+        "hint": "已被画像提取直接链路替代。"
       },
       "enable_episode_semantic_distill": {
         "type": "bool",
         "default": true,
-        "description": "Stage C：语义提取",
-        "hint": "从情节摘要中蒸馏长期用户记忆。依赖 enable_consolidation_pipeline。"
+        "description": "Stage C：语义提取 [已废弃]",
+        "hint": "已被画像提取直接链路替代。"
       },
       "distill_max_users_per_cycle": {
         "type": "int",
         "default": 10,
-        "description": "每轮最多处理用户数",
-        "hint": "单次整合周期内最多处理多少用户，防止单轮 LLM 调用过多。"
+        "description": "每轮最多处理用户数 [已废弃]"
       },
       "stage_timeout_sec": {
         "type": "int",
         "default": 120,
-        "description": "阶段超时（秒）",
-        "hint": "Stage B/C 各自的最大执行时间，超时后跳过当前阶段。"
+        "description": "阶段超时（秒）[已废弃]"
       },
       "episode_summary_min_messages": {
         "type": "int",
         "default": 5,
-        "description": "情节摘要最少消息数",
-        "hint": "会话消息数低于此值不触发情节摘要，避免片段过短。"
+        "description": "情节摘要最少消息数 [已废弃]"
       },
       "episode_summary_max_input_tokens": {
         "type": "int",
         "default": 3000,
-        "description": "情节摘要最大输入 token 数",
-        "hint": "传给 LLM 的对话转录文本上限，超出部分截断。"
+        "description": "情节摘要最大输入 token 数 [已废弃]"
       },
       "episode_session_gap_minutes": {
         "type": "int",
         "default": 60,
-        "description": "会话间隔（分钟）",
-        "hint": "两条消息间隔超过此时间即视为新会话开始，触发情节切分。"
+        "description": "会话间隔（分钟）[已废弃]"
       }
     }
   },
