@@ -83,6 +83,65 @@ class TestGetGlobalStats:
         assert "pending_users" in stats
         assert isinstance(stats["pending_users"], int)
 
+    def test_three_tier_fields_present(self, admin, plugin):
+        stats = admin.get_global_stats()
+        for key in (
+            "total_episodes", "active_episodes",
+            "pending_consolidation", "processed_consolidation",
+            "working_layer_count", "episodic_layer_count", "semantic_layer_count",
+        ):
+            assert key in stats, f"missing key: {key}"
+            assert isinstance(stats[key], int), f"{key} should be int, got {type(stats[key])}"
+        assert "last_consolidation_at" in stats
+        # None when no distill_history rows exist
+        assert stats["last_consolidation_at"] is None
+
+    def test_episode_counts_after_insert(self, admin, plugin):
+        now = plugin._now()
+        with plugin._db() as conn:
+            conn.execute(
+                "INSERT INTO memory_episodes(canonical_user_id, episode_title, episode_summary, status, consolidation_status, first_source_at, last_source_at, created_at, updated_at) "
+                "VALUES('user1', '测试情节', '一段测试摘要', 'ongoing', 'pending_semantic', ?, ?, ?, ?)",
+                (now, now, now, now),
+            )
+            conn.execute(
+                "INSERT INTO memory_episodes(canonical_user_id, episode_title, episode_summary, status, consolidation_status, first_source_at, last_source_at, created_at, updated_at) "
+                "VALUES('user1', '已完成情节', '另一段摘要', 'resolved', 'semantic_done', ?, ?, ?, ?)",
+                (now, now, now, now),
+            )
+        stats = admin.get_global_stats()
+        assert stats["total_episodes"] == 2
+        assert stats["active_episodes"] == 1
+        assert stats["pending_consolidation"] == 1
+        assert stats["processed_consolidation"] == 1
+        assert stats["episodic_layer_count"] == 2
+
+    def test_semantic_layer_count(self, admin, plugin):
+        plugin._insert_memory(
+            canonical_id="user1", adapter="test", adapter_user="u1",
+            memory="从情节提取的记忆", score=0.8, memory_type="fact",
+            importance=0.7, confidence=0.9,
+        )
+        with plugin._db() as conn:
+            conn.execute(
+                "UPDATE memories SET derived_from='episode' WHERE canonical_user_id='user1'"
+            )
+        stats = admin.get_global_stats()
+        assert stats["semantic_layer_count"] >= 1
+
+    def test_last_consolidation_at_with_history(self, admin, plugin):
+        with plugin._db() as conn:
+            conn.execute(
+                "INSERT INTO distill_history(started_at, finished_at, trigger_type) "
+                "VALUES('2025-01-01 10:00:00', '2025-01-01 10:05:00', 'auto')"
+            )
+        stats = admin.get_global_stats()
+        assert stats["last_consolidation_at"] == "2025-01-01 10:05:00"
+
+    def test_working_layer_matches_pending_cached(self, admin, plugin):
+        stats = admin.get_global_stats()
+        assert stats["working_layer_count"] == stats["pending_cached_rows"]
+
 
 class TestGetMemories:
     def test_empty_user_returns_empty(self, admin):

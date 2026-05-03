@@ -11,7 +11,7 @@ import logging
 import math
 import re
 import time
-from typing import Dict, List, Tuple
+from typing import Any, Dict, List, Tuple
 
 logger = logging.getLogger("astrbot")
 
@@ -377,8 +377,8 @@ def purge_user_data(plugin, canonical_id: str) -> Dict[str, int]:
     return {"memories": m, "cache": c}
 
 
-def get_global_stats(plugin) -> Dict[str, int]:
-    """获取全局统计信息。"""
+def get_global_stats(plugin) -> Dict[str, Any]:
+    """获取全局统计信息（含 0.8.0 三层架构指标）。"""
     with plugin._db() as conn:
         total_users = conn.execute(
             "SELECT COUNT(DISTINCT canonical_user_id) FROM memories"
@@ -404,6 +404,26 @@ def get_global_stats(plugin) -> Dict[str, int]:
             except Exception:
                 pass
 
+        # ── 0.8.0 three-tier metrics ──────────────────────────────────
+        total_episodes = conn.execute(
+            "SELECT COUNT(*) FROM memory_episodes"
+        ).fetchone()[0]
+        active_episodes = conn.execute(
+            "SELECT COUNT(*) FROM memory_episodes WHERE status='ongoing'"
+        ).fetchone()[0]
+        pending_consolidation = conn.execute(
+            "SELECT COUNT(*) FROM memory_episodes WHERE consolidation_status='pending_semantic'"
+        ).fetchone()[0]
+        processed_consolidation = conn.execute(
+            "SELECT COUNT(*) FROM memory_episodes WHERE consolidation_status!='pending_semantic'"
+        ).fetchone()[0]
+        semantic_layer = conn.execute(
+            "SELECT COUNT(*) FROM memories WHERE derived_from='episode'"
+        ).fetchone()[0]
+        last_consolidation_row = conn.execute(
+            "SELECT finished_at FROM distill_history ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+
     return {
         "total_users": int(total_users),
         "total_active_memories": int(active_memories),
@@ -411,6 +431,15 @@ def get_global_stats(plugin) -> Dict[str, int]:
         "pending_cached_rows": int(pending_cached),
         "total_events": int(total_events),
         "vector_index_rows": int(vector_index_rows),
+        # three-tier
+        "total_episodes": int(total_episodes),
+        "active_episodes": int(active_episodes),
+        "pending_consolidation": int(pending_consolidation),
+        "processed_consolidation": int(processed_consolidation),
+        "working_layer_count": int(pending_cached),
+        "episodic_layer_count": int(total_episodes),
+        "semantic_layer_count": int(semantic_layer),
+        "last_consolidation_at": str(last_consolidation_row["finished_at"]) if last_consolidation_row else None,
     }
 
 

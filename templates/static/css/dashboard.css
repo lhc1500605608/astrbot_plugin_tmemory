@@ -57,9 +57,13 @@ body { font-family: var(--font); background:var(--bg); color:var(--text); min-he
 .user-list li .user-label { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; flex:1; }
 
 .stats-grid { display:grid; grid-template-columns:1fr 1fr; gap:8px; }
+.stats-grid-3col { grid-template-columns:1fr 1fr 1fr; }
 .stat-card { background:var(--surface2); border-radius:var(--radius); padding:10px 12px; }
 .stat-card .label { font-size:11px; color:var(--text2); }
 .stat-card .value { font-size:20px; font-weight:700; margin-top:2px; }
+.stat-card.layer-working { border-left:3px solid #f0ad4e; }
+.stat-card.layer-episodic { border-left:3px solid #5bc0de; }
+.stat-card.layer-semantic { border-left:3px solid var(--brand); }
 
 .search-box { width:100%; padding:8px 12px; background:var(--surface2); border:1px solid var(--border); border-radius:var(--radius); color:var(--text); font-size:13px; outline:none; }
 .search-box:focus { border-color:var(--brand); }
@@ -98,8 +102,11 @@ body { font-family: var(--font); background:var(--bg); color:var(--text); min-he
 .mindmap-container svg .node text { font-size:12px; fill:var(--text); pointer-events:none; }
 .mindmap-container svg .node .type-label { font-size:10px; fill:var(--text2); }
 
-.mindmap-legend { position:absolute; bottom:16px; left:16px; display:flex; gap:12px; background:var(--surface); padding:8px 14px; border-radius:var(--radius); border:1px solid var(--border); font-size:11px; }
+.mindmap-legend { position:absolute; bottom:16px; left:16px; display:flex; gap:8px; background:var(--surface); padding:8px 14px; border-radius:var(--radius); border:1px solid var(--border); font-size:11px; }
 .mindmap-legend .dot { width:10px; height:10px; border-radius:50%; display:inline-block; margin-right:4px; vertical-align:middle; }
+.mindmap-legend .legend-section { display:flex; flex-wrap:wrap; gap:6px; align-items:center; }
+.mindmap-legend .legend-label { font-weight:600; color:var(--text); font-size:10px; text-transform:uppercase; }
+.mindmap-legend .legend-sep { width:1px; background:var(--border); margin:0 4px; }
 
 .mindmap-toolbar { position:absolute; top:16px; right:16px; display:flex; gap:6px; }
 

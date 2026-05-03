@@ -57,6 +57,24 @@
           <div class="stat-card"><div class="label">待蒸馏用户</div><div class="value" id="statPendingUsers">-</div></div>
         </div>
       </div>
+      <div class="sidebar-section">
+        <h3>三层架构</h3>
+        <div class="stats-grid stats-grid-3col">
+          <div class="stat-card layer-working"><div class="label">Working 层</div><div class="value" id="statWorking">-</div></div>
+          <div class="stat-card layer-episodic"><div class="label">Episodic 层</div><div class="value" id="statEpisodic">-</div></div>
+          <div class="stat-card layer-semantic"><div class="label">Semantic 层</div><div class="value" id="statSemantic">-</div></div>
+        </div>
+      </div>
+      <div class="sidebar-section">
+        <h3>Episode 合并</h3>
+        <div class="stats-grid">
+          <div class="stat-card"><div class="label">Episode 总数</div><div class="value" id="statEpisodes">-</div></div>
+          <div class="stat-card"><div class="label">活跃中</div><div class="value" id="statActiveEpisodes">-</div></div>
+          <div class="stat-card"><div class="label">待合并</div><div class="value" id="statPendingConsolidation">-</div></div>
+          <div class="stat-card"><div class="label">已合并</div><div class="value" id="statProcessedConsolidation">-</div></div>
+        </div>
+        <div class="consolidation-time" id="statLastConsolidation" style="font-size:11px;color:var(--text2);margin-top:6px">上次合并: -</div>
+      </div>
     </div>
 
     <!-- Content -->
@@ -75,10 +93,26 @@
       <div class="mindmap-container" id="panelMindmap">
         <svg id="mindmapSvg"></svg>
         <div class="mindmap-legend">
-          <span><span class="dot" style="background:var(--brand)"></span>preference</span>
-          <span><span class="dot" style="background:#3fb950"></span>fact</span>
-          <span><span class="dot" style="background:#d29922"></span>task</span>
-          <span><span class="dot" style="background:#f85149"></span>restriction</span>
+          <span class="legend-section">
+            <span class="legend-label">层级</span>
+            <span><span class="dot" style="background:#f0ad4e"></span>Working</span>
+            <span><span class="dot" style="background:#5bc0de"></span>Episodic</span>
+            <span><span class="dot" style="background:var(--brand)"></span>Semantic</span>
+          </span>
+          <span class="legend-sep"></span>
+          <span class="legend-section">
+            <span class="legend-label">加工链路</span>
+            <span style="font-size:10px;color:var(--text2)">Capture → Summarization → Extraction → Retrieval</span>
+          </span>
+          <span class="legend-sep"></span>
+          <span class="legend-section">
+            <span class="legend-label">语义类型</span>
+            <span><span class="dot" style="background:#58a6ff"></span>pref</span>
+            <span><span class="dot" style="background:#3fb950"></span>fact</span>
+            <span><span class="dot" style="background:#d29922"></span>task</span>
+            <span><span class="dot" style="background:#f85149"></span>restr</span>
+            <span><span class="dot" style="background:#bc8cff"></span>style</span>
+          </span>
         </div>
         <div class="mindmap-toolbar">
           <button class="btn btn-icon btn-sm" onclick="zoomIn()" title="放大">+</button>

@@ -131,6 +131,82 @@ conversation_cache -> memory_episodes + sources -> memories + FTS/vector/RRF -> 
 
 ## Implementation Boundary
 
+### WebUI mindmap projection boundary
+
+`templates/dashboard.html` + `templates/static/js/mindmap.js` 的三层导图是 **architecture projection**，不是新的后端 domain model。它必须把现有 SQLite 数据投影为 Working -> Episodic -> Semantic，而不是引入独立图数据库或新 API 语义。
+
+#### Node hierarchy
+
+导图节点层级固定为：
+
+```text
+User root
+├── Working layer
+│   └── conversation_cache turn nodes
+├── Episodic layer
+│   └── memory_episodes nodes
+└── Semantic layer
+    └── memories nodes
+```
+
+- Root node: 当前 `canonical_user_id`，只作为视图根，不对应数据库表。
+- Working layer: 静态层节点；子节点来自 `conversation_cache`，显示近期未合并/最近 captured turns，标签使用 `role + truncated(content)`，辅助信息使用 `session_key`、`turn_index`、`captured_at`、`distilled`。
+- Episodic layer: 静态层节点；子节点来自 `memory_episodes`，标签优先用 `episode_title`，tooltip/详情用 `episode_summary`、`topic_tags`、`key_entities`、`status`、`consolidation_status`、`source_count`。
+- Semantic layer: 静态层节点；子节点来自 `memories`，标签继续使用现有 `memory` 截断文本，颜色保留 `memory_type` 语义。
+- 不再把 `preference` / `fact` / `task` / `restriction` / `style` 作为一级分类节点；它们降级为 Semantic memory 的颜色、legend 和筛选维度。
+
+#### Edge semantics
+
+导图边分为两类，必须在 legend 中区分：
+
+| Edge | Source | Meaning | Data reality |
+| --- | --- | --- | --- |
+| Layer flow | `Working layer -> Episodic layer -> Semantic layer` | consolidation pipeline 的加工顺序 | 静态架构示意 |
+| Root membership | `User root -> layer nodes` | 当前用户拥有这三类记忆视图 | 静态视图结构 |
+| Source membership | `Working layer -> conversation_cache` | turn 属于 working memory | 真实用户数据 |
+| Episode membership | `Episodic layer -> memory_episodes` | episode 属于当前用户 | 真实用户数据 |
+| Semantic membership | `Semantic layer -> memories` | memory 属于当前用户 | 真实用户数据 |
+| Provenance | `conversation_cache -> memory_episodes` | raw turns 被合并为 episode | 真实用户数据，来自 `episode_sources` 或 `conversation_cache.episode_id` |
+| Derivation | `memory_episodes -> memories` | semantic memory 从 episode 抽取 | 真实用户数据，仅当 `memories.episode_id` 或 `derived_from='episode'` 可回指 episode 时显示 |
+
+如果用户尚未启用 consolidation 或历史数据缺少 provenance，导图必须优雅降级：继续显示 Root -> Semantic layer -> memories；Working/Episodic 层可以显示空态说明，不得伪造 episode/memory 归属边。
+
+#### Consolidation pipeline labels
+
+导图中的 pipeline 命名固定为：
+
+```text
+Capture -> Episodic Summarization -> Semantic Extraction -> Retrieval/Injection
+```
+
+- `Capture`: 写入 `conversation_cache`。
+- `Episodic Summarization`: 从 `conversation_cache` 聚合 `memory_episodes`，并写入 `episode_sources`。
+- `Semantic Extraction`: 从 episode/source turns 提取长期 `memories`。
+- `Retrieval/Injection`: `memories` + FTS/vector/RRF + 可选 episode recall 进入 prompt injection。
+
+这些 pipeline labels 是静态架构图例；只有节点和 provenance/derivation 边来自真实用户数据。
+
+#### Existing interaction contract
+
+三层导图重构必须保持现有交互：
+
+- 保持 `#mindmapSvg`、`renderMindmap(...)` 入口、`zoomIn()`、`zoomOut()`、`resetZoom()` 和 D3 zoom/drag/pan 体验。
+- 空状态继续在 SVG 中居中显示说明；未选择用户时仍提示选择用户。
+- Semantic memory 节点点击仍打开现有 `openEditModal(memData)`；Working/Episodic 节点只读，除非后续任务显式增加详情面板。
+- 不改变记忆列表、待蒸馏队列、审计日志、用户管理等 tab 的行为。
+
+#### Minimal implementation touch points
+
+当前最小实现触点应控制在：
+
+- `core/admin_service.py`: 扩展 WebUI 查询数据，建议在现有 `get_memories(user)` 返回中 additive 增加 `episode_id`、`derived_from`，并增加一个只读 projection helper 汇总 `conversation_cache`、`memory_episodes`、`episode_sources`；不得改变已有字段含义。
+- `web_server.py`: 如现有 `/api/memories` 数据不足，可 additive 增加 `/api/mindmap?user=...` 或在 `/api/memories` response 中增加 `mindmap` 字段；优先选择不破坏旧前端的 additive response。
+- `templates/static/js/main.js`: 让用户数据加载时把 mindmap projection 传入 renderer；旧 `allMemories` 仍服务记忆表。
+- `templates/static/js/mindmap.js`: 从平面 `memory_type` 分组树改为三层 projection 渲染；保留 zoom/reset 和 semantic node edit 行为。
+- `templates/dashboard.html`: 只更新 legend 文案/颜色和必要说明，不改 tab 结构。
+
+语义冲突：当前 WebUI 的 `renderMindmap(memories, userId)` 只接收 `/api/memories` 返回的 active `memories`，且后端 `get_memories(user)` 当前未返回 `episode_id` / `derived_from`；因此仅靠现有 active memories 无法表达 Working/Episodic 节点和真实 provenance/derivation 边。若不扩展只读数据，三层导图只能做静态示意，不能满足“真实用户数据关系”的验收语义。
+
 ### Schema boundary
 
 必须符合以下边界：
