@@ -238,7 +238,6 @@ node_modules/
 
 # Local Runtime Data
 data/
-docs/
 eval/
 STABILITY_TEST_REPORT.md
 .worktrees/
