@@ -15,6 +15,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - 新增 `skills/SKILL.md` 描述插件记忆管理能力。
   - 版本号升级至 v0.8.4。
 
+### Added
+
+- **extra_user_temp 注入位置** — 基于 `TextPart(...).mark_as_temp()` 的动态记忆注入，不污染会话历史。(TMEAAA-300)
+  - 新增 `inject_position=extra_user_temp` 选项（默认仍为 `system_prompt`）。
+  - 当运行环境不支持 `mark_as_temp()` 时自动回退到 `system_prompt` 注入。
+
 ## [v0.8.3] - 2026-05-04
 
 ### Changed
