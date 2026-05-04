@@ -1,0 +1,3 @@
+name: MemoryForge
+description: AstrBot intelligent long-term memory plugin with auto-capture, LLM distillation, vector retrieval, conflict detection, and cross-adapter user memory merging
+short_desc: Intelligent long-term memory plugin with auto-capture, distillation, and retrieval
