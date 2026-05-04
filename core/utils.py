@@ -113,6 +113,15 @@ class PluginHelpersMixin:
         elif self._cfg.inject_position == "user_message_after":
             original_prompt = getattr(req, "prompt", "") or ""
             req.prompt = original_prompt + ("\n\n" if original_prompt else "") + block
+        elif self._cfg.inject_position == "extra_user_temp":
+            from astrbot.core.agent.message import TextPart
+            part = TextPart(text=block)
+            mark_fn = getattr(part, "mark_as_temp", None)
+            if callable(mark_fn):
+                mark_fn()
+            if not hasattr(req, "extra_user_content_parts") or req.extra_user_content_parts is None:
+                req.extra_user_content_parts = []
+            req.extra_user_content_parts.append(part)
         else:  # system_prompt
             existing = getattr(req, "system_prompt", "") or ""
             req.system_prompt = existing + ("\n\n" if existing else "") + block

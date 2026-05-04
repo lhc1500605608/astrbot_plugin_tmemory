@@ -120,6 +120,7 @@ class DummyReq:
     def __init__(self, prompt: str = "", system_prompt: str = ""):
         self.prompt = prompt
         self.system_prompt = system_prompt
+        self.extra_user_content_parts = []
 
 
 class DummyEvent:
@@ -241,6 +242,47 @@ def test_inject_user_message_after_appends_to_prompt(plugin):
         "Memory must be appended to user prompt"
     )
     assert req.system_prompt == "你是AI助手。", "System prompt must be unchanged"
+
+
+# ── extra_user_temp mode ───────────────────────────────────────────────────────
+
+def test_inject_extra_user_temp_appends_to_extra_parts(plugin):
+    """Memory block is appended to req.extra_user_content_parts, not prompt/system."""
+    plugin._cfg.inject_position = "extra_user_temp"
+    req = DummyReq(prompt="今天天气怎么样？", system_prompt="你是AI助手。")
+
+    plugin._inject_block_by_position(req, "[用户记忆]\n- (fact) 用户在北京")
+
+    assert len(req.extra_user_content_parts) == 1, (
+        "Memory block must be appended to extra_user_content_parts"
+    )
+    part = req.extra_user_content_parts[0]
+    assert "[用户记忆]" in part.text
+    assert "用户在北京" in part.text
+
+
+def test_inject_extra_user_temp_preserves_prompt_and_system(plugin):
+    """extra_user_temp must not modify req.prompt or req.system_prompt."""
+    plugin._cfg.inject_position = "extra_user_temp"
+    req = DummyReq(prompt="你好", system_prompt="你是AI助手。")
+
+    plugin._inject_block_by_position(req, "[用户记忆]\n- (preference) 用户喜欢咖啡")
+
+    assert req.prompt == "你好", "User prompt must be unchanged"
+    assert req.system_prompt == "你是AI助手。", "System prompt must be unchanged"
+
+
+def test_inject_extra_user_temp_part_has_temp_marking(plugin):
+    """The appended part must carry a temporary marker so it is not saved to history."""
+    plugin._cfg.inject_position = "extra_user_temp"
+    req = DummyReq(prompt="测试", system_prompt="你是AI助手。")
+
+    plugin._inject_block_by_position(req, "[用户记忆]\n- (fact) 用户是工程师")
+
+    part = req.extra_user_content_parts[0]
+    assert getattr(part, "_temp", False) is True, (
+        "Part must be marked as temporary (mark_as_temp was called)"
+    )
 
 
 # ── End-to-end: on_llm_request integration ────────────────────────────────────
