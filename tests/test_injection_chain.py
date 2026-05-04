@@ -5,12 +5,15 @@ but FTS + vector search both produced zero hits, even though memories existed.
 Expected: fall back to score-based retrieval so injection always has candidates.
 """
 
+import sys
+
 import pytest
 
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Helpers
 # ──────────────────────────────────────────────────────────────────────────────
+
 
 def _insert_memory(plugin, canonical_id: str, memory: str, score: float = 0.8) -> int:
     return plugin._insert_memory(
@@ -28,6 +31,7 @@ def _insert_memory(plugin, canonical_id: str, memory: str, score: float = 0.8) -
 # ──────────────────────────────────────────────────────────────────────────────
 # Tests
 # ──────────────────────────────────────────────────────────────────────────────
+
 
 @pytest.mark.asyncio
 async def test_retrieve_memories_with_empty_query_returns_candidates(plugin):
@@ -81,8 +85,17 @@ async def test_build_injection_block_fts_miss_still_produces_block(plugin):
             "INSERT INTO profile_items(canonical_user_id, facet_type, content, "
             "normalized_content, status, confidence, importance, stability, "
             "created_at, updated_at) VALUES(?, ?, ?, ?, 'active', ?, ?, ?, ?, ?)",
-            ("u4", "fact", "用户是一名软件工程师", "用户是一名软件工程师",
-             0.8, 0.7, 0.5, now, now),
+            (
+                "u4",
+                "fact",
+                "用户是一名软件工程师",
+                "用户是一名软件工程师",
+                0.8,
+                0.7,
+                0.5,
+                now,
+                now,
+            ),
         )
 
     block = await plugin._build_knowledge_injection("u4", "XYZNOTFOUND", limit=5)
@@ -117,6 +130,7 @@ async def test_retrieve_memories_respects_limit(plugin):
 
 class DummyReq:
     """Minimal ProviderRequest stub for injection-position unit tests."""
+
     def __init__(self, prompt: str = "", system_prompt: str = ""):
         self.prompt = prompt
         self.system_prompt = system_prompt
@@ -136,6 +150,7 @@ class DummyEvent:
 
 
 # ── system_prompt mode (default) ──────────────────────────────────────────────
+
 
 def test_inject_system_prompt_keeps_static_prefix_first(plugin):
     """Static system prompt stays at position 0; memory block appended after."""
@@ -165,6 +180,7 @@ def test_inject_system_prompt_does_not_modify_user_prompt(plugin):
 
 
 # ── slot mode ─────────────────────────────────────────────────────────────────
+
 
 def test_inject_slot_absent_appends_to_suffix(plugin):
     """When slot marker is absent, memory appends after static prefix."""
@@ -217,6 +233,7 @@ def test_inject_slot_at_start_allows_user_explicit_choice(plugin):
 
 # ── user_message modes (unchanged) ────────────────────────────────────────────
 
+
 def test_inject_user_message_before_prepends_to_prompt(plugin):
     """user_message_before: memory block prepended to user prompt."""
     plugin._cfg.inject_position = "user_message_before"
@@ -224,7 +241,9 @@ def test_inject_user_message_before_prepends_to_prompt(plugin):
 
     plugin._inject_block_by_position(req, "[用户记忆]\n- (fact) 用户在北京")
 
-    assert req.prompt.startswith("[用户记忆]"), "Memory must be prepended to user prompt"
+    assert req.prompt.startswith("[用户记忆]"), (
+        "Memory must be prepended to user prompt"
+    )
     assert "今天天气怎么样？" in req.prompt
     assert req.system_prompt == "你是AI助手。", "System prompt must be unchanged"
 
@@ -245,6 +264,7 @@ def test_inject_user_message_after_appends_to_prompt(plugin):
 
 
 # ── extra_user_temp mode ───────────────────────────────────────────────────────
+
 
 def test_inject_extra_user_temp_appends_to_extra_parts(plugin):
     """Memory block is appended to req.extra_user_content_parts, not prompt/system."""
@@ -285,7 +305,53 @@ def test_inject_extra_user_temp_part_has_temp_marking(plugin):
     )
 
 
+def test_inject_extra_user_temp_without_mark_as_temp_falls_back_to_system_prompt(
+    plugin,
+):
+    """When mark_as_temp() is not available, fall back to system_prompt injection.
+
+    Do NOT silently append to extra_user_content_parts as a regular part —
+    that would violate the "don't write to history" semantic.
+    """
+    plugin._cfg.inject_position = "extra_user_temp"
+    req = DummyReq(prompt="今天天气怎么样？", system_prompt="你是AI助手。")
+
+    # Monkeypatch TextPart to a version WITHOUT mark_as_temp
+    msg_mod = sys.modules["astrbot.core.agent.message"]
+    original_text_part = msg_mod.TextPart
+
+    class TextPartNoMark:
+        def __init__(self, text: str):
+            self.text = text
+            self.type = "text"
+            self._temp = False
+
+    msg_mod.TextPart = TextPartNoMark
+
+    try:
+        plugin._inject_block_by_position(req, "[用户记忆]\n- (fact) 用户在北京")
+
+        # Must NOT use extra_user_content_parts (no temp marking available)
+        assert len(req.extra_user_content_parts) == 0, (
+            "extra_user_content_parts must be empty when mark_as_temp is unavailable"
+        )
+
+        # Must fall back to system_prompt injection
+        assert "[用户记忆]" in req.system_prompt, (
+            "Memory block must be injected into system_prompt as fallback"
+        )
+        assert req.system_prompt.startswith("你是AI助手。"), (
+            "Static system prompt must remain at the start in fallback"
+        )
+
+        # User prompt must be unchanged
+        assert req.prompt == "今天天气怎么样？", "User prompt must be unchanged"
+    finally:
+        msg_mod.TextPart = original_text_part
+
+
 # ── End-to-end: on_llm_request integration ────────────────────────────────────
+
 
 @pytest.mark.asyncio
 async def test_on_llm_request_injects_profile_after_static_prefix(plugin):
@@ -297,8 +363,17 @@ async def test_on_llm_request_injects_profile_after_static_prefix(plugin):
             "INSERT INTO profile_items(canonical_user_id, facet_type, content, "
             "normalized_content, status, confidence, importance, stability, "
             "created_at, updated_at) VALUES(?, ?, ?, ?, 'active', ?, ?, ?, ?, ?)",
-            ("qq:42", "preference", "用户喜欢喝咖啡", "用户喜欢喝咖啡",
-             0.8, 0.7, 0.5, now, now),
+            (
+                "qq:42",
+                "preference",
+                "用户喜欢喝咖啡",
+                "用户喜欢喝咖啡",
+                0.8,
+                0.7,
+                0.5,
+                now,
+                now,
+            ),
         )
 
     plugin._cfg.inject_position = "system_prompt"
@@ -322,7 +397,10 @@ async def test_on_llm_request_injects_profile_after_static_prefix(plugin):
 # Dual-channel summary separation tests  (TMEAAA-198)
 # ──────────────────────────────────────────────────────────────────────────────
 
-def _insert_typed_memory(plugin, canonical_id: str, memory: str, memory_type: str, score: float = 0.8) -> int:
+
+def _insert_typed_memory(
+    plugin, canonical_id: str, memory: str, memory_type: str, score: float = 0.8
+) -> int:
     return plugin._insert_memory(
         canonical_id=canonical_id,
         adapter="qq",
@@ -349,7 +427,9 @@ async def test_style_memory_gets_persona_channel(plugin):
 @pytest.mark.asyncio
 async def test_fact_memory_gets_canonical_channel(plugin):
     """Non-style memories are automatically tagged as canonical channel."""
-    mid = _insert_typed_memory(plugin, "u-dc2", "用户喜欢喝咖啡", memory_type="preference")
+    mid = _insert_typed_memory(
+        plugin, "u-dc2", "用户喜欢喝咖啡", memory_type="preference"
+    )
     with plugin._db() as conn:
         row = conn.execute(
             "SELECT summary_channel FROM memories WHERE id=?", (mid,)
@@ -361,7 +441,9 @@ async def test_fact_memory_gets_canonical_channel(plugin):
 async def test_canonical_retrieval_excludes_persona_memories(plugin):
     """Retrieval with summary_channel='canonical' excludes style/persona memories."""
     _insert_typed_memory(plugin, "u-dc3", "用户喜欢爬山", memory_type="preference")
-    _insert_typed_memory(plugin, "u-dc3", "用户沟通风格随意，常用'哈哈'", memory_type="style")
+    _insert_typed_memory(
+        plugin, "u-dc3", "用户沟通风格随意，常用'哈哈'", memory_type="style"
+    )
 
     results = await plugin._retrieve_memories(
         "u-dc3", "爬山", limit=5, summary_channel="canonical"
@@ -398,15 +480,33 @@ async def test_build_knowledge_injection_dual_channel(plugin):
             "INSERT INTO profile_items(canonical_user_id, facet_type, content, "
             "normalized_content, status, confidence, importance, stability, "
             "created_at, updated_at) VALUES(?, ?, ?, ?, 'active', ?, ?, ?, ?, ?)",
-            ("u-dc5", "preference", "用户喜欢喝绿茶", "用户喜欢喝绿茶",
-             0.8, 0.7, 0.5, now, now),
+            (
+                "u-dc5",
+                "preference",
+                "用户喜欢喝绿茶",
+                "用户喜欢喝绿茶",
+                0.8,
+                0.7,
+                0.5,
+                now,
+                now,
+            ),
         )
         conn.execute(
             "INSERT INTO profile_items(canonical_user_id, facet_type, content, "
             "normalized_content, status, confidence, importance, stability, "
             "created_at, updated_at) VALUES(?, ?, ?, ?, 'active', ?, ?, ?, ?, ?)",
-            ("u-dc5", "style", "用户沟通风格简短，常用'好的'回复", "用户沟通风格简短，常用'好的'回复",
-             0.7, 0.6, 0.5, now, now),
+            (
+                "u-dc5",
+                "style",
+                "用户沟通风格简短，常用'好的'回复",
+                "用户沟通风格简短，常用'好的'回复",
+                0.7,
+                0.6,
+                0.5,
+                now,
+                now,
+            ),
         )
 
     block = await plugin._build_knowledge_injection("u-dc5", "绿茶", limit=5)
@@ -425,8 +525,17 @@ async def test_build_knowledge_injection_style_only_no_query_pollution(plugin):
             "INSERT INTO profile_items(canonical_user_id, facet_type, content, "
             "normalized_content, status, confidence, importance, stability, "
             "created_at, updated_at) VALUES(?, ?, ?, ?, 'active', ?, ?, ?, ?, ?)",
-            ("u-dc6", "style", "用户常用'哈哈'和emoji表达情绪", "用户常用'哈哈'和emoji表达情绪",
-             0.7, 0.6, 0.5, now, now),
+            (
+                "u-dc6",
+                "style",
+                "用户常用'哈哈'和emoji表达情绪",
+                "用户常用'哈哈'和emoji表达情绪",
+                0.7,
+                0.6,
+                0.5,
+                now,
+                now,
+            ),
         )
 
     block = await plugin._build_knowledge_injection("u-dc6", "今天吃什么", limit=5)
