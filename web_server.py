@@ -217,6 +217,10 @@ class TMemoryWebServer:
                         request.method,
                         request.path,
                     )
+                    if path.startswith("/api/"):
+                        return web.json_response(
+                            {"error": f"未找到: {request.path}"}, status=404
+                        )
                 raise
             except Exception as exc:
                 _astrbot_logger.exception(
@@ -253,6 +257,9 @@ class TMemoryWebServer:
                     "[tmemory-web] route not found after auth: %s %s",
                     request.method,
                     request.path,
+                )
+                return web.json_response(
+                    {"error": f"未找到: {request.path}"}, status=404
                 )
             raise
         except Exception as exc:

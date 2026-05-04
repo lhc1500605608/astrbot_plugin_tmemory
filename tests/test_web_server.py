@@ -140,6 +140,43 @@ def test_web_middleware_preserves_http_not_found_from_handler(web_module, plugin
             "webui_password": "secret",
         },
     )
+
+    async def missing_handler(_request):
+        raise web.HTTPNotFound(text="missing route")
+
+    class Request:
+        def __init__(self):
+            self.path = "/static/missing.js"
+            self.headers = {}
+            self.query = {}
+            self.method = "GET"
+            self.transport = self
+            self._storage = {}
+
+        def get_extra_info(self, name):
+            if name == "peername":
+                return ("127.0.0.1", 12345)
+            return None
+
+        def __setitem__(self, key, value):
+            self._storage[key] = value
+
+        def __getitem__(self, key):
+            return self._storage[key]
+
+    with pytest.raises(web.HTTPNotFound):
+        asyncio.run(server._middleware(Request(), missing_handler))
+
+
+def test_web_middleware_converts_not_found_to_json_for_api_routes(web_module, plugin):
+    """Non-static 404s are returned as JSON so the frontend can parse the error."""
+    server = web_module.TMemoryWebServer(
+        plugin,
+        {
+            "webui_enabled": True,
+            "webui_password": "secret",
+        },
+    )
     token = web_module.jwt_encode({"user": "admin"}, server._jwt_secret, 3600)
 
     async def missing_handler(_request):
@@ -149,6 +186,45 @@ def test_web_middleware_preserves_http_not_found_from_handler(web_module, plugin
         def __init__(self):
             self.path = "/api/missing"
             self.headers = {"Authorization": f"Bearer {token}"}
+            self.query = {}
+            self.method = "GET"
+            self.transport = self
+            self._storage = {}
+
+        def get_extra_info(self, name):
+            if name == "peername":
+                return ("127.0.0.1", 12345)
+            return None
+
+        def __setitem__(self, key, value):
+            self._storage[key] = value
+
+        def __getitem__(self, key):
+            return self._storage[key]
+
+    resp = asyncio.run(server._middleware(Request(), missing_handler))
+    assert resp.status == 404
+    body = json.loads(resp.text) if hasattr(resp, "text") else json.loads(resp.body)
+    assert "未找到" in body.get("error", "")
+
+
+def test_web_middleware_still_re_raises_404_for_static_routes(web_module, plugin):
+    """Static resource 404s are re-raised so aiohttp can serve its default response."""
+    server = web_module.TMemoryWebServer(
+        plugin,
+        {
+            "webui_enabled": True,
+            "webui_password": "secret",
+        },
+    )
+
+    async def missing_handler(_request):
+        raise web.HTTPNotFound(text="missing file")
+
+    class Request:
+        def __init__(self):
+            self.path = "/static/js/nonexistent.js"
+            self.headers = {}
             self.query = {}
             self.method = "GET"
             self.transport = self
