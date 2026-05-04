@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v0.8.5] - 2026-05-04
+
+### Added
+
+- **蒸馏全链路集成测试** — `tests/test_distill_integration.py`，15 用例覆盖 LLM 蒸馏、规则蒸馏、多用户、节流、历史记录、记忆标记与向量化。(TMEAAA-35, TMEAAA-53)
+- **真实环境对话集成验证** — 通过本地 AstrBot 8 轮多轮对话，验证自动采集 → 缓存 → 蒸馏 → 记忆注入全链路。
+
+### Changed
+
+- **真实环境测试路径适配** — `test_real_astrbot_integration.py` 硬编码路径改为容器兼容路径。
+
+### Removed
+
+- **冗余测试文件** — 移除 `test_distill_false_empty.py`，用例已并入 `test_distill_integration.py`。
+
 ## [v0.8.4] - 2026-05-04
 
 ### Changed
