@@ -76,6 +76,8 @@ def test_plugin_is_discoverable_from_real_astrbot_plugin_directory(tmp_path):
         import shutil
         import sys
 
+        import yaml
+
         from astrbot.core.star.star_manager import PluginManager
         from astrbot.core.utils.astrbot_path import get_astrbot_plugin_path
 
@@ -96,10 +98,12 @@ def test_plugin_is_discoverable_from_real_astrbot_plugin_directory(tmp_path):
         plugin_name = PluginManager._get_plugin_dir_name_from_metadata(str(installed_plugin))
         assert plugin_name == "astrbot_plugin_tmemory"
 
+        expected_metadata = yaml.safe_load((repo_root / "metadata.yaml").read_text(encoding="utf-8"))
+
         metadata = PluginManager._load_plugin_metadata(str(installed_plugin))
         assert metadata is not None
         assert metadata.name == "astrbot_plugin_tmemory"
-        assert metadata.version == "v0.8.3"
+        assert metadata.version == expected_metadata["version"]
 
         module = importlib.import_module("data.plugins.astrbot_plugin_tmemory.main")
         assert module.TMemoryPlugin.__name__ == "TMemoryPlugin"
