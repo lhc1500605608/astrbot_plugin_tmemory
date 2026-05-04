@@ -2,32 +2,35 @@
 
 **MemoryForge** 是 [AstrBot](https://github.com/AstrBotDevs/AstrBot) 的长期记忆插件，通过自动采集对话、LLM 蒸馏和分层注入，让机器人在多轮、跨会话、跨平台场景下持续理解用户。
 
-> 当前版本：`v0.8.2`。0.8.0 引入三层记忆架构（Working → Episodic → Semantic）和分层注入策略。
+> 当前版本：`v0.8.3`。0.8.3 将记忆系统重构为用户画像模式，以用户为中心的结构化知识图谱替代三层管道。
 
 ## 功能概览
 
-- **三层记忆架构**：工作记忆（当前会话）→ 情节记忆（会话摘要）→ 语义记忆（长期知识）
+- **用户画像架构**：以用户为中心的五维画像（偏好·事实·风格·限制·任务模式），结构化存储用户长期认知
 - **自动采集**：监听用户消息，可选采集助手回复
-- **LLM 蒸馏**：后台 worker 批量提炼对话为结构化长期记忆（偏好、事实、任务、限制、风格）
+- **画像形成**：后台 worker 从对话中提炼画像条目（profile_items），附带证据链溯源
 - **主动工具**：`remember` / `recall` LLM tool，支持模型主动保存和检索记忆
-- **分层注入**：在 LLM 请求前按 Working → Episodic → Semantic → Style 结构化注入上下文
-- **混合检索**：FTS5 全文检索 + 可选向量检索 + RRF 融合排序
+- **画像注入**：在 LLM 请求前按画像面（facet）结构化注入上下文，零 LLM 热路径
+- **混合检索**：FTS5 全文检索 + 可选向量检索 + RRF 融合排序，支持按画像面检索
 - **记忆维护**：强化、衰减、固定、提纯、合并、拆分、失活
 - **身份合并**：通过 `canonical_user_id` 合并同一用户跨平台记忆
-- **WebUI 管理面板**：可选记忆管理、思维导图、审计日志和手动蒸馏
+- **WebUI 管理面板**：可选画像工作台、审计日志和手动蒸馏
 
 ## 工作流程
 
 ```text
 用户/助手消息
   ↓ 自动采集
-conversation_cache (工作记忆)
-  ↓ LLM 情节摘要
-memory_episodes (情节记忆)
-  ↓ LLM 语义提炼
-memories (语义记忆)
+conversation_cache (原始证据)
+  ↓ LLM 画像形成
+profile_items (用户画像条目)
+  ├─ preference  偏好
+  ├─ fact        事实
+  ├─ style       风格
+  ├─ restriction 限制
+  └─ task_pattern 任务模式
   ↓ FTS5 / 向量 / RRF 召回
-LLM 请求前分层注入上下文
+LLM 请求前按画像面结构化注入
   ↓
 模型生成更个性化的回复
 ```
@@ -78,13 +81,13 @@ LLM 请求前分层注入上下文
 | `remember` | `content`, `memory_type` | 保存长期记忆。type: preference/fact/task/restriction/style |
 | `recall` | `query` | 检索相关记忆 |
 
-## 记忆类型
+## 画像维度
 
-| 类型 | 含义 | 示例 |
+| 维度 | 含义 | 示例 |
 |------|------|------|
 | `preference` | 偏好 | "用户喜欢简洁回答" |
 | `fact` | 事实 | "用户是 Python 开发者" |
-| `task` | 待办/计划 | "用户正在准备产品发布" |
+| `task_pattern` | 任务模式 | "用户常在晚上9点后开始工作" |
 | `restriction` | 约束 | "不要向用户推荐含花生的食物" |
 | `style` | 风格 | "用户希望先给结论再解释" |
 
@@ -96,7 +99,7 @@ LLM 请求前分层注入上下文
 data/plugin_data/astrbot_plugin_tmemory/tmemory.db
 ```
 
-核心表：`identity_bindings`、`conversation_cache`、`memory_episodes`、`episode_sources`、`memories`、`memories_fts`、`memory_vectors`、`memory_events`、`distill_history`。
+核心表：`identity_bindings`、`conversation_cache`、`user_profiles`、`profile_items`、`profile_item_evidence`、`profile_relations`、`memory_vectors`、`memory_events`、`distill_history`。
 
 ## 常见问题
 

@@ -5,6 +5,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v0.8.3] - 2026-05-04
+
+### Changed
+
+- **用户画像重构** — 将记忆系统从三层管道（Working→Episodic→Semantic）重构为用户画像模式。(TMEAAA-280)
+  - 新增 `user_profiles`、`profile_items`、`profile_item_evidence`、`profile_relations` 表作为长期画像事实来源。
+  - 五个画像面：`preference`、`fact`、`style`、`restriction`、`task_pattern`。
+  - 检索与注入链路完全切换到画像条目，支持按画像面检索和注入。
+  - `memories`、`memory_episodes`、`episode_sources` 停用主链路；`identity_bindings` 与 `conversation_cache` 保留。
+  - WebUI 从思维导图切换为画像工作台，删除 mindmap.js，新增 profile.js。
+  - 无旧版兼容；本版本不保留旧数据迁移路径。
+
+### Added
+
+- 画像条目支持证据链溯源（`profile_item_evidence`），关联原始对话与提炼上下文。
+- 画像面关系表 `profile_relations` 支持轻量跨面关联。
+
+### Removed
+
+- 移除三层记忆思维导图可视化及相关 UI 组件。
+- 停用 `memory_episodes` / `episode_sources` / `memories` 旧表在主数据链路中的角色。
+
 ## [v0.7.1] - 2026-05-02
 
 ### Fixed
