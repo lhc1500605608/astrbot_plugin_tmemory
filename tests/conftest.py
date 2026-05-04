@@ -67,12 +67,40 @@ def _install_astrbot_stubs() -> None:
     star_mod.Star = Star
     star_mod.register = register
 
+    # Minimal stubs for astrbot.core.agent.message (TextPart / ContentPart / Message)
+    core_mod = types.ModuleType("astrbot.core")
+    agent_mod = types.ModuleType("astrbot.core.agent")
+    message_mod = types.ModuleType("astrbot.core.agent.message")
+
+    class _StubContentPart:
+        pass
+
+    class _StubTextPart:
+        def __init__(self, text: str):
+            self.text = text
+            self.type = "text"
+            self._temp = False
+
+        def mark_as_temp(self):
+            self._temp = True
+            return self
+
+    class _StubMessage:
+        _no_save: bool = False
+
+    message_mod.ContentPart = _StubContentPart
+    message_mod.TextPart = _StubTextPart
+    message_mod.Message = _StubMessage
+
     astrbot_mod.api = api_mod
     sys.modules["astrbot"] = astrbot_mod
     sys.modules["astrbot.api"] = api_mod
     sys.modules["astrbot.api.event"] = event_mod
     sys.modules["astrbot.api.provider"] = provider_mod
     sys.modules["astrbot.api.star"] = star_mod
+    sys.modules["astrbot.core"] = core_mod
+    sys.modules["astrbot.core.agent"] = agent_mod
+    sys.modules["astrbot.core.agent.message"] = message_mod
 
 
 def _load_package_module(module_name: str, file_name: str):

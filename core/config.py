@@ -249,7 +249,7 @@ def parse_config(raw_config: dict) -> PluginConfig:
     c.private_memory_in_group = _safe_bool(raw_config.get("private_memory_in_group", False), False, label="private_memory_in_group")
     
     c.inject_position = str(raw_config.get("inject_position", "system_prompt")).strip().lower()
-    if c.inject_position not in {"system_prompt", "user_message_before", "user_message_after", "slot"}:
+    if c.inject_position not in {"system_prompt", "user_message_before", "user_message_after", "slot", "extra_user_temp"}:
         c.inject_position = "system_prompt"
     c.inject_slot_marker = str(raw_config.get("inject_slot_marker", "{{tmemory}}")).strip()
     c.inject_memory_limit = _safe_int(raw_config.get("inject_memory_limit", 5), 5, label="inject_memory_limit")

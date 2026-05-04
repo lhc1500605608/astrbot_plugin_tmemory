@@ -218,8 +218,9 @@
   "inject_position": {
     "type": "string",
     "description": "记忆注入位置",
-    "hint": "system_prompt（默认）：追加到 system_prompt 末尾；user_message_before：作为用户消息前缀；user_message_after：作为用户消息后缀；slot：替换 system_prompt 中的占位符（见 inject_slot_marker）。",
-    "default": "system_prompt"
+    "hint": "system_prompt（默认）：追加到 system_prompt 末尾；user_message_before：作为用户消息前缀；user_message_after：作为用户消息后缀；slot：替换 system_prompt 中的占位符（见 inject_slot_marker）；extra_user_temp：追加到当前请求且不写入会话历史。",
+    "default": "system_prompt",
+    "options": ["system_prompt", "user_message_before", "user_message_after", "slot", "extra_user_temp"]
   },
   "inject_slot_marker": {
     "type": "string",
