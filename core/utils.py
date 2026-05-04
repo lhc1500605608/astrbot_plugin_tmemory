@@ -156,7 +156,6 @@ class PluginHelpersMixin:
 
     def _resolve_db_path(self) -> str:
         cwd = os.getcwd()
-        plugin_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         candidates = []
 
         try:
@@ -170,7 +169,6 @@ class PluginHelpersMixin:
             [
                 os.path.join(cwd, "data", "plugin_data", self.plugin_name),
                 os.path.join(cwd, "plugin_data", self.plugin_name),
-                os.path.join(plugin_root, "data"),
             ]
         )
 
@@ -181,7 +179,9 @@ class PluginHelpersMixin:
             except OSError:
                 continue
 
-        return os.path.join(plugin_root, "tmemory.db")
+        raise RuntimeError(
+            f"[tmemory] 无法创建持久化数据目录。已尝试: {candidates}"
+        )
 
     def _init_db(self):
         self._db_mgr.init_db(self._vec_available, getattr(self, "embed_dim", 768))

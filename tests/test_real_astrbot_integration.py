@@ -99,7 +99,7 @@ def test_plugin_is_discoverable_from_real_astrbot_plugin_directory(tmp_path):
         metadata = PluginManager._load_plugin_metadata(str(installed_plugin))
         assert metadata is not None
         assert metadata.name == "astrbot_plugin_tmemory"
-        assert metadata.version == "v0.8.2"
+        assert metadata.version == "v0.8.3"
 
         module = importlib.import_module("data.plugins.astrbot_plugin_tmemory.main")
         assert module.TMemoryPlugin.__name__ == "TMemoryPlugin"
