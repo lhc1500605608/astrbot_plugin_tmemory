@@ -5,6 +5,7 @@ import json
 from typing import Dict, Optional
 import sqlite3
 
+
 class MemoryLogger:
     def __init__(self, db_manager):
         self._db_mgr = db_manager
@@ -115,13 +116,29 @@ class PluginHelpersMixin:
             req.prompt = original_prompt + ("\n\n" if original_prompt else "") + block
         elif self._cfg.inject_position == "extra_user_temp":
             from astrbot.core.agent.message import TextPart
+
             part = TextPart(text=block)
             mark_fn = getattr(part, "mark_as_temp", None)
             if callable(mark_fn):
                 mark_fn()
-            if not hasattr(req, "extra_user_content_parts") or req.extra_user_content_parts is None:
-                req.extra_user_content_parts = []
-            req.extra_user_content_parts.append(part)
+                if (
+                    not hasattr(req, "extra_user_content_parts")
+                    or req.extra_user_content_parts is None
+                ):
+                    req.extra_user_content_parts = []
+                req.extra_user_content_parts.append(part)
+            else:
+                # mark_as_temp() unavailable in this AstrBot version: cannot
+                # guarantee "don't write to history" via extra_user_content_parts.
+                # Fall back to system_prompt injection to avoid silently
+                # persisting memory blocks as regular conversation history.
+                logger.warning(
+                    "[tmemory] mark_as_temp() not available in this AstrBot "
+                    "version; falling back to system_prompt injection for "
+                    "extra_user_temp position"
+                )
+                existing = getattr(req, "system_prompt", "") or ""
+                req.system_prompt = existing + ("\n\n" if existing else "") + block
         else:  # system_prompt
             existing = getattr(req, "system_prompt", "") or ""
             req.system_prompt = existing + ("\n\n" if existing else "") + block
@@ -170,7 +187,9 @@ class PluginHelpersMixin:
         try:
             from astrbot.core.utils.astrbot_path import get_astrbot_data_path
 
-            candidates.append(os.path.join(get_astrbot_data_path(), "plugin_data", self.plugin_name))
+            candidates.append(
+                os.path.join(get_astrbot_data_path(), "plugin_data", self.plugin_name)
+            )
         except Exception:
             pass
 
@@ -188,9 +207,7 @@ class PluginHelpersMixin:
             except OSError:
                 continue
 
-        raise RuntimeError(
-            f"[tmemory] 无法创建持久化数据目录。已尝试: {candidates}"
-        )
+        raise RuntimeError(f"[tmemory] 无法创建持久化数据目录。已尝试: {candidates}")
 
     def _init_db(self):
         self._db_mgr.init_db(self._vec_available, getattr(self, "embed_dim", 768))
@@ -223,18 +240,23 @@ class PluginHelpersMixin:
 
     def _delete_vector(self, memory_id: int, conn=None) -> None:
         from . import vector as _vec
+
         _vec.delete_vector(self, memory_id, conn)
 
     def _delete_vectors_for_user(self, canonical_id: str, conn=None) -> None:
         from . import vector as _vec
+
         _vec.delete_vectors_for_user(self, canonical_id, conn)
 
     async def _rebuild_vector_index(self) -> Tuple[int, int]:
         return await _vector.rebuild_vector_index(self)
 
     def _log_memory_event(
-        self, canonical_user_id: str, event_type: str,
-        payload: Dict[str, object], conn: Optional[sqlite3.Connection] = None,
+        self,
+        canonical_user_id: str,
+        event_type: str,
+        payload: Dict[str, object],
+        conn: Optional[sqlite3.Connection] = None,
     ):
         """记录记忆相关事件到审计日志 memory_events。"""
         _memory_ops.log_memory_event(self, canonical_user_id, event_type, payload, conn)
@@ -249,6 +271,7 @@ class PluginHelpersMixin:
     def _platform_str(val):
         try:
             from astrbot.core.platform.platform_metadata import PlatformMetadata  # type: ignore
+
             if isinstance(val, PlatformMetadata):
                 return val.id or val.name
         except ImportError:
@@ -363,6 +386,7 @@ class PluginHelpersMixin:
         scope: str = "user",
     ) -> int:
         from .memory_ops import MemoryOps
+
         return MemoryOps(self).insert_memory(
             canonical_id=canonical_id,
             adapter=adapter,
@@ -462,7 +486,12 @@ class PluginHelpersMixin:
         deduped = self._retrieval_mgr.deduplicate_results(scored, limit * 2)
 
         # 可选 Reranker:对候选结果做精排
-        if self._cfg.enable_reranker and self._cfg.rerank_base_url and query and len(deduped) > 1:
+        if (
+            self._cfg.enable_reranker
+            and self._cfg.rerank_base_url
+            and query
+            and len(deduped) > 1
+        ):
             top_result = await self._rerank_results(query, deduped, limit)
         else:
             top_result = deduped[:limit]
@@ -493,6 +522,7 @@ class PluginHelpersMixin:
         extra_instruction: str,
     ) -> Dict[str, object]:
         from .memory_ops import MemoryOps
+
         return await MemoryOps(self).manual_purify_memories(
             event=event,
             canonical_id=canonical_id,
@@ -510,7 +540,9 @@ class PluginHelpersMixin:
         mode: str,
         extra_instruction: str,
     ) -> Dict[str, object]:
-        return await _maintenance.llm_purify_operations(self, event, rows, mode, extra_instruction)
+        return await _maintenance.llm_purify_operations(
+            self, event, rows, mode, extra_instruction
+        )
 
     async def _manual_refine_memories(
         self,
@@ -605,11 +637,19 @@ class PluginHelpersMixin:
             )
 
     def _update_memory_full(
-        self, memory_id: int, memory: str, memory_type: str,
-        score: float, importance: float, confidence: float,
+        self,
+        memory_id: int,
+        memory: str,
+        memory_type: str,
+        score: float,
+        importance: float,
+        confidence: float,
     ) -> None:
         from . import memory_ops as _mo
-        _mo.update_memory_full(self, memory_id, memory, memory_type, score, importance, confidence)
+
+        _mo.update_memory_full(
+            self, memory_id, memory, memory_type, score, importance, confidence
+        )
 
     def _auto_merge_memory_text(self, memories: List[str]) -> str:
         """无 LLM 时的简单合并策略:去重后拼接。"""
@@ -658,13 +698,28 @@ class PluginHelpersMixin:
         )
 
     def _insert_conversation_sync(
-        self, canonical_id: str, role: str, content: str, source_adapter: str,
-        source_user_id: str, unified_msg_origin: str, scope: str = "user", persona_id: str = "",
+        self,
+        canonical_id: str,
+        role: str,
+        content: str,
+        source_adapter: str,
+        source_user_id: str,
+        unified_msg_origin: str,
+        scope: str = "user",
+        persona_id: str = "",
     ):
         from . import maintenance as _m
+
         _m.insert_conversation_sync(
-            self, canonical_id, role, content, source_adapter,
-            source_user_id, unified_msg_origin, scope, persona_id,
+            self,
+            canonical_id,
+            role,
+            content,
+            source_adapter,
+            source_user_id,
+            unified_msg_origin,
+            scope,
+            persona_id,
         )
 
     def _fetch_recent_conversation(
@@ -845,7 +900,9 @@ class PluginHandlersMixin:
         if self._capture_filter.should_skip_capture(text):
             return
 
-        canonical_id, adapter, adapter_user = self._identity_mgr.resolve_current_identity(event)
+        canonical_id, adapter, adapter_user = (
+            self._identity_mgr.resolve_current_identity(event)
+        )
         umo = self._safe_get_unified_msg_origin(event)
 
         await self._insert_conversation(
@@ -872,7 +929,9 @@ class PluginHandlersMixin:
             return
 
         try:
-            canonical_id, adapter, adapter_user = self._identity_mgr.resolve_current_identity(event)
+            canonical_id, adapter, adapter_user = (
+                self._identity_mgr.resolve_current_identity(event)
+            )
             umo = self._safe_get_unified_msg_origin(event)
             await self._insert_conversation(
                 canonical_id=canonical_id,
@@ -885,7 +944,9 @@ class PluginHandlersMixin:
         except Exception as e:
             logger.warning("[tmemory] on_llm_response capture failed: %s", e)
 
-    async def _handle_on_llm_request(self, event: AstrMessageEvent, req: ProviderRequest):
+    async def _handle_on_llm_request(
+        self, event: AstrMessageEvent, req: ProviderRequest
+    ):
         """在 LLM 调用前注入用户画像。热路径 zero-LLM。"""
         if not self._cfg.enable_memory_injection:
             return
@@ -896,12 +957,16 @@ class PluginHandlersMixin:
             scope = self._get_memory_scope(event)
             persona_id = await self._get_current_persona_async(event)
             is_group = self._is_group_event(event)
-            exclude_private = (is_group and not self._cfg.private_memory_in_group)
+            exclude_private = is_group and not self._cfg.private_memory_in_group
             session_key = self._safe_get_unified_msg_origin(event)
 
             block = await self._injection_builder.build_profile_injection(
-                canonical_id, query, session_key,
-                scope=scope, persona_id=persona_id, exclude_private=exclude_private,
+                canonical_id,
+                query,
+                session_key,
+                scope=scope,
+                persona_id=persona_id,
+                exclude_private=exclude_private,
             )
             if block:
                 self._inject_block_by_position(req, block)
@@ -932,7 +997,9 @@ class PluginHandlersMixin:
         if self._is_junk_memory(content):
             return "内容信息量过低，未保存。"
 
-        canonical_id, adapter, adapter_user = self._identity_mgr.resolve_current_identity(event)
+        canonical_id, adapter, adapter_user = (
+            self._identity_mgr.resolve_current_identity(event)
+        )
         scope = self._get_memory_scope(event)
         persona_id = self._get_current_persona(event)
 
@@ -1072,9 +1139,7 @@ class PluginHandlersMixin:
         adapter = self._get_adapter_name(event)
         adapter_user = self._get_adapter_user_id(event)
         self._identity_mgr.bind_identity(adapter, adapter_user, canonical_id)
-        yield event.plain_result(
-            f"绑定成功:{adapter}:{adapter_user} -> {canonical_id}"
-        )
+        yield event.plain_result(f"绑定成功:{adapter}:{adapter_user} -> {canonical_id}")
 
     async def _handle_tm_merge(self, event: AstrMessageEvent):
         """合并两个统一用户 ID 的记忆:/tm_merge old_id new_id"""
@@ -1439,6 +1504,3 @@ class PluginHandlersMixin:
         yield event.plain_result(
             f"已清除 {canonical_id} 的所有数据:{deleted['memories']} 条记忆，{deleted['cache']} 条缓存。"
         )
-
-
-
