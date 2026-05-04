@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v0.8.4] - 2026-05-04
+
+### Changed
+
+- **AstrBot v4.24.2 兼容适配** — 更新插件元数据、国际化与技能支持。(TMEAAA-294)
+  - `metadata.yaml` 添加 `astrbot_version`、`short_desc`、`support_platforms` 字段。
+  - 新增 `.astrbot-plugin/i18n/` 中英文翻译（zh-CN / en）。
+  - 新增 `skills/SKILL.md` 描述插件记忆管理能力。
+  - 版本号升级至 v0.8.4。
+
 ## [v0.8.3] - 2026-05-04
 
 ### Changed
