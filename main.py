@@ -17,21 +17,46 @@ from .search.retrieval import RetrievalManager
 from .core.injection import InjectionBuilder
 
 # 插件自身命令名集合，防止 AstrBot 剥离 wake_prefix(/)后控制命令文本进入 conversation_cache
-_CMD_FIRST_WORDS = frozenset({
-    "tm_distill_now", "tm_worker", "tm_memory", "tm_context", "tm_bind", "tm_merge",
-    "tm_forget", "tm_stats", "tm_distill_history", "tm_purify", "tm_quality_refine",
-    "tm_vec_rebuild", "tm_refine", "tm_mem_merge", "tm_mem_split", "tm_pin",
-    "tm_unpin", "tm_export", "tm_purge",
-})
+_CMD_FIRST_WORDS = frozenset(
+    {
+        "tm_distill_now",
+        "tm_worker",
+        "tm_memory",
+        "tm_context",
+        "tm_bind",
+        "tm_merge",
+        "tm_forget",
+        "tm_stats",
+        "tm_distill_history",
+        "tm_purify",
+        "tm_quality_refine",
+        "tm_vec_rebuild",
+        "tm_refine",
+        "tm_mem_merge",
+        "tm_mem_split",
+        "tm_pin",
+        "tm_unpin",
+        "tm_export",
+        "tm_purge",
+    }
+)
 
 
 @register(
     "tmemory",
     "shangtang",
     "AstrBot 用户长期记忆插件(自动采集 + 定时LLM蒸馏 + 跨适配器合并)",
-    "0.8.2",
+    "0.8.4",
 )
-class TMemoryPlugin(PluginLifecycleMixin, DistillRuntimeMixin, ConsolidationRuntimeMixin, ProfileExtractionRuntimeMixin, PluginHelpersMixin, PluginHandlersMixin, Star):
+class TMemoryPlugin(
+    PluginLifecycleMixin,
+    DistillRuntimeMixin,
+    ConsolidationRuntimeMixin,
+    ProfileExtractionRuntimeMixin,
+    PluginHelpersMixin,
+    PluginHandlersMixin,
+    Star,
+):
     def __init__(self, context: Context, config=None):
         super().__init__(context)
         self.config = config or {}
@@ -74,7 +99,9 @@ class TMemoryPlugin(PluginLifecycleMixin, DistillRuntimeMixin, ConsolidationRunt
         self._retrieval_mgr = RetrievalManager(self._cfg, self._db_mgr)
         self._injection_builder = InjectionBuilder(self._cfg, self._retrieval_mgr)
         self._memory_logger = MemoryLogger(self._db_mgr)
-        self._identity_mgr = IdentityManager(self._db_mgr, self._cfg, self._memory_logger)
+        self._identity_mgr = IdentityManager(
+            self._db_mgr, self._cfg, self._memory_logger
+        )
 
         # ── 敏感信息脱敏 ──────────────────────────────────────────────────────
         self._sanitize_patterns = self._build_sanitize_patterns()
@@ -82,16 +109,9 @@ class TMemoryPlugin(PluginLifecycleMixin, DistillRuntimeMixin, ConsolidationRunt
         # ── WebUI 独立服务器(降级保护)────────────────────────────────────
         self._web_server = self._safe_load_web_server()
 
-
-
-
-
-
     # =========================================================================
     # AstrBot 生命周期
     # =========================================================================
-
-
 
     # =========================================================================
     # 消息采集 Hooks
@@ -265,67 +285,7 @@ class TMemoryPlugin(PluginLifecycleMixin, DistillRuntimeMixin, ConsolidationRunt
         async for result in self._handle_tm_mem_split(event):
             yield result
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
     @staticmethod
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("tm_pin")
     async def tm_pin(self, event: AstrMessageEvent):
@@ -353,24 +313,3 @@ class TMemoryPlugin(PluginLifecycleMixin, DistillRuntimeMixin, ConsolidationRunt
         """删除当前用户的所有记忆和缓存:/tm_purge"""
         async for result in self._handle_tm_purge(event):
             yield result
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
