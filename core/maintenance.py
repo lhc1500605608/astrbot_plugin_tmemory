@@ -362,10 +362,6 @@ def purge_user_data(plugin, canonical_id: str) -> Dict[str, int]:
             (canonical_id,),
         )
         conn.execute(
-            "DELETE FROM conversations WHERE canonical_user_id = ?",
-            (canonical_id,),
-        )
-        conn.execute(
             "DELETE FROM identity_bindings WHERE canonical_user_id = ?",
             (canonical_id,),
         )

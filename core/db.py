@@ -6,22 +6,6 @@ from typing import Optional, Dict
 
 logger = logging.getLogger("astrbot")
 
-_DDL_CONVERSATIONS = """
-CREATE TABLE IF NOT EXISTS conversations (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    unified_msg_origin TEXT,
-    canonical_user_id TEXT,
-    role TEXT,
-    content TEXT,
-    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
-    source_adapter TEXT,
-    source_user_id TEXT,
-    distilled INTEGER DEFAULT 0,
-    scope TEXT DEFAULT 'user',
-    persona_id TEXT DEFAULT ''
-)
-"""
-
 _DDL_MEMORIES = """
 CREATE TABLE IF NOT EXISTS memories (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -479,7 +463,6 @@ class DatabaseManager:
 
     def init_db(self, vec_available: bool, embed_dim: int) -> None:
         with self.db() as conn:
-            conn.execute(_DDL_CONVERSATIONS)
             conn.execute(_DDL_MEMORIES)
             conn.execute(_DDL_MEMORY_EVENTS)
             conn.execute(_DDL_IDENTITY_MAPPINGS)
@@ -582,14 +565,10 @@ class DatabaseManager:
                     logger.warning("[tmemory] failed to create vector tables: %s", _ve)
 
             # --- Existing indexes ---
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_conversations_user ON conversations (canonical_user_id, timestamp)")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_conversations_distilled ON conversations (distilled, timestamp)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_memories_user ON memories (canonical_user_id, is_active, updated_at)")
             
             # --- New indexes for scope/persona performance ---
             conn.execute("CREATE INDEX IF NOT EXISTS idx_memories_scope_persona ON memories (canonical_user_id, scope, persona_id)")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_conversations_scope_persona ON conversations (canonical_user_id, scope, persona_id)")
-
             conn.execute("CREATE INDEX IF NOT EXISTS idx_memory_episodes_user_active ON memory_episodes (canonical_user_id, status)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_memory_episodes_session ON memory_episodes (session_key)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_memory_episodes_status ON memory_episodes (status, updated_at)")
