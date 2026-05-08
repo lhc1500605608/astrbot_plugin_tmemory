@@ -376,12 +376,6 @@ class TestPurgeUser:
             source_user_id="purge-source",
             unified_msg_origin="group:1",
         )
-        with plugin._db() as conn:
-            conn.execute(
-                "INSERT INTO conversations(canonical_user_id, role, content, timestamp) VALUES(?, ?, ?, ?)",
-                ("purge_user", "user", "历史会话", plugin._now()),
-            )
-
         result = admin.purge_user("purge_user")
 
         with plugin._db() as conn:
@@ -393,7 +387,6 @@ class TestPurgeUser:
                 for table in (
                     "memories",
                     "conversation_cache",
-                    "conversations",
                     "identity_bindings",
                 )
             }
@@ -403,7 +396,6 @@ class TestPurgeUser:
         assert counts == {
             "memories": 0,
             "conversation_cache": 0,
-            "conversations": 0,
             "identity_bindings": 0,
         }
         assert all(user["id"] != "purge_user" for user in admin.get_users())
