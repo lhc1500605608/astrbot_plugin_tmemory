@@ -46,7 +46,7 @@ _CMD_FIRST_WORDS = frozenset(
     "tmemory",
     "shangtang",
     "AstrBot 用户长期记忆插件(自动采集 + 定时LLM蒸馏 + 跨适配器合并)",
-    "0.8.4",
+    "0.8.5",
 )
 class TMemoryPlugin(
     PluginLifecycleMixin,
@@ -88,7 +88,7 @@ class TMemoryPlugin(
         self._embed_last_error = ""
         self._vec_query_count = 0
         self._vec_hit_count = 0
-        self._embed_semaphore = asyncio.Semaphore(4)
+        self._embed_semaphore = None
         self._http_session = None
         self._distill_skipped_rows: int = 0
         self._user_last_distilled_ts: Dict[str, float] = {}
