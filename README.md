@@ -49,6 +49,22 @@ LLM 请求前按画像面结构化注入
 2. 对话累计到阈值后后台 worker 自动蒸馏。
 3. 管理员可执行 `/tm_distill_now` 立即触发，`/tm_memory` 查看记忆，`/tm_context <问题>` 预览召回。
 
+## Smoke 验证
+
+OpenAPI 本地集成 smoke 默认面向 Docker AstrBot `http://localhost:6186`，并按 `ASTRBOT_LOCAL_TEST_STANDARD.md` 固化 4 步：`/api/v1/chat` SSE、`/api/v1/chat/sessions`、`/api/v1/configs`、`/api/v1/im/message`。前置条件是 `docker-compose up -d` 已启动 `astrbot_tmemory_test`，且 `ASTRBOT_API_KEY` 可用（默认 `admin`）。如使用本地 AstrBot `http://localhost:6185`，设置 `ASTRBOT_REQUIRE_DOCKER=0` 并传入本机已创建的 OpenAPI key。
+
+```bash
+ASTRBOT_URL=http://localhost:6186 ASTRBOT_API_KEY=admin SKIP_DEEPSEEK=1 bash docker/e2e_verify.sh
+
+ASTRBOT_URL=http://localhost:6185 ASTRBOT_REQUIRE_DOCKER=0 ASTRBOT_API_KEY=<openapi-key> SKIP_DEEPSEEK=1 bash docker/e2e_verify.sh
+```
+
+WebUI route 级 smoke 通过 pytest 覆盖 auth、profile 查询/更新/合并、config 读写、negative auth/input：
+
+```bash
+python3 -m pytest -q tests/test_profile_admin_api.py::test_webui_profile_route_smoke_covers_auth_crud_merge_and_config
+```
+
 ## 管理命令
 
 以下命令均需 AstrBot `ADMIN` 权限。
@@ -113,3 +129,31 @@ data/plugin_data/astrbot_plugin_tmemory/tmemory.db
 
 **WebUI 打不开？** 确认 `webui_enabled=true`、`webui_password` 已设置、端口未被占用。
 
+## 兼容层说明
+
+> **当前产品基线**：MemoryForge 的主产品模型是「用户画像」（`user_profiles` + `profile_items`），旧 `memories` 体系仅作为内部兼容层存在，不对外宣称为产品能力。
+
+### style_distill 剥离
+
+- 聊天风格蒸馏功能已于 v0.5.0 完全剥离至独立插件 `astrbot_plugin_tstyle_distill`，与主记忆管道零耦合。
+- 主插件不再提供 `/style_distill` 命令，旧 Docker 拓扑文档中该命令的引用仅为历史记录。
+
+### refine / purify 现状
+
+- `/tm_purify` — 全量记忆提纯，检测并消解冲突画像条目。
+- `/tm_refine mode=both limit=20` — 手动提纯（合并/拆分/dry-run），对标 `tm_mem_merge` + `tm_mem_split` 的批量操作入口。
+- `/tm_quality_refine` — 旧命令兼容别名，等价于 `/tm_purify`，保留用于向后兼容。
+
+### 旧表停用声明
+
+以下表自 v0.8.3 起已退出主数据链路，仅保留 DDL 及只读兼容路径，不参与检索、注入或蒸馏：
+
+| 表名 | 状态 | 说明 |
+|------|------|------|
+| `memories` | 停用 | 旧版语义事实表，已由 `profile_items` 替代 |
+| `memory_episodes` | 停用 | 旧版情节表，检索链路已切换至画像条目 |
+| `episode_sources` | 停用 | 旧版情节来源表，证据链由 `profile_item_evidence` 承载 |
+
+**当前核心表**：`identity_bindings`、`conversation_cache`、`user_profiles`、`profile_items`、`profile_item_evidence`、`profile_relations`、`memory_vectors`、`memory_events`、`distill_history`。
+
+旧表计划在 v0.9.1 兼容层收口中正式移除，届时将提供至少一个发布周期的只读过渡期。
