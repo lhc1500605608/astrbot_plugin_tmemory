@@ -5,7 +5,10 @@ Hot-path constraint: on_llm_request path must be zero LLM calls, SQLite reads on
 
 from __future__ import annotations
 
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from search.retrieval import RetrievalManager
 
 from .config import PluginConfig
 
@@ -31,13 +34,15 @@ class InjectionBuilder:
         canonical_id: str,
         query: str,
         session_key: str,
+        query_vec: Optional[List[float]] = None,
         scope: str = "user",
         persona_id: str = "",
         exclude_private: bool = False,
     ) -> str:
         """Build the profile-aware injection block.
 
-        Returns empty string if both context and profile blocks are empty.
+        When *query_vec* is provided (from query embedding cache), the
+        retrieval layer uses hybrid FTS + vector search + RRF fusion.
         Zero LLM calls — reads from SQLite only.
         """
         blocks: List[str] = []
@@ -52,6 +57,7 @@ class InjectionBuilder:
             canonical_id,
             query,
             self._cfg.inject_memory_limit,
+            query_vec=query_vec,
             scope=scope,
             persona_id=persona_id,
             exclude_private=exclude_private,
@@ -73,6 +79,7 @@ class InjectionBuilder:
         canonical_id: str,
         query: str,
         session_key: str,
+        query_vec: Optional[List[float]] = None,
         scope: str = "user",
         persona_id: str = "",
         exclude_private: bool = False,
@@ -80,6 +87,7 @@ class InjectionBuilder:
         """Deprecated alias. Delegates to build_profile_injection."""
         return await self.build_profile_injection(
             canonical_id, query, session_key,
+            query_vec=query_vec,
             scope=scope, persona_id=persona_id, exclude_private=exclude_private,
         )
 
