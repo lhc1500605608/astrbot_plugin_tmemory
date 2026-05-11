@@ -5,6 +5,36 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v0.9.0] - 2026-05-11
+
+### Added
+
+- **WebUI/API 安全加固** (P0-3) — 写接口参数校验、HTTP 级错误码与负路径覆盖。画像编辑/归档/合并/配置更新写接口加入校验。`extra_user_temp` 回退兼容矩阵文档化。注入热路径零 LLM 调用回归验证。(TMEAAA-332)
+- **混合召回注入** (P0-5) — `on_llm_request` 注入路径从纯 FTS5 升级为可选向量+混合召回（可配置），零 LLM 调用热路径。query embedding 缓存与回退策略。修复 FTS5 UPDATE 触发器静默一致性风险。(TMEAAA-333)
+- **蒸馏 token 预算** (P0-6) — 新增 `distill_daily_token_budget` 配置项。超预算自动跳过蒸馏周期并告警。`/tm_distill_history` 暴露预算消耗视图。跨日自动重置。配置变更无需重启。(TMEAAA-334)
+
+### Changed
+
+- **代码复杂度重切分** (P0-4) — 以真实复杂区为目标拆分模块：
+  - `core/utils.py` 拆分为命令处理/注入辅助/运行时工具
+  - `core/admin_service.py` 分离读/写/投影逻辑
+  - `core/consolidation.py` 明确 episode 与 profile extraction 边界
+  - `web_server.py` 分离路由与 handler
+  验收：各模块 <500 行 + 无循环导入 + 全量测试绿。(TMEAAA-335)
+- **版本口径收敛** (P0-1) — 对外契约与版本标记对齐。(TMEAAA-330)
+- **蒸馏运行时硬化** (P0-2) — 运行时稳定性加固。(TMEAAA-331)
+- **自动化基线恢复** (P0-7) — 恢复全量测试为绿色基线。426 tests pass, 3 skipped。(TMEAAA-336)
+
+### Documentation
+
+- 更新 README 反映 v0.9.0 新增能力（安全加固、混合召回、预算控制）。
+- 补充 ADR-007（用户画像模型边界）、ADR-008（旧表退役计划）。
+
+### Compatibility
+
+- AstrBot 兼容层保持 v4.16–v4.24.2 不变。
+- OpenAPI smoke 适配 AstrBot nightlight PBKDF2 鉴权模式（e2e_verify.sh）。
+
 ## [v0.8.5] - 2026-05-04
 
 ### Added
