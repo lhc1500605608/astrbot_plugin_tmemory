@@ -2,7 +2,7 @@
 
 **MemoryForge** 是 [AstrBot](https://github.com/AstrBotDevs/AstrBot) 的长期记忆插件，通过自动采集对话、LLM 蒸馏和分层注入，让机器人在多轮、跨会话、跨平台场景下持续理解用户。
 
-> 当前版本：`v0.8.5`。0.8.5 补充蒸馏全链路集成测试与真实环境验证，移除冗余测试文件。
+> 当前版本：`v0.9.0`。v0.9.0 完成画像基线硬化，全面通过 426 项测试。
 
 ## 功能概览
 
@@ -11,7 +11,11 @@
 - **画像形成**：后台 worker 从对话中提炼画像条目（profile_items），附带证据链溯源
 - **主动工具**：`remember` / `recall` LLM tool，支持模型主动保存和检索记忆
 - **画像注入**：在 LLM 请求前按画像面（facet）结构化注入上下文，零 LLM 热路径
-- **混合检索**：FTS5 全文检索 + 可选向量检索 + RRF 融合排序，支持按画像面检索
+- **WebUI 安全加固**：写接口参数校验、HTTP 级错误码与负路径覆盖，`extra_user_temp` 回退兼容矩阵文档化
+- **混合召回升级**：`on_llm_request` 注入路径从纯 FTS5 升级为可选向量+混合召回，embedding 缓存可观测
+- **蒸馏预算控制**：新增 `distill_daily_token_budget` 配置项，超预算自动暂停+告警，`/tm_distill_history` 暴露消耗视图
+- **代码复杂度重切分**：`core/utils.py`、`core/admin_service.py`、`core/consolidation.py`、`web_server.py` 大文件拆分（各模块 <500行，无循环导入）
+- **自动化基线回归**：全量 426 测试通过，3 跳过
 - **记忆维护**：强化、衰减、固定、提纯、合并、拆分、失活
 - **身份合并**：通过 `canonical_user_id` 合并同一用户跨平台记忆
 - **WebUI 管理面板**：可选画像工作台、审计日志和手动蒸馏
