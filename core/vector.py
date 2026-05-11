@@ -44,6 +44,8 @@ async def embed_text(plugin, text: str) -> Optional[List[float]]:
         headers["Authorization"] = f"Bearer {plugin._cfg.embed_api_key}"
 
     max_retries = 2
+    if plugin._embed_semaphore is None:
+        plugin._embed_semaphore = asyncio.Semaphore(4)
     async with plugin._embed_semaphore:
         for attempt in range(1, max_retries + 1):
             try:
@@ -194,6 +196,90 @@ async def rebuild_vector_index(plugin) -> Tuple[int, int]:
             logger.debug("[tmemory] rebuild vector failed id=%s: %s", mem_id, e)
             fail += 1
     return ok, fail
+
+
+async def get_cached_query_embedding(
+    plugin, query: str
+) -> Optional[List[float]]:
+    """Look up a cached embedding for *query*. Returns None on miss.
+
+    Updates hit_count and last_hit_at on cache hit.
+    """
+    import hashlib
+
+    if not plugin._vec_available:
+        return None
+    query_hash = hashlib.sha256(query.encode("utf-8")).hexdigest()
+    try:
+        with plugin._db() as conn:
+            row = conn.execute(
+                "SELECT embedding, embed_dim FROM query_embedding_cache WHERE query_hash=?",
+                (query_hash,),
+            ).fetchone()
+            if row is None:
+                plugin._embed_cache_miss_count += 1
+                return None
+            blob = bytes(row["embedding"])
+            dim = int(row["embed_dim"])
+            if dim != plugin._cfg.embed_dim:
+                conn.execute(
+                    "DELETE FROM query_embedding_cache WHERE query_hash=?", (query_hash,)
+                )
+                plugin._embed_cache_miss_count += 1
+                return None
+            conn.execute(
+                "UPDATE query_embedding_cache SET hit_count=hit_count+1, last_hit_at=? WHERE query_hash=?",
+                (plugin._now(), query_hash),
+            )
+            plugin._embed_cache_hit_count += 1
+            return plugin._sqlite_vec.deserialize_float32(blob)
+    except Exception as e:
+        logger.debug("[tmemory] query embedding cache lookup failed: %s", e)
+        return None
+
+
+async def store_query_embedding(plugin, query: str, vec: List[float]) -> None:
+    """Store a generated query embedding in the cache."""
+    import hashlib
+
+    if not plugin._vec_available:
+        return
+    query_hash = hashlib.sha256(query.encode("utf-8")).hexdigest()
+    blob = plugin._sqlite_vec.serialize_float32(vec)
+    now = plugin._now()
+    try:
+        with plugin._db() as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO query_embedding_cache("
+                "query_hash, query_text, embedding, embed_dim, created_at, last_hit_at, hit_count"
+                ") VALUES(?, ?, ?, ?, ?, ?, 1)",
+                (query_hash, query[:500], blob, len(vec), now, now),
+            )
+    except Exception as e:
+        logger.debug("[tmemory] query embedding cache store failed: %s", e)
+
+
+async def get_or_generate_query_embedding(
+    plugin, query: str
+) -> Optional[List[float]]:
+    """Cache-first query embedding: check local SQLite cache, fall back to embed API.
+
+    Updates cache hit/miss counters for observability.
+    Zero LLM calls — only local SQLite reads or embedding API call.
+    """
+    if not plugin._vec_available:
+        return None
+    if not query or not query.strip():
+        return None
+    # Trim query to avoid embedding very long text on the hot path
+    trimmed = query[:2000]
+    cached = await get_cached_query_embedding(plugin, trimmed)
+    if cached is not None:
+        return cached
+    vec = await embed_text(plugin, trimmed)
+    if vec is not None:
+        await store_query_embedding(plugin, trimmed, vec)
+    return vec
 
 
 async def rerank_results(

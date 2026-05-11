@@ -17,6 +17,12 @@
     "hint": "在 on_llm_request 阶段将召回记忆追加到 system_prompt。",
     "default": true
   },
+  "inject_enable_vector_search": {
+    "type": "bool",
+    "description": "注入路径启用向量语义召回",
+    "hint": "开启后 on_llm_request 热路径将生成 query embedding 并启用混合召回（向量+FTS），提升记忆注入相关性。需配合 vector_retrieval.enable_vector_search 使用。",
+    "default": false
+  },
   "inject_memory_limit": {
     "type": "int",
     "description": "注入记忆条数上限",
@@ -171,6 +177,12 @@
     "description": "暂停自动蒸馏",
     "hint": "开启后停止后台自动蒸馏（手动蒸馏不受影响），用于成本控制或调试。",
     "default": false
+  },
+  "daily_token_budget": {
+    "type": "int",
+    "description": "日 token 预算上限",
+    "hint": "每日蒸馏总 token 用量上限（基于 distill_history 当日累计）。超预算后自动跳过画像提取/巩固管线，仅保留规则蒸馏。0=不限制。",
+    "default": 0
   },
   "capture_min_content_len": {
     "type": "int",

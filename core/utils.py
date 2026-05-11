@@ -465,10 +465,10 @@ class PluginHelpersMixin:
         summary_channel: 'canonical' for fact-oriented search, 'persona' for style memories,
                          empty string to search all channels.
         """
-        # 步骤 1:获取查询向量
+        # 步骤 1:获取查询向量（走 cache 优先路径）
         query_vec: Optional[List[float]] = None
         if self._vec_available and query:
-            query_vec = await self._embed_text(query)
+            query_vec = await _vector.get_or_generate_query_embedding(self, query)
 
         # 步骤 2:底层 DB 检索
         scored, _ = await self._retrieval_mgr.retrieve_memories(
@@ -960,10 +960,25 @@ class PluginHandlersMixin:
             exclude_private = is_group and not self._cfg.private_memory_in_group
             session_key = self._safe_get_unified_msg_origin(event)
 
+            # ── optional query embedding for vector/hybrid recall ──
+            query_vec: Optional[List[float]] = None
+            if (
+                self._cfg.inject_enable_vector_search
+                and self._vec_available
+                and query
+            ):
+                self._vec_query_count += 1
+                query_vec = await _vector.get_or_generate_query_embedding(
+                    self, query
+                )
+                if query_vec is not None:
+                    self._vec_hit_count += 1
+
             block = await self._injection_builder.build_profile_injection(
                 canonical_id,
                 query,
                 session_key,
+                query_vec=query_vec,
                 scope=scope,
                 persona_id=persona_id,
                 exclude_private=exclude_private,
@@ -1068,7 +1083,7 @@ class PluginHandlersMixin:
 
     async def _handle_tm_distill_now(self, event: AstrMessageEvent):
         """手动触发一次批量蒸馏:/tm_distill_now"""
-        processed_users, total_memories = await self._run_distill_cycle(
+        processed_users, total_memories, errors = await self._run_distill_cycle(
             force=True, trigger="manual_cmd"
         )
         yield event.plain_result(
@@ -1199,6 +1214,16 @@ class PluginHandlersMixin:
                 else "N/A"
             )
             lines.append(f"vector_hit_rate: {hit_rate}")
+            embed_cache_total = self._embed_cache_hit_count + self._embed_cache_miss_count
+            embed_cache_pct = (
+                self._embed_cache_hit_count * 100 // max(1, embed_cache_total)
+                if embed_cache_total > 0
+                else 0
+            )
+            lines.append(
+                f"embed_cache: {self._embed_cache_hit_count}h "
+                f"/ {embed_cache_total}t ({embed_cache_pct}%)"
+            )
             if self._embed_last_error:
                 lines.append(f"embed_last_error: {self._embed_last_error[:80]}")
         elif self._cfg.enable_vector_search:
@@ -1220,13 +1245,26 @@ class PluginHandlersMixin:
         yield event.plain_result("\n".join(lines))
 
     async def _handle_tm_distill_history(self, event: AstrMessageEvent):
-        """查看最近蒸馏历史（含 token 成本）:/tm_distill_history"""
+        """查看最近蒸馏历史（含 token 成本 + 预算消耗）:/tm_distill_history"""
         rows = self._get_distill_history(limit=10)
         if not rows:
             yield event.plain_result("暂无蒸馏历史记录。")
             return
 
+        from .distill_validator import get_budget_consumption_pct, get_daily_token_usage
+
+        budget = max(0, getattr(self._cfg, "daily_token_budget", 0))
+        used = get_daily_token_usage(self)
+        pct = get_budget_consumption_pct(self)
+
         lines = [f"最近 {len(rows)} 轮蒸馏历史（最新优先）:"]
+        if budget > 0:
+            lines.append(
+                f"--- 日预算: {budget} token, 已用: {used} ({pct}%) ---"
+            )
+        else:
+            lines.append(f"--- 日预算: 无限制, 今日已用: {used} token ---")
+
         for r in rows:
             tok_in = r.get("tokens_input", -1)
             tok_out = r.get("tokens_output", -1)

@@ -57,6 +57,9 @@ class PluginConfig:
     rerank_top_n: int = 5
     rerank_base_url: str = ""
     
+    # ── Token Budget ──
+    daily_token_budget: int = 0  # 0 = unlimited
+
     # Active Tool Mode
     memory_mode: str = "hybrid"  # distill_only | active_only | hybrid
 
@@ -84,6 +87,7 @@ class PluginConfig:
 
     # Injection & Scope
     enable_memory_injection: bool = True
+    inject_enable_vector_search: bool = False
     memory_scope: str = "user"
     private_memory_in_group: bool = False
     inject_position: str = "system_prompt"
@@ -198,6 +202,9 @@ def parse_config(raw_config: dict) -> PluginConfig:
     c.rerank_top_n = max(1, _safe_int(raw_config.get("rerank_top_n", 5), 5, label="rerank_top_n"))
     c.rerank_base_url = str(raw_config.get("rerank_base_url", "")).strip()
 
+    # ── Token Budget ──
+    c.daily_token_budget = max(0, _safe_int(raw_config.get("daily_token_budget", 0), 0, label="daily_token_budget"))
+
     # ── 主动工具模式 ──
     c.memory_mode = str(raw_config.get("memory_mode", "hybrid")).strip().lower()
     if c.memory_mode not in {"distill_only", "active_only", "hybrid"}:
@@ -243,6 +250,7 @@ def parse_config(raw_config: dict) -> PluginConfig:
 
     # ── 注入与隔离 ──
     c.enable_memory_injection = _safe_bool(raw_config.get("enable_memory_injection", True), True, label="enable_memory_injection")
+    c.inject_enable_vector_search = _safe_bool(raw_config.get("inject_enable_vector_search", False), False, label="inject_enable_vector_search")
     c.memory_scope = str(raw_config.get("memory_scope", "user")).strip().lower()
     if c.memory_scope not in {"user", "session"}:
         c.memory_scope = "user"
@@ -283,6 +291,7 @@ def apply_safe_defaults(plugin) -> None:
     c.distill_model_id = ""
     c.distill_provider_id = ""
     c.enable_memory_injection = True
+    c.inject_enable_vector_search = False
     c.manual_purify_default_mode = "both"
     c.manual_purify_default_limit = 20
     plugin.manual_refine_default_mode = "both"
@@ -350,7 +359,9 @@ def apply_safe_defaults(plugin) -> None:
     plugin._embed_last_error = ""
     plugin._vec_query_count = 0
     plugin._vec_hit_count = 0
-    plugin._embed_semaphore = asyncio.Semaphore(4)
+    plugin._embed_cache_hit_count = 0
+    plugin._embed_cache_miss_count = 0
+    plugin._embed_semaphore = None
     plugin._http_session = None
     # ── 触发门控与批处理效率 ──────────────────────────────────────────────
     c.capture_min_content_len = 5

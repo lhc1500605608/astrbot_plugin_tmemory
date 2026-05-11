@@ -189,6 +189,18 @@ CREATE TABLE IF NOT EXISTS profile_item_evidence (
 )
 """
 
+_DDL_QUERY_EMBEDDING_CACHE = """
+CREATE TABLE IF NOT EXISTS query_embedding_cache (
+    query_hash TEXT PRIMARY KEY,
+    query_text TEXT NOT NULL,
+    embedding BLOB NOT NULL,
+    embed_dim INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    last_hit_at TEXT NOT NULL,
+    hit_count INTEGER NOT NULL DEFAULT 1
+)
+"""
+
 _DDL_PROFILE_RELATIONS = """
 CREATE TABLE IF NOT EXISTS profile_relations (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -476,6 +488,7 @@ class DatabaseManager:
             conn.execute(_DDL_PROFILE_ITEMS)
             conn.execute(_DDL_PROFILE_ITEM_EVIDENCE)
             conn.execute(_DDL_PROFILE_RELATIONS)
+            conn.execute(_DDL_QUERY_EMBEDDING_CACHE)
 
             conn.execute("CREATE INDEX IF NOT EXISTS idx_identity_bindings_canonical ON identity_bindings (canonical_user_id)")
 
