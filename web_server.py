@@ -8,12 +8,8 @@
 
 from __future__ import annotations
 
-import hashlib
-import hmac
-import json
 import os
 import secrets
-import time
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
 
 from aiohttp import web
@@ -29,55 +25,7 @@ if TYPE_CHECKING:
     from main import TMemoryPlugin
 
 from .web_handlers import WebHandlersMixin
-
-# JWT 极简实现（不引入外部依赖）
-# ──────────────────────────────────────────────────────────────────────────────
-
-
-def _b64url_encode(data: bytes) -> str:
-    import base64
-
-    return base64.urlsafe_b64encode(data).rstrip(b"=").decode("ascii")
-
-
-def _b64url_decode(s: str) -> bytes:
-    import base64
-
-    s += "=" * (4 - len(s) % 4)
-    return base64.urlsafe_b64decode(s)
-
-
-def jwt_encode(payload: dict, secret: str, exp_seconds: int = 86400) -> str:
-    header = {"alg": "HS256", "typ": "JWT"}
-    payload = {
-        **payload,
-        "exp": int(time.time()) + exp_seconds,
-        "iat": int(time.time()),
-    }
-    h = _b64url_encode(json.dumps(header).encode())
-    p = _b64url_encode(json.dumps(payload).encode())
-    sig = hmac.new(secret.encode(), f"{h}.{p}".encode(), hashlib.sha256).digest()
-    return f"{h}.{p}.{_b64url_encode(sig)}"
-
-
-def jwt_decode(token: str, secret: str) -> Optional[dict]:
-    try:
-        parts = token.split(".")
-        if len(parts) != 3:
-            return None
-        h, p, s = parts
-        expected_sig = hmac.new(
-            secret.encode(), f"{h}.{p}".encode(), hashlib.sha256
-        ).digest()
-        if not hmac.compare_digest(_b64url_decode(s), expected_sig):
-            return None
-        payload = json.loads(_b64url_decode(p))
-        if payload.get("exp", 0) < time.time():
-            return None
-        return payload
-    except Exception:
-        return None
-
+from .core.utils_shared import jwt_decode, jwt_encode
 
 # 服务器类
 # ──────────────────────────────────────────────────────────────────────────────

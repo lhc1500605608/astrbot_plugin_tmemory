@@ -62,7 +62,7 @@ class WebHandlersMixin:
         password = str(data.get("password", ""))
 
         if username == self.username and password == self.password:
-            from .web_server import jwt_encode  # lazy to avoid circular import at load time
+            from .core.utils_shared import jwt_encode
             token = jwt_encode({"user": username}, self._jwt_secret, self.token_expire)
             return web.json_response({"ok": True, "token": token})
 
