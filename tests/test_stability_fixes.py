@@ -75,7 +75,7 @@ async def test_distill_rows_with_llm_uses_mock_provider(plugin_with_ctx):
     plugin._cfg.distill_model_id = "mock-model"
     plugin._cfg.use_independent_distill_model = True
 
-    items, tok_in, tok_out = await plugin._distill_rows_with_llm(rows)
+    items, tok_in, tok_out, _errs = await plugin._distill_rows_with_llm(rows)
 
     assert len(items) == 1
     assert items[0]["memory"] == "用户偏好黑咖啡不加糖"
@@ -230,7 +230,7 @@ async def test_distill_cycle_does_not_extract_assistant_style_without_user_rows(
     plugin._cfg.distill_provider_id = "mock-provider"
     plugin._cfg.use_independent_distill_model = True
 
-    processed_users, total_memories = await plugin._run_distill_cycle(
+    processed_users, total_memories, _errs = await plugin._run_distill_cycle(
         force=True, trigger="qa-assistant-only"
     )
 
@@ -298,7 +298,7 @@ async def test_distill_cycle_integrates_cache_llm_memory_and_history(plugin_with
     plugin._cfg.distill_model_id = "mock-model"
     plugin._cfg.use_independent_distill_model = True
 
-    processed_users, total_memories = await plugin._run_distill_cycle(
+    processed_users, total_memories, _errs = await plugin._run_distill_cycle(
         force=True, trigger="qa-full-cycle"
     )
 
@@ -368,7 +368,7 @@ async def test_distill_cycle_falls_back_to_rule_and_still_persists_memory(
     plugin._cfg.distill_provider_id = "mock-provider"
     plugin._cfg.use_independent_distill_model = True
 
-    processed_users, total_memories = await plugin._run_distill_cycle(
+    processed_users, total_memories, _errs = await plugin._run_distill_cycle(
         force=True, trigger="qa-rule-fallback-cycle"
     )
 
@@ -449,7 +449,7 @@ async def test_distill_cycle_marks_conflicting_old_memory_inactive(plugin_with_c
     plugin._cfg.distill_provider_id = "mock-provider"
     plugin._cfg.use_independent_distill_model = True
 
-    processed_users, total_memories = await plugin._run_distill_cycle(
+    processed_users, total_memories, _errs = await plugin._run_distill_cycle(
         force=True, trigger="qa-conflict-cycle"
     )
 
@@ -522,7 +522,7 @@ async def test_distill_cycle_triggers_memory_decay_after_success(plugin_with_ctx
     plugin._cfg.distill_provider_id = "mock-provider"
     plugin._cfg.use_independent_distill_model = True
 
-    processed_users, total_memories = await plugin._run_distill_cycle(
+    processed_users, total_memories, _errs = await plugin._run_distill_cycle(
         force=True, trigger="qa-decay-cycle"
     )
 
@@ -615,7 +615,7 @@ async def test_distill_rows_with_llm_fallback_on_llm_error(plugin_with_ctx):
     plugin._cfg.distill_model_id = ""
     plugin._cfg.use_independent_distill_model = True
 
-    items, tok_in, tok_out = await plugin._distill_rows_with_llm(rows)
+    items, tok_in, tok_out, _errs = await plugin._distill_rows_with_llm(rows)
 
     # 回退路径应返回至少 1 条规则蒸馏结果
     assert len(items) >= 1
@@ -643,7 +643,7 @@ async def test_distill_rows_with_llm_fallback_when_no_provider(plugin):
     plugin._cfg.distill_model_id = ""
     plugin._cfg.use_independent_distill_model = False
 
-    items, tok_in, tok_out = await plugin._distill_rows_with_llm(rows)
+    items, tok_in, tok_out, _errs = await plugin._distill_rows_with_llm(rows)
 
     assert len(items) >= 1
     assert tok_in == -1

@@ -709,7 +709,7 @@ async def test_consolidation_blocks_flat_distill_for_same_rows(plugin_with_ctx):
             assert r["episode_id"] != 0, f"row {r['id']} should have episode_id set"
 
     # Flat distill should find NO pending rows (episode_id != 0 excludes them)
-    processed, total = await plugin._run_distill_cycle(force=True, trigger="test-dual")
+    processed, total, _errs = await plugin._run_distill_cycle(force=True, trigger="test-dual")
     assert processed == 0, (
         f"flat distill should skip consolidation-processed rows, got {processed}"
     )
@@ -758,6 +758,6 @@ async def test_flat_distill_still_works_when_pipeline_disabled(plugin_with_ctx):
 
     ctx.llm_generate = fake_llm
 
-    processed, total = await plugin._run_distill_cycle(force=True, trigger="test-flat-only")
+    processed, total, _errs = await plugin._run_distill_cycle(force=True, trigger="test-flat-only")
     assert processed >= 1
     assert call_count[0] >= 1

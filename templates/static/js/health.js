@@ -1,10 +1,32 @@
-/* health.js — 系统健康面板（蒸馏历史 + 暂停控制） */
+/* health.js — 系统健康面板（蒸馏历史 + 暂停控制 + token 预算） */
 
 let isPaused = false;
 
 async function loadHealth() {
   const data = await api('/distill/history');
   const tbody = document.getElementById('healthTableBody');
+
+  /* 渲染 token 预算条 */
+  const budgetEl = document.getElementById('budgetSummary');
+  if (data && data.budget) {
+    const b = data.budget;
+    if (b.unlimited) {
+      document.getElementById('budgetText').textContent = '日预算: 无限制';
+      budgetEl.style.display = 'block';
+      document.getElementById('budgetBar').style.width = '0%';
+    } else {
+      const pct = Math.min(b.pct, 100);
+      document.getElementById('budgetText').textContent =
+        `日预算: ${b.budget.toLocaleString()} token  ·  已用: ${b.used.toLocaleString()} (${pct}%)  ·  剩余: ${b.remaining.toLocaleString()}`;
+      document.getElementById('budgetBar').style.width = pct + '%';
+      document.getElementById('budgetBar').style.background =
+        pct >= 90 ? 'var(--danger)' : pct >= 70 ? '#e3b341' : 'var(--accent)';
+      budgetEl.style.display = 'block';
+    }
+  } else {
+    budgetEl.style.display = 'none';
+  }
+
   if (!data || !data.history || data.history.length === 0) {
     tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;color:var(--text2);padding:40px">暂无蒸馏记录</td></tr>';
     return;

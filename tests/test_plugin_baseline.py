@@ -1025,7 +1025,7 @@ async def test_cfg003_injection_uses_profile_path(plugin_module, tmp_path, monke
         return "[PROFILE_BLOCK]"
 
     instance._injection_builder.build_profile_injection = fake_build_profile
-    instance._identity_mgr.resolve_current_identity = staticmethod(lambda e: ("user-cfg3", "qq", "42"))
+    instance._identity_mgr.resolve_current_identity = lambda e: ("user-cfg3", "qq", "42")
 
     event = _DummyEvent()
     req = _DummyProviderRequest(prompt="测试查询", system_prompt="你是AI助手。")
@@ -1055,7 +1055,7 @@ async def test_cfg003_injection_unified_regardless_of_layered_flag(plugin_module
         return "[PROFILE_BLOCK]"
 
     instance._injection_builder.build_profile_injection = fake_build_profile
-    instance._identity_mgr.resolve_current_identity = staticmethod(lambda e: ("user-cfg3b", "qq", "42"))
+    instance._identity_mgr.resolve_current_identity = lambda e: ("user-cfg3b", "qq", "42")
 
     event = _DummyEvent()
     req = _DummyProviderRequest(prompt="测试查询", system_prompt="你是AI助手。")
@@ -1084,7 +1084,7 @@ async def test_cfg003_injection_skipped_when_disabled(plugin_module, tmp_path, m
         return "BLOCK"
 
     instance._injection_builder.build_profile_injection = fake_build_profile
-    instance._identity_mgr.resolve_current_identity = staticmethod(lambda e: ("user-off", "qq", "42"))
+    instance._identity_mgr.resolve_current_identity = lambda e: ("user-off", "qq", "42")
 
     event = _DummyEvent()
     req = _DummyProviderRequest(prompt="测试查询", system_prompt="原始prompt")
@@ -1127,7 +1127,7 @@ async def test_hot001_on_llm_request_zero_llm_calls(plugin_module, tmp_path, mon
     instance._init_db()
     instance._migrate_schema()
 
-    instance._identity_mgr.resolve_current_identity = staticmethod(lambda e: ("user-hot1", "qq", "42"))
+    instance._identity_mgr.resolve_current_identity = lambda e: ("user-hot1", "qq", "42")
     instance._identity_mgr.bind_identity("qq", "42", "user-hot1")
 
     # Insert a profile item so retrieval has something to return

@@ -2,9 +2,17 @@ import json
 import logging
 import sqlite3
 import hashlib
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Tuple
 import jieba
 from .style_analyzer import get_style_analyzer
+from .distill_errors import (
+    DistillErrorCategory,
+    DistillErrorRecord,
+    classify_llm_error,
+    make_fallback_record,
+    make_empty_result_record,
+    errors_to_json,
+)
 
 logger = logging.getLogger("astrbot:db.py")
 
@@ -148,8 +156,14 @@ class MemoryOps:
 
     async def distill_rows_with_llm(
         self, rows: list
-    ) -> tuple:
-        """用 LLM 对一批对话行进行结构化蒸馏，失败时回退到规则蒸馏。"""
+    ) -> Tuple[List[Dict[str, object]], int, int, List[DistillErrorRecord]]:
+        """用 LLM 对一批对话行进行结构化蒸馏，失败时回退到规则蒸馏。
+
+        Returns:
+            (memories, tokens_input, tokens_output, errors)
+            errors 为结构化错误记录列表，替代旧版静默回退。
+        """
+        username = str(rows[0].get("canonical_user_id", "")) if rows else ""
         transcript_lines = []
         for row in rows:
             role = str(row["role"])
@@ -165,7 +179,13 @@ class MemoryOps:
         chat_provider_id = await self.plugin._distill_mgr.resolve_distill_provider_id(rows, self.plugin.context)
         chat_model_id = await self.plugin._distill_mgr.resolve_distill_model_id(rows)
         if not chat_provider_id:
-            # 无法确定 provider 时，回退到规则蒸馏。
+            # 无法确定 provider 时，回退到规则蒸馏（结构化记录，不再静默）。
+            fallback_err = make_fallback_record(
+                pipeline="flat_distill",
+                user_id=username,
+                reason="无法确定 LLM provider，回退到规则蒸馏",
+            )
+            fallback_err.log()
             return (
                 [
                     {
@@ -178,6 +198,7 @@ class MemoryOps:
                 ],
                 -1,
                 -1,
+                [fallback_err],
             )
 
         try:
@@ -205,10 +226,31 @@ class MemoryOps:
                 tok_in, tok_out = -1, -1
 
             if parsed:
-                return parsed, tok_in, tok_out
+                return parsed, tok_in, tok_out, []
+            else:
+                # LLM 返回了内容但无法解析为有效记忆
+                empty_err = make_empty_result_record(
+                    pipeline="flat_distill",
+                    user_id=username,
+                )
+                empty_err.log()
         except Exception as e:
-            logger.warning("[tmemory] llm distill failed, fallback to rule: %s", e)
+            # 结构化分类替代裸 except Exception
+            err = classify_llm_error(
+                e,
+                pipeline="flat_distill",
+                user_id=username,
+                context_message="LLM 蒸馏调用失败，回退到规则蒸馏",
+            )
+            err.log()
 
+        # 规则蒸馏回退（新增：记录回退原因）
+        fallback_err = make_fallback_record(
+            pipeline="flat_distill",
+            user_id=username,
+            reason="LLM 蒸馏未产生有效结果，使用规则回退",
+        )
+        fallback_err.log()
         return (
             [
                 {
@@ -221,14 +263,19 @@ class MemoryOps:
             ],
             -1,
             -1,
+            [fallback_err],
         )
 
     async def run_distill_cycle(
         self,
         force: bool = False,
         trigger: str = "manual"
-    ) -> tuple[int, int]:
-        """执行一轮蒸馏，记录历史，单用户失败不中断整轮。"""
+    ) -> tuple[int, int, List[DistillErrorRecord]]:
+        """执行一轮蒸馏，记录历史，单用户失败不中断整轮。
+
+        Returns:
+            (users_processed, memories_created, structured_errors)
+        """
         import time
         started_at = self.plugin._now()
         t0 = time.time()
@@ -239,7 +286,7 @@ class MemoryOps:
         processed_users = 0
         total_memories = 0
         failed_users = 0
-        errors = []
+        all_errors: List[DistillErrorRecord] = []
         cycle_tok_in = -1
         cycle_tok_out = -1
 
@@ -277,7 +324,16 @@ class MemoryOps:
                 skipped = len(rows) - len(rows_for_llm)
                 self.plugin._distill_skipped_rows += skipped
 
-                llm_items, tok_in, tok_out = await self.plugin._distill_rows_with_llm(rows_for_llm)
+                llm_items, tok_in, tok_out, distill_errors = await self.plugin._distill_rows_with_llm(rows_for_llm)
+
+                # 收集结构化错误
+                if distill_errors:
+                    all_errors.extend(distill_errors)
+                    if any(
+                        e.category in (DistillErrorCategory.PROVIDER_FAILURE, DistillErrorCategory.PARSE_FAILURE)
+                        for e in distill_errors
+                    ):
+                        failed_users += 1
 
                 # 累加 token 计数（-1 表示 provider 未返回，跳过累加）
                 if tok_in >= 0:
@@ -292,6 +348,20 @@ class MemoryOps:
                     continue
 
                 valid_items = self.plugin._validate_distill_output(llm_items)
+                if not valid_items:
+                    from .distill_errors import make_validation_failure_record
+                    vf_err = make_validation_failure_record(
+                        pipeline="flat_distill",
+                        user_id=canonical_id,
+                        reason=f"LLM 返回 {len(llm_items)} 条，全部未通过校验",
+                    )
+                    vf_err.log()
+                    all_errors.append(vf_err)
+                    self.plugin._mark_rows_distilled([int(r["id"]) for r in rows])
+                    self.plugin._user_last_distilled_ts[canonical_id] = now_ts
+                    processed_users += 1
+                    continue
+
                 for item in valid_items:
                     memory_type = str(item.get("memory_type", "fact"))
                     mem_text = self.plugin._sanitize_text(
@@ -323,13 +393,21 @@ class MemoryOps:
                 processed_users += 1
                 self.plugin._user_last_distilled_ts[canonical_id] = now_ts
             except Exception as e:
+                # 整用户处理异常（不属于 LLM 调用的异常）
                 failed_users += 1
-                errors.append(f"{canonical_id}: {type(e).__name__}: {e}")
+                user_err = classify_llm_error(
+                    e,
+                    pipeline="flat_distill",
+                    user_id=canonical_id,
+                    context_message="用户蒸馏流程异常",
+                )
+                user_err.log()
+                all_errors.append(user_err)
                 logger.warning(
                     "[tmemory] distill failed for user %s: %s", canonical_id, e
                 )
 
-        # 记录蒸馏历史
+        # 记录蒸馏历史（errors 字段序列化为 JSON）
         duration = round(time.time() - t0, 2)
         cycle_tok_total = (
             cycle_tok_in + cycle_tok_out
@@ -342,7 +420,7 @@ class MemoryOps:
             users_processed=processed_users,
             memories_created=total_memories,
             users_failed=failed_users,
-            errors=errors,
+            errors=errors_to_json(all_errors),
             duration=duration,
             tokens_input=cycle_tok_in,
             tokens_output=cycle_tok_out,
@@ -352,7 +430,7 @@ class MemoryOps:
         # 顺便执行记忆衰减
         self.plugin._decay_stale_memories()
 
-        return processed_users, total_memories
+        return processed_users, total_memories, all_errors
     async def manual_purify_memories(
         self,
         event,

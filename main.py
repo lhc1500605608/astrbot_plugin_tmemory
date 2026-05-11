@@ -99,6 +99,7 @@ class TMemoryPlugin(
         self._retrieval_mgr = RetrievalManager(self._cfg, self._db_mgr)
         self._injection_builder = InjectionBuilder(self._cfg, self._retrieval_mgr)
         self._memory_logger = MemoryLogger(self._db_mgr)
+        self._cmd_first_words = _CMD_FIRST_WORDS
         self._identity_mgr = IdentityManager(
             self._db_mgr, self._cfg, self._memory_logger
         )

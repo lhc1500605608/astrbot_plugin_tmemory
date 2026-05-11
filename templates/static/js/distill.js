@@ -22,7 +22,9 @@ async function triggerDistill() {
   toast('正在蒸馏，请稍候…', 'success');
   const res = await api('/distill', { method: 'POST' });
   if (res && res.ok) {
-    if (res.processed_users === 0 && res.total_memories === 0) {
+    if (res.budget_warning) {
+      toast(res.budget_warning + '（已用 ' + res.budget_used.toLocaleString() + ' token）', 'error');
+    } else if (res.processed_users === 0 && res.total_memories === 0) {
       if (res.pending_users_before > 0) {
         toast('蒸馏完成：队列有 ' + res.pending_users_before + ' 个待处理用户，但全部被跳过或 LLM 未返回有效记忆', 'error');
       } else {

@@ -156,6 +156,45 @@ def get_distill_history(plugin, limit: int = 20) -> List[Dict]:
     return [dict(r) for r in rows]
 
 
+def get_budget_consumption_pct(plugin) -> float:
+    """返回当日 token 预算消耗百分比（0.0 ~ 100.0）。
+
+    预算为 0 时返回 0.0（表示无限制）。
+    """
+    budget = max(0, getattr(plugin._cfg, "daily_token_budget", 0))
+    if budget <= 0:
+        return 0.0
+    used = get_daily_token_usage(plugin)
+    return round(used / budget * 100, 1)
+
+
+def get_daily_token_usage(plugin) -> int:
+    """查询今日所有 distill_history 记录的 tokens_total 总和。
+
+    tokens_total < 0 的记录（provider 未返回用量）不参与累加。
+    """
+    today = plugin._now()[:10]
+    with plugin._db() as conn:
+        row = conn.execute(
+            "SELECT COALESCE(SUM(tokens_total), 0) AS total"
+            " FROM distill_history"
+            " WHERE started_at >= ? AND tokens_total >= 0",
+            (today + " 00:00:00",),
+        ).fetchone()
+    return int(row["total"])
+
+
+def is_token_budget_exceeded(plugin) -> bool:
+    """检查当日 token 用量是否已超过日预算。
+
+    预算为 0 时表示无限制，永不超过。
+    """
+    budget = getattr(plugin._cfg, "daily_token_budget", 0)
+    if budget <= 0:
+        return False
+    return get_daily_token_usage(plugin) >= budget
+
+
 def get_distill_cost_summary(plugin, last_n: int = 10) -> Dict:
     """汇总最近 N 轮蒸馏的 token 消耗。"""
     rows = get_distill_history(plugin, limit=last_n)

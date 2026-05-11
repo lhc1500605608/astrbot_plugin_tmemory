@@ -365,6 +365,32 @@ async def test_profile_update_route_writes_changes_and_validates_id(
 
 
 @pytest.mark.asyncio
+async def test_profile_update_route_rejects_invalid_json_and_non_object_body(
+    web_module, plugin, admin_svc, seeded_profile_items
+):
+    item_id = admin_svc.get_profile_items("test-user")[0]["id"]
+    client, headers = await _profile_api_client(web_module, plugin)
+    try:
+        invalid_json = await client.post(
+            "/api/profile/item/update",
+            headers={**headers, "Content-Type": "application/json"},
+            data="{invalid",
+        )
+        assert invalid_json.status == 400
+        assert (await invalid_json.json())["error"] == "invalid json"
+
+        non_object = await client.post(
+            "/api/profile/item/update",
+            headers=headers,
+            json=[{"id": item_id, "content": "bad"}],
+        )
+        assert non_object.status == 400
+        assert (await non_object.json())["error"] == "json object required"
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
 async def test_profile_archive_route_moves_item_to_archived_status(
     web_module, plugin, admin_svc, seeded_profile_items
 ):
@@ -382,6 +408,39 @@ async def test_profile_archive_route_moves_item_to_archived_status(
             item["id"] == item_id
             for item in admin_svc.get_profile_items("test-user", status="archived")
         )
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_profile_archive_route_rejects_invalid_id_payloads(
+    web_module, plugin, seeded_profile_items
+):
+    client, headers = await _profile_api_client(web_module, plugin)
+    try:
+        invalid_json = await client.post(
+            "/api/profile/item/archive",
+            headers={**headers, "Content-Type": "application/json"},
+            data="{invalid",
+        )
+        assert invalid_json.status == 400
+        assert (await invalid_json.json())["error"] == "invalid json"
+
+        non_object = await client.post(
+            "/api/profile/item/archive",
+            headers=headers,
+            json=["bad"],
+        )
+        assert non_object.status == 400
+        assert (await non_object.json())["error"] == "json object required"
+
+        invalid_id = await client.post(
+            "/api/profile/item/archive",
+            headers=headers,
+            json={"id": "abc"},
+        )
+        assert invalid_id.status == 400
+        assert (await invalid_id.json())["error"] == "id must be a positive integer"
     finally:
         await client.close()
 
@@ -415,5 +474,228 @@ async def test_profile_merge_route_supersedes_secondary_items(
             item["id"] == ids[1]
             for item in admin_svc.get_profile_items("test-user", status="superseded")
         )
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_profile_merge_route_rejects_invalid_ids_and_same_user_merge(
+    web_module, plugin, admin_svc, seeded_profile_items
+):
+    items = admin_svc.get_profile_items("test-user", facet_type="preference")
+    ids = [items[0]["id"], items[1]["id"]]
+    client, headers = await _profile_api_client(web_module, plugin)
+    try:
+        invalid_json = await client.post(
+            "/api/profile/items/merge",
+            headers={**headers, "Content-Type": "application/json"},
+            data="{invalid",
+        )
+        assert invalid_json.status == 400
+        assert (await invalid_json.json())["error"] == "invalid json"
+
+        non_object = await client.post(
+            "/api/profile/items/merge",
+            headers=headers,
+            json=["bad"],
+        )
+        assert non_object.status == 400
+        assert (await non_object.json())["error"] == "json object required"
+
+        empty_user = await client.post(
+            "/api/profile/items/merge",
+            headers=headers,
+            json={"user": "   ", "ids": ids},
+        )
+        assert empty_user.status == 400
+        assert (await empty_user.json())["error"] == "user is required"
+
+        invalid_ids = await client.post(
+            "/api/profile/items/merge",
+            headers=headers,
+            json={"user": "test-user", "ids": [ids[0], "abc"]},
+        )
+        assert invalid_ids.status == 400
+        assert (await invalid_ids.json())["error"] == "ids must be a positive integer"
+
+        duplicate_ids = await client.post(
+            "/api/profile/items/merge",
+            headers=headers,
+            json={"user": "test-user", "ids": [ids[0], ids[0]]},
+        )
+        assert duplicate_ids.status == 400
+        assert (await duplicate_ids.json())["error"] == "ids must be unique"
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_identity_merge_route_rejects_invalid_json_and_same_user(
+    web_module, plugin
+):
+    client, headers = await _profile_api_client(web_module, plugin)
+    try:
+        invalid_json = await client.post(
+            "/api/identity/merge",
+            headers={**headers, "Content-Type": "application/json"},
+            data="{invalid",
+        )
+        assert invalid_json.status == 400
+        assert (await invalid_json.json())["error"] == "invalid json"
+
+        non_object = await client.post(
+            "/api/identity/merge",
+            headers=headers,
+            json=["bad"],
+        )
+        assert non_object.status == 400
+        assert (await non_object.json())["error"] == "json object required"
+
+        same_user = await client.post(
+            "/api/identity/merge",
+            headers=headers,
+            json={"from_user": "same-user", "to_user": "same-user"},
+        )
+        assert same_user.status == 400
+        assert "无需合并" in (await same_user.json())["error"]
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_config_update_route_rejects_invalid_payload_shapes_and_unknown_keys(
+    web_module, plugin
+):
+    client, headers = await _profile_api_client(web_module, plugin)
+    try:
+        invalid_json = await client.patch(
+            "/api/config",
+            headers={**headers, "Content-Type": "application/json"},
+            data="{invalid",
+        )
+        assert invalid_json.status == 400
+        assert (await invalid_json.json())["error"] == "invalid json"
+
+        non_object = await client.patch(
+            "/api/config",
+            headers=headers,
+            json=["bad"],
+        )
+        assert non_object.status == 400
+        assert (await non_object.json())["error"] == "json object required"
+
+        empty_patch = await client.patch(
+            "/api/config",
+            headers=headers,
+            json={},
+        )
+        assert empty_patch.status == 400
+        assert (await empty_patch.json())["error"] == "config patch is empty"
+
+        unknown_key = await client.patch(
+            "/api/config",
+            headers=headers,
+            json={"not_a_real_key": True},
+        )
+        assert unknown_key.status == 400
+        assert (await unknown_key.json())["error"] == "unknown config keys: not_a_real_key"
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_webui_profile_route_smoke_covers_auth_crud_merge_and_config(
+    web_module, plugin, admin_svc, seeded_profile_items
+):
+    items = admin_svc.get_profile_items("test-user", facet_type="preference")
+    first_id = items[0]["id"]
+    second_id = items[1]["id"]
+
+    client, headers = await _profile_api_client(web_module, plugin)
+    try:
+        login_denied = await client.post(
+            "/api/login",
+            json={"username": "admin", "password": "wrong"},
+        )
+        assert login_denied.status == 401
+
+        unauthenticated = await client.get("/api/config")
+        assert unauthenticated.status == 401
+
+        profile_summary = await client.get(
+            "/api/profile/summary?user=test-user",
+            headers=headers,
+        )
+        assert profile_summary.status == 200
+        profile_summary_body = await profile_summary.json()
+        assert profile_summary_body["user_profile"]["canonical_user_id"] == "test-user"
+
+        profile_items = await client.get(
+            "/api/profile/items?user=test-user&facet_type=preference&status=active",
+            headers=headers,
+        )
+        assert profile_items.status == 200
+        profile_items_body = await profile_items.json()
+        assert [item["status"] for item in profile_items_body["items"]] == [
+            "active",
+            "active",
+        ]
+
+        missing_id_update = await client.post(
+            "/api/profile/item/update",
+            headers=headers,
+            json={"content": "missing id"},
+        )
+        assert missing_id_update.status == 400
+
+        updated = await client.post(
+            "/api/profile/item/update",
+            headers=headers,
+            json={"id": first_id, "content": "smoke updated profile"},
+        )
+        assert updated.status == 200
+        assert (await updated.json())["ok"] is True
+
+        invalid_merge = await client.post(
+            "/api/profile/items/merge",
+            headers=headers,
+            json={"user": "test-user", "ids": [first_id]},
+        )
+        assert invalid_merge.status == 400
+
+        merged = await client.post(
+            "/api/profile/items/merge",
+            headers=headers,
+            json={"user": "test-user", "ids": [first_id, second_id]},
+        )
+        assert merged.status == 200
+        merged_body = await merged.json()
+        assert merged_body["ok"] is True
+        assert merged_body["archived_count"] == 1
+
+        config_read = await client.get(
+            "/api/config?keys=memory_mode,distill_pause",
+            headers=headers,
+        )
+        assert config_read.status == 200
+        assert await config_read.json() == {
+            "memory_mode": "hybrid",
+            "distill_pause": False,
+        }
+
+        config_write = await client.patch(
+            "/api/config",
+            headers=headers,
+            json={"distill_pause": True},
+        )
+        assert config_write.status == 200
+        assert (await config_write.json()) == {"status": "ok"}
+
+        config_after_write = await client.get(
+            "/api/config?keys=distill_pause",
+            headers=headers,
+        )
+        assert config_after_write.status == 200
+        assert await config_after_write.json() == {"distill_pause": True}
     finally:
         await client.close()

@@ -1,11 +1,12 @@
 import re
-from typing import List, Dict
+from typing import List, Dict, Tuple
 from collections import Counter
 from .config import PluginConfig
 from .capture import CaptureFilter
 from .style_analyzer import get_style_analyzer
 from . import distill_validator as _distill_validator
 from . import maintenance as _maintenance
+from .distill_errors import DistillErrorRecord
 import logging
 
 logger = logging.getLogger("astrbot")
@@ -180,12 +181,30 @@ from astrbot.api import logger
 
 class DistillRuntimeMixin:
     async def _distill_worker_loop(self):
-        """后台定时蒸馏循环（含可选三阶段巩固管线）。"""
+        """后台定时蒸馏循环（互斥门控 + token 预算 + 配置热加载）。"""
         await asyncio.sleep(8)
         while self._worker_running:
+            # 热加载配置：从 AstrBot config dict 重新解析，使 daily_token_budget
+            # /distill_pause 等变更无需重启即生效
+            try:
+                from .config import parse_config
+                self._cfg = parse_config(self.config)
+            except Exception:
+                pass
+
             if not self._cfg.distill_pause and self._cfg.memory_mode != "active_only":
-                # ── 画像提取 (替代旧 Stage B + C) ──
-                if self._cfg.profile_extraction_enabled:
+                gate = _resolve_pipeline_gate(self._cfg)
+                budget_exceeded = _distill_validator.is_token_budget_exceeded(self)
+
+                if budget_exceeded:
+                    logger.warning(
+                        "[tmemory] daily token budget exceeded (budget=%s, used=%s),"
+                        " skipping all LLM pipelines",
+                        self._cfg.daily_token_budget,
+                        _distill_validator.get_daily_token_usage(self),
+                    )
+
+                if gate == "profile_extraction" and not budget_exceeded:
                     try:
                         items = await self._run_profile_extraction_cycle(
                             force=False, trigger="auto"
@@ -198,8 +217,7 @@ class DistillRuntimeMixin:
                     except Exception as e:
                         logger.warning("[tmemory] profile extraction worker error: %s", e)
 
-                # ── 巩固管线 (Stage B + C) [已废弃，保留兼容] ──
-                if self._cfg.enable_consolidation_pipeline:
+                elif gate == "consolidation" and not budget_exceeded:
                     try:
                         episodes, extracted = await self._run_consolidation_cycle(
                             force=False, trigger="auto"
@@ -213,19 +231,19 @@ class DistillRuntimeMixin:
                     except Exception as e:
                         logger.warning("[tmemory] consolidation worker error: %s", e)
 
-                # ── 现有直接蒸馏 (flat distill, 在管线未启用或作为补充) ──
-                try:
-                    users, memories = await self._run_distill_cycle(
-                        force=False, trigger="auto"
-                    )
-                    if users > 0:
-                        logger.info(
-                            "[tmemory] distill cycle done: users=%s memories=%s",
-                            users,
-                            memories,
+                elif gate == "flat_distill" and not budget_exceeded:
+                    try:
+                        users, memories, _errors = await self._run_distill_cycle(
+                            force=False, trigger="auto"
                         )
-                except Exception as e:
-                    logger.warning("[tmemory] distill worker error: %s", e)
+                        if users > 0:
+                            logger.info(
+                                "[tmemory] distill cycle done: users=%s memories=%s",
+                                users,
+                                memories,
+                            )
+                    except Exception as e:
+                        logger.warning("[tmemory] distill worker error: %s", e)
 
             # 如有用户合并待处理，在下一轮 sleep 前补全向量索引
             if self._merge_needs_vector_rebuild and self._vec_available:
@@ -261,7 +279,7 @@ class DistillRuntimeMixin:
 
     async def _run_distill_cycle(
         self, force: bool = False, trigger: str = "manual"
-    ) -> Tuple[int, int]:
+    ) -> Tuple[int, int, List[DistillErrorRecord]]:
         from .memory_ops import MemoryOps
         return await MemoryOps(self).run_distill_cycle(force, trigger)
 
@@ -299,7 +317,7 @@ class DistillRuntimeMixin:
 
     async def _distill_rows_with_llm(
         self, rows: List[Dict]
-    ) -> Tuple[List[Dict[str, object]], int, int]:
+    ) -> Tuple[List[Dict[str, object]], int, int, List]:
         from .memory_ops import MemoryOps
         return await MemoryOps(self).distill_rows_with_llm(rows)
 
@@ -351,5 +369,17 @@ class DistillRuntimeMixin:
 
     def _auto_prune_low_quality(self):
         _maintenance.auto_prune_low_quality(self)
+
+
+def _resolve_pipeline_gate(cfg) -> str:
+    """解决多管线并存时的互斥门控，返回本轮应运行的唯一管线名。
+
+    优先级: profile_extraction > consolidation > flat_distill
+    """
+    if cfg.profile_extraction_enabled:
+        return "profile_extraction"
+    if cfg.enable_consolidation_pipeline:
+        return "consolidation"
+    return "flat_distill"
 
 
