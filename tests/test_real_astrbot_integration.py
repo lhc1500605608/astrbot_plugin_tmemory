@@ -1,3 +1,4 @@
+import importlib.util
 import json
 import os
 import pathlib
@@ -5,7 +6,25 @@ import subprocess
 import sys
 import textwrap
 
+import pytest
 
+
+def _real_astrbot_available():
+    """Return True if the real astrbot package is installed (not stubs)."""
+    try:
+        spec = importlib.util.find_spec("astrbot")
+        return spec is not None and spec.origin is not None
+    except (ValueError, ImportError):
+        return False
+
+
+needs_astrbot = pytest.mark.skipif(
+    not _real_astrbot_available(),
+    reason="Real AstrBot environment required — run separately with astrbot installed",
+)
+
+
+@needs_astrbot
 def test_plugin_initializes_under_real_astrbot(tmp_path):
     script = textwrap.dedent(
         """
@@ -66,6 +85,7 @@ def test_plugin_initializes_under_real_astrbot(tmp_path):
     assert result.returncode == 0, result.stderr or result.stdout
 
 
+@needs_astrbot
 def test_plugin_is_discoverable_from_real_astrbot_plugin_directory(tmp_path):
     astrbot_root = tmp_path / "astrbot-root"
     script = textwrap.dedent(
@@ -124,6 +144,7 @@ def test_plugin_is_discoverable_from_real_astrbot_plugin_directory(tmp_path):
     assert result.returncode == 0, result.stderr or result.stdout
 
 
+@needs_astrbot
 def test_web_server_admin_import_works_from_real_astrbot_plugin_package(tmp_path):
     astrbot_root = tmp_path / "astrbot-root"
     script = textwrap.dedent(

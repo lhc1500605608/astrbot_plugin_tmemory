@@ -54,7 +54,7 @@ async def test_rule_distill_cycle_creates_memories_from_cache(plugin):
     await plugin._insert_conversation("u1", "user", "我喜欢吃火锅每周都去", "qq", "42", "")
     await plugin._insert_conversation("u1", "assistant", "火锅确实很棒", "qq", "42", "")
     assert plugin._count_pending_rows() == 2
-    p, c = await plugin._run_distill_cycle(force=True)
+    p, c, _errs = await plugin._run_distill_cycle(force=True)
     assert p >= 1 and c >= 1
     assert len(plugin._fetch_pending_rows("u1", 10)) == 0
     assert len(plugin._list_memories("u1", 10)) >= 1
@@ -67,7 +67,7 @@ async def test_rule_distill_cycle_multiple_users(plugin):
     for uid in ("ua", "ub", "uc"):
         for i in range(5):
             await plugin._insert_conversation(uid, "user", "msg%d:like%d" % (i, i), "qq", uid, "")
-    p, c = await plugin._run_distill_cycle(force=True)
+    p, c, _errs = await plugin._run_distill_cycle(force=True)
     assert p >= 1 and c >= 1
     for uid in ("ua", "ub", "uc"):
         assert len(plugin._fetch_pending_rows(uid, 99)) == 0
@@ -91,7 +91,7 @@ async def test_rule_distill_cycle_records_history(plugin):
 async def test_rule_distill_empty_cache_records_zero(plugin):
     """T1: 空缓存 → 蒸馏记录 0/0 但不崩溃。"""
     plugin.context = _MockContextNoProvider()
-    p, c = await plugin._run_distill_cycle(force=True)
+    p, c, _errs = await plugin._run_distill_cycle(force=True)
     assert p == 0 and c == 0
 
 
@@ -119,7 +119,7 @@ async def test_mock_llm_distill_parses_and_inserts_memory(plugin):
     )
     await plugin._insert_conversation("um", "user", "我特别喜欢吃火锅每周都要去",
                                        "qq", "42", "group:1")
-    p, c = await plugin._run_distill_cycle(force=True)
+    p, c, _errs = await plugin._run_distill_cycle(force=True)
     assert p == 1 and c == 1
     mems = plugin._list_memories("um", 10)
     assert len(mems) == 1
@@ -140,7 +140,7 @@ async def test_mock_llm_distill_multiple_memories(plugin):
     )
     for i in range(5):
         await plugin._insert_conversation("um2", "user", "d%d:个人信息" % i, "qq", "42", "group:1")
-    p, c = await plugin._run_distill_cycle(force=True)
+    p, c, _errs = await plugin._run_distill_cycle(force=True)
     assert p == 1 and c == 3
     texts = [m["memory"] for m in plugin._list_memories("um2", 10)]
     assert any("咖啡" in t for t in texts)
@@ -158,7 +158,7 @@ async def test_mock_llm_distill_validates_output(plugin):
     )
     await plugin._insert_conversation("uv", "user", "测试消息较长足以不被过滤",
                                        "qq", "1", "group:1")
-    p, c = await plugin._run_distill_cycle(force=True)
+    p, c, _errs = await plugin._run_distill_cycle(force=True)
     assert c == 1
     mems = plugin._list_memories("uv", 10)
     assert len(mems) == 1 and mems[0]["memory"] == "这是一个有效记忆"
@@ -190,7 +190,7 @@ async def test_mock_llm_distill_fallback_on_llm_error(plugin):
         async def llm_generate(self, **kw): raise ConnectionError("down")
     plugin.context = EC()
     await plugin._insert_conversation("uerr", "user", "数据科学家", "qq", "1", "group:1")
-    p, c = await plugin._run_distill_cycle(force=True)
+    p, c, _errs = await plugin._run_distill_cycle(force=True)
     assert p >= 1 and c >= 1
     assert len(plugin._fetch_pending_rows("uerr", 10)) == 0
 
@@ -234,7 +234,7 @@ async def test_distill_to_inject_chain(plugin):
     for i in range(5):
         await plugin._insert_conversation("uchain", "user", "like%d:川菜" % i,
                                            "qq", "42", "group:1")
-    p, c = await plugin._run_distill_cycle(force=True)
+    p, c, _errs = await plugin._run_distill_cycle(force=True)
     assert p >= 1 and c >= 1
     with plugin._db() as conn:
         h = conn.execute("SELECT * FROM distill_history ORDER BY id DESC LIMIT 1").fetchone()
@@ -266,12 +266,12 @@ async def test_distill_multiple_cycles_incremental(plugin):
     plugin.context = _MockContextNoProvider()
     for i in range(3):
         await plugin._insert_conversation("uinc", "user", "r1:跑步%d" % i, "qq", "42", "")
-    p1, c1 = await plugin._run_distill_cycle(force=True)
+    p1, c1, _errs = await plugin._run_distill_cycle(force=True)
     assert p1 >= 1 and c1 >= 1
     n1 = len(plugin._list_memories("uinc", 20))
     for i in range(3):
         await plugin._insert_conversation("uinc", "user", "r2:篮球%d" % i, "qq", "42", "")
-    p2, c2 = await plugin._run_distill_cycle(force=True)
+    p2, c2, _errs = await plugin._run_distill_cycle(force=True)
     assert p2 >= 1 and c2 >= 1
     n2 = len(plugin._list_memories("uinc", 50))
     assert n2 > n1
