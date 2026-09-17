@@ -164,6 +164,7 @@ class RetrievalManager:
                 """
                 SELECT role, content FROM conversation_cache
                 WHERE canonical_user_id = ? AND session_key = ?
+                  AND archived_at = ''
                 ORDER BY id DESC
                 LIMIT ?
                 """,

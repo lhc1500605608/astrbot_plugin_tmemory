@@ -102,6 +102,12 @@ class PluginConfig:
     inject_episode_max_chars: int = 600
     inject_style_max_chars: int = 400
 
+    # ── Session Lifecycle (/new /reset) — Plan TMEAAA-354 Phase 4a ──
+    # keep（默认）: 仅记录日志，缓存与长期记忆全部保留
+    # archive: 会话缓存软归档（标记 archived_at），工作上下文不再召回
+    # clear: 删除该会话缓存（被证据引用的行保留）
+    session_reset_policy: str = "keep"
+
 
 def _safe_int(value, default: int, *, label: str = "") -> int:
     try:
@@ -268,6 +274,15 @@ def parse_config(raw_config: dict) -> PluginConfig:
     c.inject_episode_max_chars = max(0, _safe_int(raw_config.get("inject_episode_max_chars", 600), 600, label="inject_episode_max_chars"))
     c.inject_style_max_chars = max(0, _safe_int(raw_config.get("inject_style_max_chars", 400), 400, label="inject_style_max_chars"))
 
+    # ── 会话生命周期 (/new /reset) ──
+    c.session_reset_policy = str(raw_config.get("session_reset_policy", "keep")).strip().lower()
+    if c.session_reset_policy not in {"keep", "archive", "clear"}:
+        logger.warning(
+            "[tmemory] config session_reset_policy invalid (%r), using default keep",
+            raw_config.get("session_reset_policy"),
+        )
+        c.session_reset_policy = "keep"
+
     return c
 
 
@@ -330,6 +345,7 @@ def apply_safe_defaults(plugin) -> None:
     c.inject_episode_limit = 3
     c.inject_episode_max_chars = 600
     c.inject_style_max_chars = 400
+    c.session_reset_policy = "keep"
     c.enable_consolidation_pipeline = False
     c.enable_episodic_summarization = True
     c.enable_episode_semantic_distill = True
@@ -371,6 +387,13 @@ def apply_safe_defaults(plugin) -> None:
     plugin._distill_skipped_rows = 0
     # 内存缓存：per-user 最近蒸馏完成时间戳（用于节流）
     plugin._user_last_distilled_ts = {}
+    # ── 会话生命周期（Phase 4a）─────────────────────────────────────────
+    plugin._session_conv_ids = {}
+    plugin._agent_begin_count = 0
+    plugin._agent_done_count = 0
+    # ── 兼容性打点（Plan TMEAAA-354 Phase 1）────────────────────────────
+    plugin._extra_user_temp_fallback_count = 0
+    plugin._persona_private_fallback_count = 0
 
 
 # =============================================================================
@@ -431,14 +454,29 @@ class PluginLifecycleMixin:
             "vector_dim": self._cfg.embed_dim,
         }
 
+    def _legacy_webui_config(self) -> Dict:
+        """合并顶层配置与 webui_settings 嵌套配置。"""
+        webui_cfg = dict(self.config)
+        webui_sub = self.config.get("webui_settings", {})
+        if isinstance(webui_sub, dict):
+            webui_cfg.update(webui_sub)
+        return webui_cfg
+
     def _safe_load_web_server(self):
-        """安全加载 WebUI 服务器，失败时降级为 _NullWebServer。"""
+        """安全加载 legacy WebUI 服务器，失败或未启用时降级为 _NullWebServer。
+
+        Plan TMEAAA-354 Phase 3：默认由 Dashboard 托管的 Pages bridge 取代
+        legacy aiohttp 面板；``webui_legacy_enabled=true`` 时保留一版回滚。
+        """
         try:
+            webui_cfg = self._legacy_webui_config()
+            if not bool(webui_cfg.get("webui_legacy_enabled", False)):
+                logger.info(
+                    "[tmemory] legacy WebUI 未启用（webui_legacy_enabled=false），"
+                    "使用 Dashboard Plugin Pages bridge。"
+                )
+                return _NullWebServer()
             TMemoryWebServer = self._load_web_server_class()
-            webui_cfg = dict(self.config)
-            webui_sub = self.config.get("webui_settings", {})
-            if isinstance(webui_sub, dict):
-                webui_cfg.update(webui_sub)
             return TMemoryWebServer(self, webui_cfg)
         except Exception as e:
             logger.warning(
@@ -446,34 +484,96 @@ class PluginLifecycleMixin:
             )
             return _NullWebServer()
 
+    def _safe_register_pages_bridge(self):
+        """注册 Dashboard Plugin Pages bridge（能力不可用时返回 None）。"""
+        try:
+            from ..adapters import version as _version_adapter
+
+            if not _version_adapter.has_plugin_pages():
+                logger.info(
+                    "[tmemory] 当前 AstrBot 无 Plugin Pages 能力（需 >=4.28），跳过 bridge 注册。"
+                )
+                return None
+
+            context = getattr(self, "context", None)
+            if context is None or not callable(
+                getattr(context, "register_web_api", None)
+            ):
+                return None
+
+            from ..web.bridge import PluginPagesBridge
+
+            bridge = PluginPagesBridge(self)
+            count = bridge.register(context)
+            logger.info("[tmemory] Plugin Pages bridge 已注册 %s 条路由", count)
+            return bridge
+        except Exception as e:
+            logger.warning("[tmemory] Plugin Pages bridge 注册失败: %s", e)
+            return None
+
     def _load_web_server_class(self):
-        """通过文件路径动态加载 web_server.py，避免 `No module named 'web_server'`。"""
-        web_server_path = os.path.join(
-            os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "web_server.py"
-        )
+        """通过文件路径动态加载 web/legacy_server.py。
+
+        避免 `No module named 'web_server'`，同时自建父包上下文，使
+        ``from ..web_handlers import ...`` 等相对 import 在脱离 sys.path 时仍可解析。
+        """
+        import types
+
+        root_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        web_server_path = os.path.join(root_dir, "web", "legacy_server.py")
         if not os.path.exists(web_server_path):
-            raise ImportError(f"web_server.py not found: {web_server_path}")
+            raise ImportError(f"web/legacy_server.py not found: {web_server_path}")
 
         plugin_module = self.__class__.__module__
         module_prefix = plugin_module.rsplit(".", 1)[0] if "." in plugin_module else self.plugin_name
-        module_name = f"{module_prefix}.web_server"
+        module_name = f"{module_prefix}.web.legacy_server"
+
+        # 保证父包 `module_prefix` / `module_prefix.web` 可在相对 import 时被解析。
+        sys_modules = __import__("sys").modules
+        parent_pkg = sys_modules.get(module_prefix)
+        if parent_pkg is None:
+            parent_pkg = types.ModuleType(module_prefix)
+            parent_pkg.__path__ = [root_dir]  # type: ignore[attr-defined]
+            sys_modules[module_prefix] = parent_pkg
+        web_pkg_name = f"{module_prefix}.web"
+        if web_pkg_name not in sys_modules:
+            web_pkg = types.ModuleType(web_pkg_name)
+            web_pkg.__path__ = [os.path.join(root_dir, "web")]  # type: ignore[attr-defined]
+            sys_modules[web_pkg_name] = web_pkg
+            setattr(parent_pkg, "web", web_pkg)
+
         spec = importlib.util.spec_from_file_location(module_name, web_server_path)
         if spec is None or spec.loader is None:
-            raise ImportError("failed to create module spec for web_server.py")
+            raise ImportError("failed to create module spec for web/legacy_server.py")
 
         module = importlib.util.module_from_spec(spec)
-        sys_modules = __import__("sys").modules
         sys_modules[module_name] = module
         spec.loader.exec_module(module)
 
         cls = getattr(module, "TMemoryWebServer", None)
         if cls is None:
-            raise ImportError("TMemoryWebServer not found in web_server.py")
+            raise ImportError("TMemoryWebServer not found in web/legacy_server.py")
         return cls
 
     async def initialize(self):
         self._init_db()
         self._migrate_schema()
+
+        # 上游能力探测：集中记录一次，并在 extra_user_temp 不可用时显式告警。
+        try:
+            from ..adapters import version as _version_adapter
+
+            caps = _version_adapter.log_capabilities()
+            if (
+                self._cfg.inject_position == "extra_user_temp"
+                and not caps.has_mark_as_temp
+            ):
+                logger.warning(
+                    "[tmemory] 当前 inject_position=extra_user_temp，但 %s",
+                    _version_adapter.extra_user_temp_hint(),
+                )
+        except Exception as e:  # 能力探测绝不应阻断启动
+            logger.debug("[tmemory] capability probe skipped: %s", e)
 
         # 初始化 VectorManager(如果向量检索启用)
         if self._cfg.enable_vector_search:
@@ -496,6 +596,12 @@ class PluginLifecycleMixin:
         except Exception as e:
             logger.warning("[tmemory] WebUI 启动失败，核心功能不受影响: %s", e)
             self._web_server = _NullWebServer()
+
+        # 注册会话删除钩子（Phase 4a；能力缺失自动跳过）
+        try:
+            self._register_session_lifecycle_hooks()
+        except Exception as e:
+            logger.warning("[tmemory] 会话删除钩子注册失败，核心功能不受影响: %s", e)
 
         logger.info(
             "[tmemory] initialized, db=%s, auto_capture=%s, memory_injection=%s, distill_interval=%ss, memory_mode=%s",

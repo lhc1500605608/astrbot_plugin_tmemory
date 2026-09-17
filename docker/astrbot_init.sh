@@ -17,6 +17,8 @@ DEEPSEEK_API_KEY="${DEEPSEEK_API_KEY:-}"
 DEEPSEEK_MODEL="${DEEPSEEK_MODEL:-deepseek-v4-flash}"
 DEEPSEEK_BASE_URL="${DEEPSEEK_BASE_URL:-https://api.deepseek.com}"
 CMD_CONFIG="/AstrBot/data/cmd_config.json"
+ASTRBOT_API_KEY="${ASTRBOT_API_KEY:-admin}"
+SEED_OPENAPI_KEY="${SEED_OPENAPI_KEY:-1}"
 
 echo "[init] === AstrBot Docker Init ==="
 echo "[init] DEEPSEEK_BASE_URL=$DEEPSEEK_BASE_URL"
@@ -103,6 +105,27 @@ with open(cmd_config, 'w', encoding='utf-8') as f:
 print('[init] ✅ DeepSeek provider 已注入: ' + cmd_config)
 PY
 echo "[init] ✅ AstrBot 配置就绪"
+
+# ── 步骤 2.5: 校验 plugin pages 运行时依赖（AstrBot >= 4.28 提供 astrbot.api.web）──
+# 缺失时插件会跳过 bridge 注册（不再全路由 500），但 Dashboard pages/memory/ 不可用。
+echo "[init] 校验 plugin pages 依赖 astrbot.api.web ..."
+if python3 -c "import sys; sys.path.insert(0, '/AstrBot'); import astrbot.api.web" 2>/dev/null; then
+  echo "[init] ✅ astrbot.api.web 可用（plugin pages bridge 可注册）"
+else
+  echo "[init] ⚠️ 缺少 astrbot.api.web（当前 AstrBot < 4.28）：plugin pages bridge 将跳过注册"
+  echo "[init] ⚠️ 如需 Dashboard pages/memory/ 页面，请升级镜像到 >= 4.28"
+fi
+
+# ── 步骤 2.8: 预置 OpenAPI key（后台，等 AstrBot 建库后写入 api_keys 表）──────────
+# AstrBot >= 4.28 的 OpenAPI key 不存在 dashboard.api_key，而是 data_v4.db 中
+# api_keys 表的 PBKDF2 哈希记录。此步骤让容器重建后 e2e smoke 开箱即可鉴权。
+if [ "$SEED_OPENAPI_KEY" = "1" ]; then
+  echo "[init] 预置 OpenAPI key（后台等待 api_keys 表）..."
+  (
+    ASTRBOT_API_KEY="$ASTRBOT_API_KEY" python3 /docker/seed_openapi_key.py || \
+      echo "[init] ⚠️ OpenAPI key 预置失败，可手动执行 docker/seed_openapi_key.sh"
+  ) &
+fi
 
 # ── 步骤 3: 启动 AstrBot ────────────────────────────────────────────────────────
 echo "[init] === 启动 AstrBot ==="

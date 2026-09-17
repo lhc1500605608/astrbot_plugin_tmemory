@@ -88,7 +88,8 @@
         "default": "",
         "description": "Embedding API Key",
         "hint": "对应 Embedding 提供商的 API 鉴权密钥。volc=火山方舟 API Key；openai=OpenAI 或兼容服务的 API Key。",
-        "obvious_hint": true
+        "obvious_hint": true,
+        "secret": true
       },
       "embedding_model": {
         "type": "string",
@@ -127,6 +128,12 @@
         "hint": "开启后将在独立端口启动记忆管理面板。",
         "default": false
       },
+      "webui_legacy_enabled": {
+        "type": "bool",
+        "description": "启用 legacy 独立端口面板（回滚）",
+        "hint": "默认关闭，改用 Dashboard 插件页（Plugin Pages，需 AstrBot >=4.28）。仅在需要回滚到旧 9966 端口面板时开启，需同时开启 webui_enabled。",
+        "default": false
+      },
       "webui_port": {
         "type": "int",
         "description": "监听端口",
@@ -150,6 +157,7 @@
         "description": "管理员密码",
         "hint": "登录 WebUI 面板的密码。必须设置密码后面板才会启动。",
         "obvious_hint": true,
+        "secret": true,
         "default": ""
       },
       "webui_ip_whitelist": {
@@ -230,7 +238,7 @@
   "inject_position": {
     "type": "string",
     "description": "记忆注入位置",
-    "hint": "system_prompt（默认）：追加到 system_prompt 末尾；user_message_before：作为用户消息前缀；user_message_after：作为用户消息后缀；slot：替换 system_prompt 中的占位符（见 inject_slot_marker）；extra_user_temp：追加到当前请求且不写入会话历史。",
+    "hint": "system_prompt（默认）：追加到 system_prompt 末尾；user_message_before：作为用户消息前缀；user_message_after：作为用户消息后缀；slot：替换 system_prompt 中的占位符（见 inject_slot_marker）；extra_user_temp：追加到当前请求且不写入会话历史（需要 AstrBot >= 4.28，低版本将回退为 system_prompt 注入并在日志中告警）。",
     "default": "system_prompt",
     "options": ["system_prompt", "user_message_before", "user_message_after", "slot", "extra_user_temp"]
   },
@@ -275,6 +283,13 @@
     "description": "Style 层：风格指导最大字符数 [已废弃]",
     "hint": "已被 profile_items 检索替代。保留以保持向后兼容，不再驱动主逻辑。",
     "default": 400
+  },
+  "session_reset_policy": {
+    "type": "string",
+    "description": "会话重置（/new /reset）记忆语义",
+    "hint": "keep（默认）：仅记录日志，会话缓存与长期记忆全部保留；archive：会话缓存软归档（工作上下文不再召回，证据与蒸馏保留）；clear：删除该会话缓存（被画像证据引用的行保留）。需 AstrBot >= 4.28 的会话删除钩子，低版本自动跳过。",
+    "default": "keep",
+    "options": ["keep", "archive", "clear"]
   },
   "distill_model_settings": {
     "type": "object",

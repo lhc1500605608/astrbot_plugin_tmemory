@@ -6,11 +6,14 @@
 
 from __future__ import annotations
 
+import inspect
 import os
 from dataclasses import asdict
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Dict, List
 
 from aiohttp import web
+
+from .adapters import version as _version_adapter
 
 try:
     from astrbot.api import logger as _astrbot_logger
@@ -375,18 +378,73 @@ class WebHandlersMixin:
             for k, v in data.items():
                 current_config[k] = v
 
-            if hasattr(current_config, "save_config"):
-                current_config.save_config()
+            # 4.26+ 提供非阻塞 save_config_async()（revision 感知）；
+            # 旧版本保留同步 save_config() 兜底，避免阻塞事件循环。
+            saved = await self._save_plugin_config(current_config)
+
             from .core.config import parse_config
 
             self.plugin._cfg = parse_config(current_config)
 
-            return web.json_response({"status": "ok"})
+            payload: Dict[str, Any] = {"status": "ok"}
+            if not saved:
+                _astrbot_logger.warning(
+                    "[tmemory-web] 配置对象未提供 save_config/save_config_async，"
+                    "仅内存生效（重启后可能丢失）"
+                )
+            warnings = self._config_warnings(self.plugin._cfg)
+            if warnings:
+                payload["warnings"] = warnings
+            return web.json_response(payload)
         except ValueError as e:
             return web.json_response({"error": str(e)}, status=400)
         except Exception:
             _astrbot_logger.exception("[tmemory-web] config update failed")
             return web.json_response({"error": "failed to update config"}, status=400)
+
+    async def _save_plugin_config(self, current_config: Any) -> bool:
+        """优先 save_config_async()，回退同步 save_config()；两者皆无返回 False。"""
+        save_async = getattr(current_config, "save_config_async", None)
+        if callable(save_async):
+            result = save_async()
+            if inspect.isawaitable(result):
+                await result
+            return True
+
+        save_sync = getattr(current_config, "save_config", None)
+        if callable(save_sync):
+            save_sync()
+            return True
+        return False
+
+    @staticmethod
+    def _config_warnings(cfg: Any) -> List[str]:
+        """返回当前配置在能力约束下的 UI 可读告警。"""
+        warnings: List[str] = []
+        if (
+            getattr(cfg, "inject_position", "") == "extra_user_temp"
+            and not _version_adapter.extra_user_temp_available()
+        ):
+            warnings.append(_version_adapter.extra_user_temp_hint())
+        return warnings
+
+    async def _handle_get_capabilities(self, request: web.Request):
+        """GET /api/capabilities — 供面板展示版本、能力可用性与降级打点。"""
+        self._get_admin()  # ensure auth
+        return web.json_response(
+            {
+                "capabilities": _version_adapter.get_capabilities().to_dict(),
+                "warnings": self._config_warnings(self.plugin._cfg),
+                "runtime": {
+                    "extra_user_temp_fallback_count": getattr(
+                        self.plugin, "_extra_user_temp_fallback_count", 0
+                    ),
+                    "persona_private_fallback_count": getattr(
+                        self.plugin, "_persona_private_fallback_count", 0
+                    ),
+                },
+            }
+        )
 
     # ── 测试对话模拟 ──────────────────────────────────────────────────
 

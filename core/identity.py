@@ -1,6 +1,13 @@
+from __future__ import annotations
+
 import time
-from typing import Tuple, Dict, Any
-from astrbot.api.event import AstrMessageEvent
+from typing import TYPE_CHECKING, Tuple
+
+from ..adapters import event as _event_adapter
+
+if TYPE_CHECKING:
+    from astrbot.api.event import AstrMessageEvent
+
 
 class IdentityManager:
     def __init__(self, db_manager, cfg, memory_logger):
@@ -13,20 +20,10 @@ class IdentityManager:
 
     @staticmethod
     def _platform_str(val) -> str:
-        try:
-            from astrbot.core.platform.platform_metadata import PlatformMetadata
-            if isinstance(val, PlatformMetadata):
-                return val.id or val.name
-        except ImportError:
-            pass
-        return str(val)
+        return _event_adapter.get_platform_str(val)
 
     def get_adapter_name(self, event: AstrMessageEvent) -> str:
-        for attr in ["adapter_name", "platform", "platform_id"]:
-            val = getattr(event, attr, None)
-            if val:
-                return self._platform_str(val)
-        return "unknown"
+        return _event_adapter.get_identity_adapter_name(event)
 
     def get_adapter_user_id(self, event: AstrMessageEvent) -> str:
         val = event.get_sender_id()

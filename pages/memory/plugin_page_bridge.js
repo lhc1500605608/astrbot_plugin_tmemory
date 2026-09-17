@@ -1,33 +1,39 @@
 /* plugin_page_bridge.js — Dashboard 托管插件页的 API 层（替代 legacy api.js）
  *
  * 与 legacy api.js 的区别：
- * - API_BASE 指向 bridge 路由 /api/astrbot_plugin_tmemory
+ * - 通过 AstrBotPluginPage SDK（postMessage → 父窗口代理）发起请求
  * - 无自签 JWT，无 login/logout/token 管理（鉴权由 Dashboard 统一处理）
  * - 错误信封兼容 bridge 的 {status:"error", message:...} 与 legacy 的 {error:...}
  */
 
 const PLUGIN_NAME = 'astrbot_plugin_tmemory';
-const API_BASE = window.location.origin + '/api/' + PLUGIN_NAME;
 
 async function api(path, opts = {}) {
-  const url = API_BASE + path;
+  const sdk = window.AstrBotPluginPage;
+  if (!sdk) {
+    console.error('API error: AstrBotPluginPage SDK not loaded');
+    toast('SDK 未加载，请刷新页面重试', 'error');
+    return null;
+  }
+  const endpoint = path.charAt(0) === '/' ? path.slice(1) : path;
+  const isPost = (opts.method && opts.method.toUpperCase() === 'POST') || opts.body;
   try {
-    const resp = await fetch(url, {
-      headers: { 'Content-Type': 'application/json' },
-      ...opts
-    });
-    const ct = resp.headers.get('content-type') || '';
-    if (!ct.includes('application/json')) {
-      const text = await resp.text();
-      console.error('Non-JSON response:', resp.status, text.slice(0, 200));
-      toast(`服务端错误 (${resp.status})`, 'error');
-      return null;
-    }
-    const data = await resp.json();
-    if (resp.status >= 400) {
-      const msg = data.message || data.error || '请求失败';
-      toast(msg, 'error');
-      return null;
+    let data;
+    if (isPost) {
+      const body = opts.body ? JSON.parse(opts.body) : {};
+      data = await sdk.apiPost(endpoint, body);
+    } else {
+      const qIdx = endpoint.indexOf('?');
+      const ep = qIdx >= 0 ? endpoint.slice(0, qIdx) : endpoint;
+      const qs = qIdx >= 0 ? endpoint.slice(qIdx + 1) : '';
+      const params = {};
+      if (qs) {
+        qs.split('&').forEach(kv => {
+          const parts = kv.split('=');
+          params[decodeURIComponent(parts[0])] = decodeURIComponent(parts[1] || '');
+        });
+      }
+      data = await sdk.apiGet(ep, params);
     }
     if (data && data.status === 'error') {
       toast(data.message || '请求失败', 'error');
@@ -36,7 +42,7 @@ async function api(path, opts = {}) {
     return data;
   } catch (e) {
     console.error('API error:', e);
-    toast('请求失败: ' + e.message, 'error');
+    toast('请求失败: ' + (e.message || e), 'error');
     return null;
   }
 }

@@ -76,10 +76,22 @@ def _install_astrbot_stubs() -> None:
         pass
 
     class _StubTextPart:
+        """AstrBot 4.23.2 契约：``TextPart`` 没有 ``mark_as_temp``。
+
+        ``mark_as_temp`` 是 4.28 才引入的 API。stub 必须与真实契约一致，
+        否则 ``adapters/version.py`` 的能力探测会在 stub 环境误报
+        ``has_mark_as_temp=True``，掩盖 4.16/4.23.2 的 system_prompt 降级路径
+        （TMEAAA-361 AC3）。需要验证 4.28 路径的测试请声明
+        ``mark_as_temp_support`` fixture 显式安装。
+        """
+
         def __init__(self, text: str):
             self.text = text
             self.type = "text"
             self._temp = False
+
+    class _StubTextPartWithTemp(_StubTextPart):
+        """AstrBot >=4.28 契约：``TextPart.mark_as_temp`` 可用。"""
 
         def mark_as_temp(self):
             self._temp = True
@@ -91,6 +103,8 @@ def _install_astrbot_stubs() -> None:
     message_mod.ContentPart = _StubContentPart
     message_mod.TextPart = _StubTextPart
     message_mod.Message = _StubMessage
+    # 供 mark_as_temp_support fixture 引用（4.28 形状，默认不安装）。
+    message_mod.stub_text_part_with_temp = _StubTextPartWithTemp
 
     astrbot_mod.api = api_mod
     sys.modules["astrbot"] = astrbot_mod
@@ -131,7 +145,34 @@ def plugin_module():
 @pytest.fixture(scope="session")
 def web_module():
     _install_astrbot_stubs()
-    return _load_package_module("web_server", "web_server.py")
+    return _load_package_module("web.legacy_server", "web/legacy_server.py")
+
+
+@pytest.fixture(scope="session")
+def bridge_module():
+    _install_astrbot_stubs()
+    return _load_package_module("web.bridge", "web/bridge.py")
+
+
+@pytest.fixture()
+def mark_as_temp_support(plugin_module):
+    """安装 AstrBot >=4.28 形状的 ``TextPart`` 并重置能力缓存。
+
+    默认 stub 模拟 4.16/4.23.2（无 ``mark_as_temp``）。只有显式声明本 fixture
+    的测试才依赖 4.28 契约，默认环境始终走真实降级路径。
+    """
+    from astrbot_plugin_tmemory.adapters import version
+
+    message_mod = sys.modules["astrbot.core.agent.message"]
+    with_temp = message_mod.stub_text_part_with_temp
+    original = message_mod.TextPart
+    message_mod.TextPart = with_temp
+    version.reset_capability_cache()
+    try:
+        yield with_temp
+    finally:
+        message_mod.TextPart = original
+        version.reset_capability_cache()
 
 
 @pytest.fixture()

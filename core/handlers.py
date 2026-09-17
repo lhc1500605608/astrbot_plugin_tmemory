@@ -1,9 +1,8 @@
 from __future__ import annotations
 
+import logging
 import re
 from typing import TYPE_CHECKING, List, Optional
-
-from astrbot.api import logger
 
 from . import vector as _vector
 from .commands import CommandHandlersMixin
@@ -11,6 +10,8 @@ from .commands import CommandHandlersMixin
 if TYPE_CHECKING:
     from astrbot.api.event import AstrMessageEvent
     from astrbot.api.provider import LLMResponse, ProviderRequest
+
+logger = logging.getLogger("astrbot")
 
 
 class PluginHandlersMixin(CommandHandlersMixin):
@@ -48,7 +49,7 @@ class PluginHandlersMixin(CommandHandlersMixin):
             source_user_id=adapter_user,
             unified_msg_origin=umo,
             scope=self._get_memory_scope(event),
-            persona_id=self._get_current_persona(event),
+            persona_id=await self._get_current_persona_async(event),
         )
 
     async def _handle_on_llm_response(self, event: AstrMessageEvent, resp: LLMResponse):
@@ -143,7 +144,7 @@ class PluginHandlersMixin(CommandHandlersMixin):
             self._identity_mgr.resolve_current_identity(event)
         )
         scope = self._get_memory_scope(event)
-        persona_id = self._get_current_persona(event)
+        persona_id = await self._get_current_persona_async(event)
 
         new_id = self._insert_memory(
             canonical_id=canonical_id,
@@ -177,7 +178,7 @@ class PluginHandlersMixin(CommandHandlersMixin):
 
         canonical_id, _, _ = self._identity_mgr.resolve_current_identity(event)
         scope = self._get_memory_scope(event)
-        persona_id = self._get_current_persona(event)
+        persona_id = await self._get_current_persona_async(event)
         is_group = self._is_group_event(event)
 
         try:

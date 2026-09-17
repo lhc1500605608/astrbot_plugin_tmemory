@@ -109,8 +109,6 @@ class DataAccessMixin:
         exclude_private: bool = False,
         summary_channel: str = "canonical",
     ) -> List[Dict[str, object]]:
-        from astrbot.api.event import AstrMessageEvent
-
         query_vec: Optional[List[float]] = None
         if self._vec_available and query:
             query_vec = await _vector.get_or_generate_query_embedding(self, query)

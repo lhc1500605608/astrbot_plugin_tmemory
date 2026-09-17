@@ -1,9 +1,12 @@
-"""tmemory 独立 WebUI 服务器。
+"""tmemory 独立 WebUI 服务器（legacy，仅作回滚）。
 
 使用 aiohttp 在单独端口运行，支持：
 - 管理员账户登录（JWT token）
 - IP 白名单
 - 信任反向代理（X-Forwarded-For / X-Real-IP）
+
+Plan TMEAAA-354 Phase 3a：默认由 Dashboard 托管的 Plugin Pages bridge
+（``web/bridge.py``）取代；仅当 ``webui_legacy_enabled=true`` 时加载本模块。
 """
 
 from __future__ import annotations
@@ -24,8 +27,8 @@ except ImportError:
 if TYPE_CHECKING:
     from main import TMemoryPlugin
 
-from .web_handlers import WebHandlersMixin
-from .core.utils_shared import jwt_decode, jwt_encode
+from ..web_handlers import WebHandlersMixin
+from ..core.utils_shared import jwt_decode, jwt_encode
 
 # 服务器类
 # ──────────────────────────────────────────────────────────────────────────────
@@ -66,7 +69,7 @@ class TMemoryWebServer(WebHandlersMixin):
     def _get_admin(self):
         """延迟构造 AdminService，确保插件 DB 已就绪。"""
         if self._admin is None:
-            from .core.admin_service import AdminService
+            from ..core.admin_service import AdminService
             self._admin = AdminService(self.plugin)
         return self._admin
 
@@ -176,9 +179,8 @@ class TMemoryWebServer(WebHandlersMixin):
         app = self._app
         assert app is not None
         # 静态资源路由（CSS / JS / icons / vendor）
-        static_dir = os.path.join(
-            os.path.dirname(os.path.abspath(__file__)), "templates", "static"
-        )
+        plugin_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        static_dir = os.path.join(plugin_root, "templates", "static")
         app.router.add_static("/static", static_dir, name="static")
         app.router.add_get("/", self._handle_page)
         app.router.add_get("/favicon.ico", self._handle_favicon)
@@ -213,6 +215,7 @@ class TMemoryWebServer(WebHandlersMixin):
         app.router.add_post("/api/memory/split", self._handle_memory_split)
         app.router.add_get("/api/config", self._handle_get_config)
         app.router.add_patch("/api/config", self._handle_update_config)
+        app.router.add_get("/api/capabilities", self._handle_get_capabilities)
         # 测试对话模拟（受 JWT 保护）
         app.router.add_post("/api/test/conversation", self._handle_test_conversation)
 

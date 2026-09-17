@@ -121,6 +121,25 @@ data/plugin_data/astrbot_plugin_tmemory/tmemory.db
 
 核心表：`identity_bindings`、`conversation_cache`、`user_profiles`、`profile_items`、`profile_item_evidence`、`profile_relations`、`memory_vectors`、`memory_events`、`distill_history`。
 
+## 会话生命周期（`/new` `/reset`）
+
+AstrBot ≥4.28 在 `/new` `/reset` 时会新建/重置会话，插件通过
+`ConversationManager.register_on_session_deleted` + 对话 ID 变化检测观测该事件，并按
+`session_reset_policy` 三态处理**会话缓存**（`conversation_cache`）；长期记忆
+（`profile_items` / 蒸馏产物）始终保留：
+
+| 取值 | 行为 |
+|------|------|
+| `keep`（默认） | 仅记录日志，缓存与长期记忆全部保留（向后兼容） |
+| `archive` | 会话缓存软归档（写入 `archived_at`）：不再作为工作上下文注入，但保留证据与蒸馏资格 |
+| `clear` | 删除该会话缓存行；被 `profile_item_evidence` / `episode_sources` 引用的行保留，避免破坏证据链 |
+
+- 仅支持 AstrBot ≥4.28 的会话删除钩子；低版本自动跳过并记一条日志，不影响插件加载。
+  `/new` `/reset` 的轮转检测不依赖该钩子（基于对话 ID 变化），4.16–4.28 全版本可用。
+- 会话删除事件以 INFO 级别记录：`[tmemory] 会话删除观测 umo=... policy=... archived=... cleared=...`。
+- 同时接入 `on_agent_begin` / `on_agent_done`（≥4.28）作为 Agent 运行起止观测（DEBUG 日志）。
+- 详细语义与验证步骤见 [`docs/session-lifecycle.md`](docs/session-lifecycle.md)。
+
 ## 常见问题
 
 **为什么没有立即生成长期记忆？** 默认需要单用户未蒸馏消息达到 `distill_min_batch_count`（默认 20），等待后台 worker。管理员可用 `/tm_distill_now` 手动触发。
@@ -131,9 +150,16 @@ data/plugin_data/astrbot_plugin_tmemory/tmemory.db
 
 **向量检索为空？** 确认 `sqlite-vec` 可用、API Key 有效、维度匹配，执行 `/tm_vec_rebuild`。
 
-**WebUI 打不开？** 确认 `webui_enabled=true`、`webui_password` 已设置、端口未被占用。
+**WebUI 打不开？** AstrBot ≥4.28 默认在 Dashboard 插件详情页以 Plugin Pages 打开（无需单独端口/密码）。旧独立端口面板已下线，如需回滚请开启 `webui_legacy_enabled=true`（同时保持 `webui_enabled=true` 并设置 `webui_password`、确认端口未被占用）。
+
+**Plugin Pages 接口 500 / `ModuleNotFoundError: No module named 'astrbot.api.web'`？** 当前 AstrBot 版本 <4.28（`astrbot.api.web` 缺失）。插件的能力探测会同时校验 `Context.register_web_api` 与 `astrbot.api.web` 契约，不满足时跳过 bridge 注册并记日志（`[tmemory] 当前 AstrBot 无 Plugin Pages 能力（需 >=4.28），跳过 bridge 注册。`），不再返回 500。请将镜像升级到提供 `astrbot.api.web` 的版本（≥4.28）后重启；校验命令：`docker exec <容器> python3 -c "import astrbot.api.web"`。
 
 ## 兼容层说明
+
+### AstrBot 版本兼容
+
+- 插件声明 `astrbot_version: ">=4.16,<5"`（保守策略），在 AstrBot 4.16 及以上均可加载。
+- 注入位置 `inject_position=extra_user_temp` 依赖 `TextPart.mark_as_temp()`，**需 AstrBot ≥4.28**；在 4.16–4.27 上会自动回退为 `system_prompt`（能力探测见后续 Phase 1）。
 
 > **当前产品基线**：MemoryForge 的主产品模型是「用户画像」（`user_profiles` + `profile_items`），旧 `memories` 体系仅作为内部兼容层存在，不对外宣称为产品能力。
 

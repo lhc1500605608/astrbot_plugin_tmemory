@@ -7,14 +7,15 @@ Methods use ``self._normalize_text()``, ``self._db()``, ``self._cfg`` etc. from 
 from __future__ import annotations
 
 import json
+import logging
 import re
 import time
 from typing import TYPE_CHECKING
 
-from astrbot.api import logger
-
 if TYPE_CHECKING:
     from astrbot.api.event import AstrMessageEvent
+
+logger = logging.getLogger("astrbot")
 
 
 class CommandHandlersMixin:
