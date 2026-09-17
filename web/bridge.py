@@ -237,6 +237,8 @@ class PluginPagesBridge:
         ),
         BridgeRoute(("POST",), "/user/export", "user_export", "导出用户数据"),
         BridgeRoute(("POST",), "/user/purge", "user_purge", "清除用户数据"),
+        BridgeRoute(("POST",), "/export", "export_data", "导出数据集（记忆+绑定）"),
+        BridgeRoute(("POST",), "/import", "import_data", "导入数据集（dry-run/幂等/备份）"),
         BridgeRoute(("GET",), "/config", "config_get", "读取插件配置"),
         BridgeRoute(
             ("POST", "PATCH"), "/config", "config_update", "更新插件配置"
@@ -545,6 +547,31 @@ class PluginPagesBridge:
             return {"error": "user is required"}, 400
         return {"ok": True, **self.admin().purge_user(user)}, 200
 
+    # ── 数据集导出 / 导入（B6） ─────────────────────────────────────────
+
+    async def export_data(self, request: Any) -> BridgeResult:
+        data = await _json_object(request)
+        users = data.get("users")
+        if users is not None and not isinstance(users, list):
+            return {"error": "users must be a list"}, 400
+        return dict(self.admin().export_dataset(users)), 200
+
+    async def import_data(self, request: Any) -> BridgeResult:
+        data = await _json_object(request)
+        payload = data.get("payload", data.get("data"))
+        if payload is None:
+            return {"error": "payload is required"}, 400
+        try:
+            result = self.admin().import_dataset(
+                payload,
+                dry_run=bool(data.get("dry_run", True)),
+                on_conflict=str(data.get("on_conflict", "skip") or "skip"),
+                backup=bool(data.get("backup", True)),
+            )
+        except ValueError as exc:
+            return {"error": str(exc)}, 400
+        return dict(result), (200 if result.get("ok") else 409)
+
     # ── 配置 ────────────────────────────────────────────────────────────
 
     async def config_get(self, request: Any) -> BridgeResult:
@@ -561,13 +588,38 @@ class PluginPagesBridge:
             return config_dict, 200
         return {key: config_dict[key] for key in keys if key in config_dict}, 200
 
+    _PROACTIVE_KEYS = {
+        "proactive_enabled",
+        "proactive_interval_sec",
+        "proactive_max_candidates_per_cycle",
+        "proactive_per_user_window_sec",
+        "proactive_per_user_max_per_window",
+        "proactive_min_interval_sec",
+        "proactive_daily_budget",
+        "proactive_reminder_enabled",
+        "proactive_recall_enabled",
+        "proactive_opt_in_default",
+        "proactive_max_message_chars",
+    }
+
     async def config_update(self, request: Any) -> BridgeResult:
         data = await _json_object(request)
         _validate_config_patch(self.plugin, data)
 
         current_config = self.plugin.config
+
+        proactive_patch = {}
         for key, value in data.items():
             current_config[key] = value
+            if key in self._PROACTIVE_KEYS:
+                proactive_patch[key] = value
+
+        if proactive_patch:
+            nested = current_config.get("proactive")
+            if not isinstance(nested, dict):
+                nested = {}
+                current_config["proactive"] = nested
+            nested.update(proactive_patch)
 
         saved = await _save_plugin_config(current_config)
 

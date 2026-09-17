@@ -2,7 +2,7 @@
 
 **MemoryForge** 是 [AstrBot](https://github.com/AstrBotDevs/AstrBot) 的长期记忆插件，通过自动采集对话、LLM 蒸馏和分层注入，让机器人在多轮、跨会话、跨平台场景下持续理解用户。
 
-> 当前版本：`v0.9.0`。v0.9.0 完成画像基线硬化，全面通过 426 项测试。
+> 当前版本：`v0.11.0`。v0.11.0 新增 B1 平台 Provider 嵌入、B2 主动性记忆、B3 蒸馏降本、B6 质量基准与数据 API（详见 `CHANGELOG.md`）。
 
 ## 功能概览
 
@@ -15,7 +15,7 @@
 - **混合召回升级**：`on_llm_request` 注入路径从纯 FTS5 升级为可选向量+混合召回，embedding 缓存可观测
 - **蒸馏预算控制**：新增 `distill_daily_token_budget` 配置项，超预算自动暂停+告警，`/tm_distill_history` 暴露消耗视图
 - **代码复杂度重切分**：`core/utils.py`、`core/admin_service.py`、`core/consolidation.py`、`web_server.py` 大文件拆分（各模块 <500行，无循环导入）
-- **自动化基线回归**：全量 426 测试通过，3 跳过
+- **自动化基线回归**：全量 510 测试（507 通过 / 3 跳过）
 - **记忆维护**：强化、衰减、固定、提纯、合并、拆分、失活
 - **身份合并**：通过 `canonical_user_id` 合并同一用户跨平台记忆
 - **WebUI 管理面板**：可选画像工作台、审计日志和手动蒸馏
@@ -68,6 +68,23 @@ WebUI route 级 smoke 通过 pytest 覆盖 auth、profile 查询/更新/合并�
 ```bash
 python3 -m pytest -q tests/test_profile_admin_api.py::test_webui_profile_route_smoke_covers_auth_crud_merge_and_config
 ```
+
+## 打包与发布
+
+从仓库根目录生成可被 AstrBot Dashboard 安装的干净 zip（单一顶层目录 `astrbot_plugin_tmemory/`，自动排除 `__MACOSX`、`.DS_Store`、`._*`、`__pycache__`、`.env` 等）：
+
+```bash
+tools/pack_plugin.sh            # -> dist/astrbot_plugin_tmemory.zip
+tools/pack_plugin.sh --output /tmp/astrbot_plugin_tmemory.zip
+```
+
+脚本内置 AstrBot 同规则校验（`_resolve_archive_root_dir` + `metadata.yaml` 命中），校验失败即非零退出。验证已有压缩包：
+
+```bash
+python3 tools/plugin_archive.py verify dist/astrbot_plugin_tmemory.zip
+```
+
+不要使用 macOS Finder「压缩」生成的 zip（会带入 `__MACOSX/` 资源叉），否则 AstrBot 推导的根目录退化为空、找不到 `metadata.yaml`。详见 `docs/PACKAGING.md`。
 
 ## 管理命令
 
@@ -186,4 +203,4 @@ AstrBot ≥4.28 在 `/new` `/reset` 时会新建/重置会话，插件通过
 
 **当前核心表**：`identity_bindings`、`conversation_cache`、`user_profiles`、`profile_items`、`profile_item_evidence`、`profile_relations`、`memory_vectors`、`memory_events`、`distill_history`。
 
-旧表计划在 v0.9.1 兼容层收口中正式移除，届时将提供至少一个发布周期的只读过渡期。
+上述旧表尚未在 v0.10.0 移除，仍保留 DDL 与只读兼容路径；后续版本移除时将提供至少一个发布周期的只读过渡期。

@@ -27,6 +27,7 @@ from .admin_memory_mixin import AdminMemoryMixin
 from .admin_profile_mixin import AdminProfileMixin
 from .admin_identity_mixin import AdminIdentityMixin
 from .admin_distill_mixin import AdminDistillMixin
+from .admin_portability_mixin import AdminPortabilityMixin
 from .utils_shared import (
     _VALID_FACET_TYPES,
     _VALID_ITEM_STATUSES,
@@ -46,7 +47,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger("astrbot")
 
 
-class AdminService(AdminMemoryMixin, AdminProfileMixin, AdminIdentityMixin, AdminDistillMixin):
+class AdminService(AdminMemoryMixin, AdminProfileMixin, AdminIdentityMixin, AdminDistillMixin, AdminPortabilityMixin):
     """WebUI 管理用例的应用服务。
 
     Parameters

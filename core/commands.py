@@ -134,6 +134,16 @@ class CommandHandlersMixin:
             f"pending_cached_rows: {stats['pending_cached_rows']}",
             f"total_events: {stats['total_events']}",
         ]
+        vm_status = self._embedding_status()
+        if vm_status:
+            lines.append(
+                f"embed_source: {vm_status.get('active_source', 'none')}"
+                f" (configured={vm_status.get('embedding_source', '')}"
+                f", provider_id={vm_status.get('provider_id', '') or '-'}"
+                f", dim={vm_status.get('provider_dim', 0) or '-'})"
+            )
+            if vm_status.get("fallback_reason"):
+                lines.append(f"embed_fallback: {vm_status['fallback_reason'][:80]}")
         if self._vec_available:
             lines.append(f"vector_index_rows: {stats.get('vector_index_rows', 0)}")
             lines.append(
@@ -230,7 +240,10 @@ class CommandHandlersMixin:
                 "\u8bf7\u5148\u5b89\u88c5:pip install sqlite-vec\uff0c\u5e76\u5728\u914d\u7f6e\u4e2d\u5f00\u542f enable_vector_search\u3002"
             )
             return
-        if not self._cfg.embed_provider_id:
+        provider_ready = bool(
+            getattr(getattr(self, "_vector_manager", None), "embedding_provider", None)
+        )
+        if not self._cfg.embed_provider_id and not provider_ready:
             yield event.plain_result("\u672a\u914d\u7f6e embed_provider_id\uff0c\u65e0\u6cd5\u751f\u6210\u5411\u91cf\u3002")
             return
 
@@ -436,6 +449,56 @@ class CommandHandlersMixin:
         canonical_id, _, _ = self._identity_mgr.resolve_current_identity(event)
         data = self._export_user_data(canonical_id)
         yield event.plain_result(json.dumps(data, ensure_ascii=False, indent=2)[:3000])
+
+    async def _handle_tm_import(self, event: AstrMessageEvent):
+        raw = (event.message_str or "").strip()
+        body = re.sub(r"^/tm_import\s*", "", raw, flags=re.IGNORECASE).strip()
+        if not body:
+            yield event.plain_result(
+                "\u7528\u6cd5: /tm_import [apply] <JSON>\n"
+                "- \u9ed8\u8ba4 dry-run \u4ec5\u9884\u89c8\uff1bapply \u5b9e\u9645\u5199\u5165\uff08\u81ea\u52a8\u5907\u4efd+\u4e8b\u52a1\uff09\u3002"
+            )
+            return
+
+        apply = False
+        if body.lower().startswith("apply"):
+            apply = True
+            body = body[len("apply") :].strip()
+        elif body.lower().startswith("preview"):
+            body = body[len("preview") :].strip()
+
+        try:
+            payload = json.loads(body)
+        except json.JSONDecodeError as exc:
+            yield event.plain_result(f"\u2717 JSON \u89e3\u6790\u5931\u8d25: {exc}")
+            return
+
+        from . import portability as _portability
+
+        try:
+            result = _portability.import_dataset(
+                self, payload, dry_run=not apply, on_conflict="skip"
+            )
+        except ValueError as exc:
+            yield event.plain_result(f"\u2717 \u53c2\u6570\u9519\u8bef: {exc}")
+            return
+
+        head = (
+            f"\u5bfc\u5165\u5b8c\u6210: \u65b0\u589e {result['inserted']} \u6761"
+            if apply
+            else f"\u5bfc\u5165\u9884\u89c8(dry-run): \u5c06\u65b0\u589e {result['to_insert']} \u6761"
+        )
+        lines = [
+            head,
+            f"\u51b2\u7a81\u8df3\u8fc7 {result['conflicts']}\uff0c\u8f7d\u5185\u91cd\u590d {result['duplicates_in_payload']}\uff0c\u975e\u6cd5 {result['error_count']}",
+        ]
+        if apply and result.get("backup_path"):
+            lines.append(f"\u5907\u4efd: {result['backup_path']}")
+        if result.get("errors"):
+            lines.append(f"\u9996\u6761\u9519\u8bef: {result['errors'][0].get('reason')}")
+        if not apply:
+            lines.append("\u6267\u884c\u5199\u5165: /tm_import apply <JSON>")
+        yield event.plain_result("\n".join(lines))
 
     async def _handle_tm_purge(self, event: AstrMessageEvent):
         canonical_id, _, _ = self._identity_mgr.resolve_current_identity(event)

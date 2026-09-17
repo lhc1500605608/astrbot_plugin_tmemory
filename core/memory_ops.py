@@ -159,10 +159,15 @@ class MemoryOps:
     ) -> Tuple[List[Dict[str, object]], int, int, List[DistillErrorRecord]]:
         """用 LLM 对一批对话行进行结构化蒸馏，失败时回退到规则蒸馏。
 
+        B3 降本：相同 transcript + 模型命中 ``distill_prompt_cache`` 时直接复用产出，
+        不再调用 LLM、token 记为 0（缓存只影响成本，不改变对外结果）。
+
         Returns:
             (memories, tokens_input, tokens_output, errors)
             errors 为结构化错误记录列表，替代旧版静默回退。
         """
+        from . import prompt_cache as _prompt_cache
+
         username = str(rows[0].get("canonical_user_id", "")) if rows else ""
         transcript_lines = []
         for row in rows:
@@ -171,10 +176,6 @@ class MemoryOps:
             transcript_lines.append(f"{role}: {content}")
 
         transcript = "\n".join(transcript_lines)
-
-        style_analysis = get_style_analyzer().analyze(rows)
-        style_context = get_style_analyzer().build_style_context(style_analysis)
-        prompt = self.plugin._distill_mgr.build_distill_prompt(transcript, style_context)
 
         chat_provider_id = await self.plugin._distill_mgr.resolve_distill_provider_id(rows, self.plugin.context)
         chat_model_id = await self.plugin._distill_mgr.resolve_distill_model_id(rows)
@@ -201,6 +202,20 @@ class MemoryOps:
                 [fallback_err],
             )
 
+        cache_enabled = bool(getattr(self.plugin._cfg, "distill_prompt_cache", True))
+        cache_key = _prompt_cache.compute_cache_key(transcript, chat_model_id or chat_provider_id)
+        if cache_enabled:
+            cached_items = _prompt_cache.get_cached_distill_items(self.plugin, cache_key)
+            if cached_items is not None:
+                self.plugin._distill_prompt_cache_hits = (
+                    getattr(self.plugin, "_distill_prompt_cache_hits", 0) + 1
+                )
+                return cached_items, 0, 0, []
+
+        style_analysis = get_style_analyzer().analyze(rows)
+        style_context = get_style_analyzer().build_style_context(style_analysis)
+        prompt = self.plugin._distill_mgr.build_distill_prompt(transcript, style_context)
+
         try:
             llm_generate_kwargs = {
                 "chat_provider_id": chat_provider_id,
@@ -226,6 +241,10 @@ class MemoryOps:
                 tok_in, tok_out = -1, -1
 
             if parsed:
+                if cache_enabled:
+                    _prompt_cache.store_distill_items(
+                        self.plugin, cache_key, transcript, parsed, chat_model_id
+                    )
                 return parsed, tok_in, tok_out, []
             else:
                 # LLM 返回了内容但无法解析为有效记忆
@@ -266,6 +285,27 @@ class MemoryOps:
             [fallback_err],
         )
 
+    def _classify_distill_rows(self, rows: list) -> Tuple[str, bool]:
+        """规则分级门控判定。
+
+        Returns:
+            (decision, force_rule_only)
+            - decision: ``"simple"``（规则处理，跳过 LLM）或 ``"complex"``（升级 LLM）
+            - force_rule_only: 当日 token 预算已耗尽时为 True，复杂样本也暂不调用 LLM
+        """
+        from . import distill_validator as _distill_validator
+        from .distill_gating import classify_batch
+
+        cfg = self.plugin._cfg
+        rule_gating = bool(getattr(cfg, "distill_rule_gating", False))
+        budget_exceeded = _distill_validator.is_token_budget_exceeded(self.plugin)
+        if not rule_gating and not budget_exceeded:
+            return "complex", False
+        decision = classify_batch(
+            rows, min_chars=int(getattr(cfg, "distill_rule_gate_min_chars", 40) or 40)
+        )
+        return decision, budget_exceeded
+
     async def run_distill_cycle(
         self,
         force: bool = False,
@@ -289,6 +329,8 @@ class MemoryOps:
         all_errors: List[DistillErrorRecord] = []
         cycle_tok_in = -1
         cycle_tok_out = -1
+        rule_gated_before = getattr(self.plugin, "_distill_rule_gated_batches", 0)
+        cache_hits_before = getattr(self.plugin, "_distill_prompt_cache_hits", 0)
 
         now_ts = time.time()
         for canonical_id in pending_users:
@@ -323,6 +365,28 @@ class MemoryOps:
 
                 skipped = len(rows) - len(rows_for_llm)
                 self.plugin._distill_skipped_rows += skipped
+
+                # ── 规则分级门控（Plan TMEAAA-379 B3 / BC-4）──
+                # 命中长期记忆信号的 complex 样本升级 LLM；无信号的 simple 样本由规则
+                # 直接判定（零 LLM 调用）。预算耗尽时强制走规则分级，避免超支。
+                decision, force_rule_only = self._classify_distill_rows(rows_for_llm)
+                if decision == "simple":
+                    self.plugin._mark_rows_distilled([int(r["id"]) for r in rows])
+                    self.plugin._distill_rule_gated_batches = (
+                        getattr(self.plugin, "_distill_rule_gated_batches", 0) + 1
+                    )
+                    self.plugin._distill_rule_gated_rows = (
+                        getattr(self.plugin, "_distill_rule_gated_rows", 0) + len(rows_for_llm)
+                    )
+                    processed_users += 1
+                    self.plugin._user_last_distilled_ts[canonical_id] = now_ts
+                    continue
+                if force_rule_only:
+                    # 复杂样本需要 LLM，但当日预算已耗尽：保留待预算恢复后重试，避免丢数据。
+                    self.plugin._distill_rule_deferred_batches = (
+                        getattr(self.plugin, "_distill_rule_deferred_batches", 0) + 1
+                    )
+                    continue
 
                 llm_items, tok_in, tok_out, distill_errors = await self.plugin._distill_rows_with_llm(rows_for_llm)
 
@@ -425,6 +489,8 @@ class MemoryOps:
             tokens_input=cycle_tok_in,
             tokens_output=cycle_tok_out,
             tokens_total=cycle_tok_total,
+            rule_gated_batches=getattr(self.plugin, "_distill_rule_gated_batches", 0) - rule_gated_before,
+            prompt_cache_hits=getattr(self.plugin, "_distill_prompt_cache_hits", 0) - cache_hits_before,
         )
 
         # 顺便执行记忆衰减

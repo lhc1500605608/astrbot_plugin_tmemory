@@ -162,6 +162,20 @@ def _probe_session_hooks() -> bool:
         return False
 
 
+def _probe_send_message() -> bool:
+    """上游路径: astrbot.core.star.context.Context.send_message（公共，4.16+）。
+
+    主动推送（Proactive，Plan TMEAAA-379 B2）的类级能力探测；运行时仍需结合
+    实际 Context 实例（见 ``adapters/send.probe_send_capability``）。
+    """
+    try:
+        from astrbot.core.star.context import Context  # type: ignore
+
+        return callable(getattr(Context, "send_message", None))
+    except Exception:
+        return False
+
+
 def _probe_agent_hooks() -> bool:
     """上游路径: astrbot.api.event.filter.{on_agent_begin,on_agent_done}（4.28 新增）。"""
     try:
@@ -183,6 +197,7 @@ class Capabilities:
     has_plugin_pages: bool
     has_session_hooks: bool
     has_agent_hooks: bool
+    has_send_message: bool
 
     def to_dict(self) -> Dict[str, object]:
         return {
@@ -191,6 +206,7 @@ class Capabilities:
             "has_plugin_pages": self.has_plugin_pages,
             "has_session_hooks": self.has_session_hooks,
             "has_agent_hooks": self.has_agent_hooks,
+            "has_send_message": self.has_send_message,
             "extra_user_temp_available": self.has_mark_as_temp,
             "extra_user_temp_min_version": MARK_AS_TEMP_MIN_VERSION,
             "plugin_pages_min_version": PLUGIN_PAGES_MIN_VERSION,
@@ -207,6 +223,7 @@ def _detect_capabilities() -> Capabilities:
         has_plugin_pages=_probe_plugin_pages(),
         has_session_hooks=_probe_session_hooks(),
         has_agent_hooks=_probe_agent_hooks(),
+        has_send_message=_probe_send_message(),
     )
 
 
@@ -242,6 +259,11 @@ def has_agent_hooks() -> bool:
     return get_capabilities().has_agent_hooks
 
 
+def has_send_message() -> bool:
+    """主动推送能力（``Context.send_message``）是否可用。"""
+    return get_capabilities().has_send_message
+
+
 def extra_user_temp_available() -> bool:
     """``extra_user_temp`` 注入位置在当前 AstrBot 上是否可用。"""
     return has_mark_as_temp()
@@ -256,12 +278,14 @@ def log_capabilities(refresh: bool = True) -> Capabilities:
     """探测并记录一行能力快照，返回快照供调用方复用。"""
     caps = get_capabilities(refresh=refresh)
     logger.info(
-        "[tmemory] AstrBot %s capabilities: mark_as_temp=%s plugin_pages=%s session_hooks=%s agent_hooks=%s",
+        "[tmemory] AstrBot %s capabilities: mark_as_temp=%s plugin_pages=%s"
+        " session_hooks=%s agent_hooks=%s send_message=%s",
         caps.version or "unknown",
         caps.has_mark_as_temp,
         caps.has_plugin_pages,
         caps.has_session_hooks,
         caps.has_agent_hooks,
+        caps.has_send_message,
     )
     return caps
 
@@ -280,6 +304,7 @@ __all__ = [
     "has_agent_hooks",
     "has_mark_as_temp",
     "has_plugin_pages",
+    "has_send_message",
     "has_session_hooks",
     "log_capabilities",
     "plugin_web_request_contract_ok",

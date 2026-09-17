@@ -140,6 +140,61 @@ body { font-family: var(--font); background:var(--bg); color:var(--text); min-he
 .evidence-time { font-size:10px; color:var(--text2); margin-top:4px; }
 .profile-merge-chk { width:14px; height:14px; cursor:pointer; }
 
+/* ── Config Panel ─────────────────────────────────────────────────── */
+.config-grid { display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-bottom:14px; }
+.config-card { background:var(--surface2); border-radius:var(--radius); padding:14px 16px; }
+.config-card h4 { font-size:13px; font-weight:600; margin-bottom:8px; display:flex; align-items:center; gap:6px; }
+.config-row { display:flex; align-items:center; justify-content:space-between; padding:6px 0; border-bottom:1px solid var(--border); font-size:13px; }
+.config-row:last-child { border-bottom:none; }
+.config-label { color:var(--text2); }
+.config-value { font-weight:500; text-align:right; }
+.toggle-switch { position:relative; width:40px; height:22px; cursor:pointer; }
+.toggle-switch input { opacity:0; width:0; height:0; }
+.toggle-slider { position:absolute; inset:0; background:var(--surface2); border:1px solid var(--border); border-radius:11px; transition:.2s; }
+.toggle-slider:before { content:''; position:absolute; width:16px; height:16px; left:2px; bottom:2px; background:var(--text2); border-radius:50%; transition:.2s; }
+.toggle-switch input:checked + .toggle-slider { background:var(--brand); border-color:var(--brand); }
+.toggle-switch input:checked + .toggle-slider:before { transform:translateX(18px); background:#fff; }
+.config-section { background:var(--surface); border:1px solid var(--border); border-radius:var(--radius); padding:16px 18px; margin-bottom:14px; }
+.config-section h3 { font-size:14px; font-weight:600; margin-bottom:12px; display:flex; align-items:center; gap:6px; }
+
+/* ── Import/Export Panel ──────────────────────────────────────────── */
+.ie-zone { background:var(--surface); border:1px solid var(--border); border-radius:var(--radius); padding:16px 18px; margin-bottom:14px; }
+.ie-zone h3 { font-size:14px; font-weight:600; margin-bottom:10px; }
+.ie-drop { border:2px dashed var(--border); border-radius:var(--radius); padding:30px 20px; text-align:center; color:var(--text2); cursor:pointer; transition:all .15s; margin-bottom:12px; }
+.ie-drop:hover, .ie-drop.dragover { border-color:var(--brand); background:var(--brand-light); }
+.ie-drop .icon { font-size:32px; margin-bottom:8px; }
+.ie-preview { background:var(--surface2); border-radius:var(--radius); padding:12px 14px; font-size:13px; max-height:300px; overflow-y:auto; display:none; }
+.ie-preview .ie-stat { display:flex; justify-content:space-between; padding:4px 0; }
+.ie-preview .ie-stat .label { color:var(--text2); }
+.ie-preview .ie-stat .value { font-weight:600; }
+.ie-preview .ie-error { color:var(--danger); margin-top:6px; font-size:12px; }
+.conflict-select { display:flex; gap:8px; margin-bottom:10px; }
+.conflict-opt { padding:6px 14px; border:1px solid var(--border); border-radius:var(--radius); cursor:pointer; font-size:12px; transition:all .15s; }
+.conflict-opt.active { background:var(--brand); border-color:var(--brand); color:#fff; }
+
+/* ── Embedding Source Panel ───────────────────────────────────────── */
+.embed-card { background:var(--surface); border:1px solid var(--border); border-radius:var(--radius); padding:16px 18px; margin-bottom:14px; }
+.embed-card h3 { font-size:14px; font-weight:600; margin-bottom:12px; }
+.embed-badge { display:inline-flex; align-items:center; gap:4px; padding:4px 10px; border-radius:12px; font-size:11px; font-weight:600; }
+.embed-badge-ok { background:rgba(63,185,80,.15); color:var(--accent2); }
+.embed-badge-warn { background:rgba(210,153,34,.15); color:var(--warn); }
+.embed-badge-off { background:var(--surface2); color:var(--text2); }
+.embed-row { display:flex; justify-content:space-between; padding:8px 0; border-bottom:1px solid var(--border); font-size:13px; }
+.embed-row:last-child { border-bottom:none; }
+.embed-key { color:var(--text2); }
+.embed-val { font-weight:500; text-align:right; max-width:60%; word-break:break-all; }
+
+/* ── Cost View ────────────────────────────────────────────────────── */
+.cost-summary { display:grid; grid-template-columns:repeat(4, 1fr); gap:10px; margin-bottom:14px; }
+.cost-card { background:var(--surface); border:1px solid var(--border); border-radius:var(--radius); padding:14px 16px; text-align:center; }
+.cost-card .label { font-size:11px; color:var(--text2); text-transform:uppercase; letter-spacing:.5px; }
+.cost-card .value { font-size:22px; font-weight:700; margin-top:4px; }
+.cost-card .sub { font-size:11px; color:var(--text2); margin-top:2px; }
+.budget-bar-wrap { background:var(--surface2); border-radius:6px; height:10px; overflow:hidden; margin-top:6px; }
+.budget-bar-fill { height:100%; border-radius:6px; transition:width .3s ease; }
+.cost-trend { display:flex; gap:4px; align-items:flex-end; height:60px; margin-top:10px; }
+.cost-trend-bar { flex:1; background:var(--brand); border-radius:3px 3px 0 0; min-height:2px; transition:height .3s ease; }
+
 /* ── Mobile responsive ──────────────────────────────────────────── */
 @media (max-width: 768px) {
   .main { flex-direction:column; }
@@ -206,6 +261,10 @@ body { font-family: var(--font); background:var(--bg); color:var(--text); min-he
         <button onclick="switchTab('refine',this)">手动精馏</button>
         <button onclick="switchTab('identity',this)">用户管理</button>
         <button onclick="switchTab('health',this)">系统健康</button>
+        <button onclick="switchTab('proactive',this)">主动性配置</button>
+        <button onclick="switchTab('importexport',this)">导入导出</button>
+        <button onclick="switchTab('embedding',this)">嵌入来源</button>
+        <button onclick="switchTab('cost',this)">成本视图</button>
       </div>
 
       <!-- Profile Workbench -->
@@ -377,6 +436,26 @@ body { font-family: var(--font); background:var(--bg); color:var(--text); min-he
           </tr></thead>
           <tbody id="identityTableBody"></tbody>
         </table>
+      </div>
+
+      <!-- Proactive Config View -->
+      <div class="table-panel" id="panelProactive" style="display:none">
+        <div id="proactiveContent"></div>
+      </div>
+
+      <!-- Import/Export View -->
+      <div class="table-panel" id="panelImportExport" style="display:none">
+        <div id="importExportContent"></div>
+      </div>
+
+      <!-- Embedding Source View -->
+      <div class="table-panel" id="panelEmbedding" style="display:none">
+        <div id="embeddingContent"></div>
+      </div>
+
+      <!-- Cost/Benchmark View -->
+      <div class="table-panel" id="panelCost" style="display:none">
+        <div id="costContent"></div>
       </div>
     </div>
   </div>
@@ -571,10 +650,10 @@ function closeModal(id) { document.getElementById(id).classList.remove('show'); 
 function switchTab(tab, btn) {
   document.querySelectorAll('.tab-bar button').forEach(function(b) { b.classList.remove('active'); });
   btn.classList.add('active');
-  ['panelProfile','panelTable','panelPending','panelEvents','panelIdentity','panelHealth','panelRefine'].forEach(function(id) {
+  ['panelProfile','panelTable','panelPending','panelEvents','panelIdentity','panelHealth','panelRefine','panelProactive','panelImportExport','panelEmbedding','panelCost'].forEach(function(id) {
     document.getElementById(id).style.display = 'none';
   });
-  var panelMap = { profile:'panelProfile', table:'panelTable', pending:'panelPending', events:'panelEvents', identity:'panelIdentity', health:'panelHealth', refine:'panelRefine' };
+  var panelMap = { profile:'panelProfile', table:'panelTable', pending:'panelPending', events:'panelEvents', identity:'panelIdentity', health:'panelHealth', refine:'panelRefine', proactive:'panelProactive', importexport:'panelImportExport', embedding:'panelEmbedding', cost:'panelCost' };
   var panelId = panelMap[tab];
   if (!panelId) return;
   document.getElementById(panelId).style.display = '';
@@ -583,6 +662,10 @@ function switchTab(tab, btn) {
   if (tab === 'identity') loadIdentities();
   if (tab === 'health') loadHealth();
   if (tab === 'refine') loadRefineMemoryOptions();
+  if (tab === 'proactive') loadProactiveConfig();
+  if (tab === 'importexport') renderImportExport();
+  if (tab === 'embedding') loadEmbeddingInfo();
+  if (tab === 'cost') loadCostView();
 }
 
 function logout() { /* no-op in Dashboard context */ }
@@ -1209,6 +1292,443 @@ async function doMemSplit() {
 }
 
 /* ── main.js — init entry ──────────────────────────────────────── */
+
+/* ── proactive.js ──────────────────────────────────────────────── */
+var proactiveConfigKeys = [
+  'proactive_enabled', 'proactive_interval_sec', 'proactive_max_candidates_per_cycle',
+  'proactive_per_user_window_sec', 'proactive_per_user_max_per_window',
+  'proactive_min_interval_sec', 'proactive_daily_budget',
+  'proactive_reminder_enabled', 'proactive_recall_enabled',
+  'proactive_opt_in_default', 'proactive_max_message_chars'
+];
+var proactiveLabels = {
+  proactive_enabled: '启用主动性记忆',
+  proactive_interval_sec: '调度周期（秒）',
+  proactive_max_candidates_per_cycle: '单轮最多候选数',
+  proactive_per_user_window_sec: '每用户限流窗口（秒）',
+  proactive_per_user_max_per_window: '窗口内每用户上限',
+  proactive_min_interval_sec: '同一用户最小发送间隔（秒）',
+  proactive_daily_budget: '每日主动消息预算',
+  proactive_reminder_enabled: '启用到期提醒触发',
+  proactive_recall_enabled: '启用主动回忆触发',
+  proactive_opt_in_default: '默认 opt-in',
+  proactive_max_message_chars: '主动消息最大长度'
+};
+
+async function loadProactiveConfig() {
+  var el = document.getElementById('proactiveContent');
+  el.innerHTML = '<p style="color:var(--text2)">加载中...</p>';
+  var data = await api('/config?keys=' + proactiveConfigKeys.join(','));
+  if (!data) { el.innerHTML = '<p style="color:var(--danger)">加载失败</p>'; return; }
+  var enabled = !!data.proactive_enabled;
+  el.innerHTML =
+    '<div class="config-section">' +
+      '<h3>' + (enabled ? '<span style="color:var(--accent2)">●</span>' : '<span style="color:var(--text2)">○</span>') + ' 主动性记忆开关</h3>' +
+      '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">' +
+        '<div><div style="font-size:14px;font-weight:600">' + (enabled ? '已启用' : '已关闭') + '</div><div style="font-size:12px;color:var(--text2)">开启后按周期触发到期提醒与主动回忆</div></div>' +
+        '<label class="toggle-switch"><input type="checkbox" id="proactiveEnabled" ' + (enabled ? 'checked' : '') + ' onchange="toggleProactive()"><span class="toggle-slider"></span></label>' +
+      '</div>' +
+    '</div>' +
+    '<div class="config-grid">' +
+      renderProactiveCard('调度策略', [
+        { key: 'proactive_interval_sec', val: formatDuration(data.proactive_interval_sec) },
+        { key: 'proactive_max_candidates_per_cycle', val: data.proactive_max_candidates_per_cycle + ' 条/轮' },
+        { key: 'proactive_max_message_chars', val: data.proactive_max_message_chars + ' 字符' },
+      ]) +
+      renderProactiveCard('限流配置', [
+        { key: 'proactive_per_user_window_sec', val: formatDuration(data.proactive_per_user_window_sec) },
+        { key: 'proactive_per_user_max_per_window', val: data.proactive_per_user_max_per_window + ' 条/窗口' },
+        { key: 'proactive_min_interval_sec', val: formatDuration(data.proactive_min_interval_sec) },
+        { key: 'proactive_daily_budget', val: data.proactive_daily_budget === 0 ? '无限制' : data.proactive_daily_budget + ' 条/天' },
+      ]) +
+      renderProactiveCard('触发来源', [
+        { key: 'proactive_reminder_enabled', val: data.proactive_reminder_enabled ? '✓ 启用' : '✗ 关闭', cls: data.proactive_reminder_enabled ? 'color:var(--accent2)' : 'color:var(--text2)' },
+        { key: 'proactive_recall_enabled', val: data.proactive_recall_enabled ? '✓ 启用' : '✗ 关闭', cls: data.proactive_recall_enabled ? 'color:var(--accent2)' : 'color:var(--text2)' },
+        { key: 'proactive_opt_in_default', val: data.proactive_opt_in_default ? '全员默认接收' : '仅显式 opt-in', cls: '' },
+      ]) +
+    '</div>' +
+    '<div style="display:flex;gap:8px;flex-wrap:wrap">' +
+      renderProactiveEditBtn('proactive_interval_sec', data.proactive_interval_sec, '调度周期') +
+      renderProactiveEditBtn('proactive_per_user_window_sec', data.proactive_per_user_window_sec, '限流窗口') +
+      renderProactiveEditBtn('proactive_per_user_max_per_window', data.proactive_per_user_max_per_window, '窗口上限') +
+      renderProactiveEditBtn('proactive_min_interval_sec', data.proactive_min_interval_sec, '最小间隔') +
+      renderProactiveEditBtn('proactive_daily_budget', data.proactive_daily_budget, '日预算') +
+      renderProactiveEditBtn('proactive_max_message_chars', data.proactive_max_message_chars, '消息长度') +
+    '</div>';
+}
+
+function renderProactiveCard(title, rows) {
+  return '<div class="config-card"><h4>' + escHtml(title) + '</h4>' +
+    rows.map(function(r) {
+      return '<div class="config-row"><span class="config-label">' + escHtml(proactiveLabels[r.key] || r.key) + '</span><span class="config-value" style="' + (r.cls || '') + '">' + escHtml(String(r.val)) + '</span></div>';
+    }).join('') + '</div>';
+}
+
+function renderProactiveEditBtn(key, currentVal, label) {
+  return '<button class="btn btn-sm" onclick="editProactiveValue(\'' + key + '\', ' + currentVal + ', \'' + escHtml(label) + '\')">' + escHtml(label) + ': ' + currentVal + '</button>';
+}
+
+function formatDuration(sec) {
+  if (sec >= 3600) return (sec / 3600).toFixed(1).replace(/\.0$/, '') + ' 小时';
+  if (sec >= 60) return Math.round(sec / 60) + ' 分钟';
+  return sec + ' 秒';
+}
+
+async function toggleProactive() {
+  var enabled = document.getElementById('proactiveEnabled').checked;
+  var res = await api('/config', { method: 'POST', body: JSON.stringify({ proactive_enabled: enabled }) });
+  if (res && res.status === 'ok') {
+    toast(enabled ? '主动性记忆已启用' : '主动性记忆已关闭', 'success');
+    loadProactiveConfig();
+  } else {
+    toast('更新失败: ' + (res && res.message || 'unknown'), 'error');
+    document.getElementById('proactiveEnabled').checked = !enabled;
+  }
+}
+
+function editProactiveValue(key, currentVal, label) {
+  var newVal = prompt('设置 ' + label + '（当前值: ' + currentVal + '）', currentVal);
+  if (newVal === null || newVal === '') return;
+  var numVal = parseInt(newVal);
+  if (isNaN(numVal) || numVal < 0) { toast('请输入有效正整数', 'error'); return; }
+  saveProactiveValue(key, numVal);
+}
+
+async function saveProactiveValue(key, value) {
+  var patch = {};
+  patch[key] = value;
+  var res = await api('/config', { method: 'POST', body: JSON.stringify(patch) });
+  if (res && res.status === 'ok') {
+    toast('配置已更新', 'success');
+    loadProactiveConfig();
+  } else {
+    toast('更新失败: ' + (res && res.message || 'unknown'), 'error');
+  }
+}
+
+/* ── import-export.js ────────────────────────────────────────────── */
+var ieImportData = null;
+var ieConflictMode = 'skip';
+
+function renderImportExport() {
+  var el = document.getElementById('importExportContent');
+  el.innerHTML =
+    '<div class="ie-zone">' +
+      '<h3>导出数据</h3>' +
+      '<p style="font-size:13px;color:var(--text2);margin-bottom:12px">导出全部用户的记忆和身份绑定数据为 JSON 文件。</p>' +
+      '<div style="display:flex;gap:8px;align-items:center">' +
+        '<button class="btn btn-primary" onclick="doExportAll()">导出全部数据</button>' +
+        (currentUser ? '<button class="btn" onclick="doExportUser()">导出当前用户: ' + escHtml(currentUser) + '</button>' : '') +
+      '</div>' +
+      '<div id="exportResult" style="display:none;margin-top:10px;padding:10px;background:var(--surface2);border-radius:var(--radius);font-size:13px"></div>' +
+    '</div>' +
+    '<div class="ie-zone">' +
+      '<h3>导入数据</h3>' +
+      '<p style="font-size:13px;color:var(--text2);margin-bottom:12px">支持 MemoryForge 导出的 JSON 格式。导入前可预览（dry-run）查看冲突与统计。</p>' +
+      '<div class="ie-drop" id="ieDropZone" onclick="document.getElementById(\'ieFileInput\').click()">' +
+        '<div class="icon">📂</div>' +
+        '<div>点击或拖拽 JSON 文件到此处</div>' +
+      '</div>' +
+      '<input type="file" id="ieFileInput" accept=".json" style="display:none" onchange="handleImportFile(this)">' +
+      '<div id="iePreview" class="ie-preview"></div>' +
+      '<div id="ieImportActions" style="display:none;margin-top:10px">' +
+        '<div class="conflict-select">' +
+          '<div class="conflict-opt active" onclick="setConflictMode(\'skip\',this)">跳过冲突</div>' +
+          '<div class="conflict-opt" onclick="setConflictMode(\'error\',this)">冲突报错</div>' +
+        '</div>' +
+        '<div style="display:flex;gap:8px;align-items:center">' +
+          '<button class="btn" onclick="doImportDryRun()">预览导入</button>' +
+          '<button class="btn btn-primary" onclick="doImportApply()">确认导入</button>' +
+        '</div>' +
+      '</div>' +
+    '</div>';
+  setupDropZone();
+}
+
+function setupDropZone() {
+  var dz = document.getElementById('ieDropZone');
+  if (!dz) return;
+  dz.addEventListener('dragover', function(e) { e.preventDefault(); dz.classList.add('dragover'); });
+  dz.addEventListener('dragleave', function() { dz.classList.remove('dragover'); });
+  dz.addEventListener('drop', function(e) {
+    e.preventDefault(); dz.classList.remove('dragover');
+    var file = e.dataTransfer.files[0];
+    if (file) readImportFile(file);
+  });
+}
+
+function handleImportFile(input) {
+  var file = input.files[0];
+  if (file) readImportFile(file);
+}
+
+function readImportFile(file) {
+  var reader = new FileReader();
+  reader.onload = function(e) {
+    try {
+      ieImportData = JSON.parse(e.target.result);
+      var preview = document.getElementById('iePreview');
+      preview.style.display = 'block';
+      var userCount = (ieImportData.users || []).length;
+      var memCount = 0;
+      (ieImportData.users || []).forEach(function(u) { memCount += (u.memories || []).length; });
+      preview.innerHTML =
+        '<div class="ie-stat"><span class="label">文件</span><span class="value">' + escHtml(file.name) + '</span></div>' +
+        '<div class="ie-stat"><span class="label">Schema 版本</span><span class="value">' + (ieImportData.schema_version || '?') + '</span></div>' +
+        '<div class="ie-stat"><span class="label">用户数</span><span class="value">' + userCount + '</span></div>' +
+        '<div class="ie-stat"><span class="label">记忆总数</span><span class="value">' + memCount + '</span></div>' +
+        '<div class="ie-stat"><span class="label">导出时间</span><span class="value">' + escHtml(ieImportData.exported_at || '?') + '</span></div>';
+      document.getElementById('ieImportActions').style.display = '';
+    } catch (err) {
+      toast('JSON 解析失败: ' + err.message, 'error');
+      ieImportData = null;
+    }
+  };
+  reader.readAsText(file);
+}
+
+function setConflictMode(mode, btn) {
+  ieConflictMode = mode;
+  document.querySelectorAll('.conflict-opt').forEach(function(el) { el.classList.remove('active'); });
+  btn.classList.add('active');
+}
+
+async function doExportAll() {
+  var el = document.getElementById('exportResult');
+  el.style.display = 'block';
+  el.innerHTML = '<span style="color:var(--text2)">导出中...</span>';
+  var res = await api('/export', { method: 'POST', body: JSON.stringify({}) });
+  if (res && !res.error) {
+    var blob = new Blob([JSON.stringify(res, null, 2)], { type: 'application/json' });
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement('a');
+    a.href = url; a.download = 'MemoryForge_export_all_' + new Date().toISOString().slice(0, 10) + '.json';
+    a.click(); URL.revokeObjectURL(url);
+    var userCount = (res.users || []).length;
+    var memCount = 0;
+    (res.users || []).forEach(function(u) { memCount += (u.memories || []).length; });
+    el.innerHTML = '<span style="color:var(--accent2)">✓ 导出成功</span> — ' + userCount + ' 个用户，' + memCount + ' 条记忆';
+  } else {
+    el.innerHTML = '<span style="color:var(--danger)">导出失败: ' + escHtml(res && res.error || 'unknown') + '</span>';
+  }
+}
+
+async function doExportUser() {
+  if (!currentUser) { toast('请先选择用户', 'error'); return; }
+  var res = await api('/user/export', { method: 'POST', body: JSON.stringify({ user: currentUser }) });
+  if (res && !res.error) {
+    var blob = new Blob([JSON.stringify(res, null, 2)], { type: 'application/json' });
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement('a');
+    a.href = url; a.download = 'MemoryForge_export_' + currentUser + '.json';
+    a.click(); URL.revokeObjectURL(url);
+    toast('导出成功', 'success');
+  }
+}
+
+async function doImportDryRun() {
+  if (!ieImportData) { toast('请先选择文件', 'error'); return; }
+  var el = document.getElementById('iePreview');
+  el.style.display = 'block';
+  el.innerHTML = '<span style="color:var(--text2)">预览中...</span>';
+  var res = await api('/import', { method: 'POST', body: JSON.stringify({ payload: ieImportData, dry_run: true, on_conflict: ieConflictMode, backup: true }) });
+  if (res) {
+    el.innerHTML =
+      '<div style="margin-bottom:8px;font-weight:600;color:var(--accent)">预览结果（未落库）</div>' +
+      '<div class="ie-stat"><span class="label">有效记录</span><span class="value" style="color:var(--accent2)">' + res.valid + '</span></div>' +
+      '<div class="ie-stat"><span class="label">无效记录</span><span class="value" style="color:' + (res.invalid > 0 ? 'var(--danger)' : 'var(--text2)') + '">' + res.invalid + '</span></div>' +
+      '<div class="ie-stat"><span class="label">待插入</span><span class="value">' + res.to_insert + '</span></div>' +
+      '<div class="ie-stat"><span class="label">冲突</span><span class="value" style="color:' + (res.conflicts > 0 ? 'var(--warn)' : 'var(--text2)') + '">' + res.conflicts + '</span></div>' +
+      '<div class="ie-stat"><span class="label">重复</span><span class="value">' + res.duplicates_in_payload + '</span></div>' +
+      (res.errors && res.errors.length > 0 ? '<div class="ie-error">错误: ' + res.errors.slice(0, 5).map(function(e) { return '#' + e.index + ' ' + escHtml(e.reason); }).join('; ') + '</div>' : '');
+  } else {
+    el.innerHTML = '<span style="color:var(--danger)">预览失败</span>';
+  }
+}
+
+async function doImportApply() {
+  if (!ieImportData) { toast('请先选择文件', 'error'); return; }
+  if (!confirm('确认导入数据？将创建备份后写入。')) return;
+  var res = await api('/import', { method: 'POST', body: JSON.stringify({ payload: ieImportData, dry_run: false, on_conflict: ieConflictMode, backup: true }) });
+  if (res && res.ok) {
+    toast('导入成功：插入 ' + res.inserted + ' 条' + (res.backup_path ? '，备份: ' + res.backup_path : ''), 'success');
+    ieImportData = null;
+    document.getElementById('iePreview').style.display = 'none';
+    document.getElementById('ieImportActions').style.display = 'none';
+    document.getElementById('ieFileInput').value = '';
+    await refreshAll();
+  } else {
+    toast('导入失败: ' + (res && (res.error || res.message) || 'unknown'), 'error');
+  }
+}
+
+/* ── embedding.js ─────────────────────────────────────────────────── */
+async function loadEmbeddingInfo() {
+  var el = document.getElementById('embeddingContent');
+  el.innerHTML = '<p style="color:var(--text2)">加载中...</p>';
+  var results = await Promise.all([
+    api('/config?keys=vector_retrieval'),
+    api('/capabilities')
+  ]);
+  var cfg = results[0];
+  var caps = results[1];
+  if (!cfg || !cfg.vector_retrieval) {
+    el.innerHTML = '<p style="color:var(--danger)">加载配置失败</p>';
+    return;
+  }
+  var vr = cfg.vector_retrieval;
+  var capsObj = caps && caps.capabilities || {};
+  var warnings = caps && caps.warnings || [];
+  var runtime = caps && caps.runtime || {};
+
+  var isEnabled = !!vr.enable_vector_search;
+  var sourceMap = { provider: 'AstrBot Provider', standalone: '独立配置', local: '本地 ONNX' };
+  var sourceLabel = sourceMap[vr.embedding_source] || vr.embedding_source;
+  var providerMap = { volc: '火山方舟', openai: 'OpenAI / 兼容' };
+  var providerLabel = providerMap[vr.embedding_provider] || vr.embedding_provider;
+
+  var statusBadge = isEnabled
+    ? '<span class="embed-badge embed-badge-ok">✓ 已启用</span>'
+    : '<span class="embed-badge embed-badge-off">○ 未启用</span>';
+
+  var fallbackInfo = '';
+  if (runtime.extra_user_temp_fallback_count > 0) {
+    fallbackInfo += '<div style="font-size:12px;color:var(--warn);margin-top:8px">⚠ extra_user_temp 回退次数: ' + runtime.extra_user_temp_fallback_count + '</div>';
+  }
+  if (runtime.persona_private_fallback_count > 0) {
+    fallbackInfo += '<div style="font-size:12px;color:var(--warn);margin-top:4px">⚠ persona_private 回退次数: ' + runtime.persona_private_fallback_count + '</div>';
+  }
+  if (warnings.length > 0) {
+    fallbackInfo += warnings.map(function(w) { return '<div style="font-size:12px;color:var(--warn);margin-top:4px">⚠ ' + escHtml(w) + '</div>'; }).join('');
+  }
+
+  var dimInfo = '';
+  if (vr.vector_dim) {
+    dimInfo = '<div class="embed-row"><span class="embed-key">向量维度</span><span class="embed-val">' + vr.vector_dim + '</span></div>';
+  }
+
+  el.innerHTML =
+    '<div class="embed-card">' +
+      '<h3>向量检索状态 ' + statusBadge + '</h3>' +
+      '<div class="embed-row"><span class="embed-key">Embedding 来源</span><span class="embed-val">' + escHtml(sourceLabel) + '</span></div>' +
+      (vr.embedding_source === 'provider' ? '<div class="embed-row"><span class="embed-key">Provider ID</span><span class="embed-val">' + escHtml(vr.embedding_provider_id || '(自动选择)') + '</span></div>' : '') +
+      (vr.embedding_source === 'standalone' ? '<div class="embed-row"><span class="embed-key">API 提供商</span><span class="embed-val">' + escHtml(providerLabel) + '</span></div>' : '') +
+      (vr.embedding_source === 'standalone' ? '<div class="embed-row"><span class="embed-key">模型名称</span><span class="embed-val">' + escHtml(vr.embedding_model) + '</span></div>' : '') +
+      (vr.embedding_source === 'standalone' && vr.embedding_base_url ? '<div class="embed-row"><span class="embed-key">API Base URL</span><span class="embed-val">' + escHtml(vr.embedding_base_url) + '</span></div>' : '') +
+      (vr.embedding_source === 'standalone' ? '<div class="embed-row"><span class="embed-key">API Key</span><span class="embed-val">' + (vr.embedding_api_key ? '••••••••' : '<span style="color:var(--danger)">未设置</span>') + '</span></div>' : '') +
+      (vr.embedding_source === 'local' ? '<div class="embed-row"><span class="embed-key">模型目录</span><span class="embed-val">' + escHtml(vr.local_embedding_path) + '</span></div>' : '') +
+      (vr.embedding_source === 'local' ? '<div class="embed-row"><span class="embed-key">ONNX 文件</span><span class="embed-val">' + escHtml(vr.local_embedding_model_file) + '</span></div>' : '') +
+      (vr.embedding_source === 'local' ? '<div class="embed-row"><span class="embed-key">最大 Token</span><span class="embed-val">' + vr.local_embedding_max_length + '</span></div>' : '') +
+      dimInfo +
+      '<div class="embed-row"><span class="embed-key">维度变更自动重建</span><span class="embed-val">' + (vr.auto_rebuild_on_dim_change ? '✓ 启用' : '✗ 关闭') + '</span></div>' +
+      fallbackInfo +
+    '</div>' +
+    '<div class="embed-card">' +
+      '<h3>运行时能力</h3>' +
+      '<div class="embed-row"><span class="embed-key">向量索引行数</span><span class="embed-val">' + (capsObj.vector_index_rows != null ? capsObj.vector_index_rows : '-') + '</span></div>' +
+      '<div class="embed-row"><span class="embed-key">向量检索能力</span><span class="embed-val">' + (capsObj.vector_search ? '<span style="color:var(--accent2)">✓ 可用</span>' : '<span style="color:var(--text2)">不可用</span>') + '</span></div>' +
+      '<div class="embed-row"><span class="embed-key">sqlite-vec</span><span class="embed-val">' + (capsObj.sqlite_vec ? '<span style="color:var(--accent2)">✓ 已加载</span>' : '<span style="color:var(--text2)">未加载</span>') + '</span></div>' +
+      '<div class="embed-row"><span class="embed-key">FTS5 全文检索</span><span class="embed-val">' + (capsObj.fts5 ? '<span style="color:var(--accent2)">✓ 可用</span>' : '<span style="color:var(--text2)">不可用</span>') + '</span></div>' +
+    '</div>';
+}
+
+/* ── cost.js ──────────────────────────────────────────────────────── */
+async function loadCostView() {
+  var el = document.getElementById('costContent');
+  el.innerHTML = '<p style="color:var(--text2)">加载中...</p>';
+  var results = await Promise.all([
+    api('/distill/history'),
+    api('/stats'),
+    api('/config?keys=daily_token_budget,distill_interval_sec,distill_batch_limit,distill_rule_gating,distill_prompt_cache')
+  ]);
+  var distillData = results[0];
+  var statsData = results[1];
+  var cfgData = results[2];
+
+  if (!distillData || !statsData) {
+    el.innerHTML = '<p style="color:var(--danger)">加载失败</p>';
+    return;
+  }
+
+  var budget = distillData.budget || {};
+  var history = distillData.history || [];
+  var budgetLimit = cfgData && cfgData.daily_token_budget || 0;
+
+  var totalTokensUsed = budget.used || 0;
+  var budgetPct = budget.unlimited ? 0 : (budget.pct || 0);
+  var totalMemories = (statsData.total_active_memories || 0) + (statsData.total_deactivated_memories || 0);
+  var totalDistills = history.length;
+  var totalNewMemories = 0;
+  var totalFailed = 0;
+  history.forEach(function(h) {
+    totalNewMemories += h.memories_created || 0;
+    totalFailed += h.users_failed || 0;
+  });
+
+  var avgTokensPerDistill = totalDistills > 0 ? Math.round(totalTokensUsed / totalDistills) : 0;
+
+  el.innerHTML =
+    '<div class="cost-summary">' +
+      '<div class="cost-card"><div class="label">今日 Token</div><div class="value">' + totalTokensUsed.toLocaleString() + '</div>' +
+        (budgetLimit > 0 ? '<div class="sub">/ ' + budgetLimit.toLocaleString() + ' (' + budgetPct.toFixed(1) + '%)</div>' : '<div class="sub">无限制</div>') +
+      '</div>' +
+      '<div class="cost-card"><div class="label">蒸馏次数</div><div class="value">' + totalDistills + '</div><div class="sub">最近 30 条</div></div>' +
+      '<div class="cost-card"><div class="label">产出记忆</div><div class="value" style="color:var(--accent2)">' + totalNewMemories + '</div><div class="sub">新记忆数</div></div>' +
+      '<div class="cost-card"><div class="label">失败数</div><div class="value" style="color:' + (totalFailed > 0 ? 'var(--danger)' : 'var(--text2)') + '">' + totalFailed + '</div><div class="sub">用户失败</div></div>' +
+    '</div>' +
+    (budgetLimit > 0 ?
+      '<div class="config-section">' +
+        '<h3>日预算使用</h3>' +
+        '<div style="display:flex;justify-content:space-between;font-size:13px;margin-bottom:6px">' +
+          '<span>已用: ' + totalTokensUsed.toLocaleString() + ' token</span>' +
+          '<span>剩余: ' + (budget.remaining || 0).toLocaleString() + ' token</span>' +
+        '</div>' +
+        '<div class="budget-bar-wrap"><div class="budget-bar-fill" style="width:' + Math.min(budgetPct, 100) + '%;background:' + (budgetPct >= 90 ? 'var(--danger)' : budgetPct >= 70 ? 'var(--warn)' : 'var(--accent)') + '"></div></div>' +
+      '</div>' : ''
+    ) +
+    '<div class="config-grid">' +
+      '<div class="config-card"><h4>蒸馏配置</h4>' +
+        '<div class="config-row"><span class="config-label">蒸馏间隔</span><span class="config-value">' + formatDuration(cfgData && cfgData.distill_interval_sec || 0) + '</span></div>' +
+        '<div class="config-row"><span class="config-label">单次上限</span><span class="config-value">' + (cfgData && cfgData.distill_batch_limit || 0) + ' 条</span></div>' +
+        '<div class="config-row"><span class="config-label">规则分级门控</span><span class="config-value">' + (cfgData && cfgData.distill_rule_gating ? '✓ 启用' : '✗ 关闭') + '</span></div>' +
+        '<div class="config-row"><span class="config-label">Prompt 缓存</span><span class="config-value">' + (cfgData && cfgData.distill_prompt_cache ? '✓ 启用' : '✗ 关闭') + '</span></div>' +
+      '</div>' +
+      '<div class="config-card"><h4>效率指标</h4>' +
+        '<div class="config-row"><span class="config-label">平均 Token / 蒸馏</span><span class="config-value">' + avgTokensPerDistill.toLocaleString() + '</span></div>' +
+        '<div class="config-row"><span class="config-label">平均记忆 / 蒸馏</span><span class="config-value">' + (totalDistills > 0 ? (totalNewMemories / totalDistills).toFixed(1) : '0') + '</span></div>' +
+        '<div class="config-row"><span class="config-label">总活跃记忆</span><span class="config-value">' + (statsData.total_active_memories || 0).toLocaleString() + '</span></div>' +
+        '<div class="config-row"><span class="config-label">向量索引行数</span><span class="config-value">' + (statsData.vector_index_rows || 0).toLocaleString() + '</span></div>' +
+      '</div>' +
+    '</div>' +
+    (history.length > 0 ?
+      '<div class="config-section">' +
+        '<h3>近期蒸馏趋势</h3>' +
+        '<div class="cost-trend">' + renderCostTrendBars(history) + '</div>' +
+        '<div style="display:flex;justify-content:space-between;font-size:10px;color:var(--text2);margin-top:4px">' +
+          '<span>' + (history[history.length - 1] && history[history.length - 1].started_at ? history[history.length - 1].started_at.slice(5, 16) : '') + '</span>' +
+          '<span>' + (history[0] && history[0].started_at ? history[0].started_at.slice(5, 16) : '') + '</span>' +
+        '</div>' +
+      '</div>' : ''
+    );
+}
+
+function renderCostTrendBars(history) {
+  if (!history.length) return '';
+  var maxTokens = 0;
+  history.forEach(function(h) {
+    var t = (h.memories_created || 0) * 100;
+    if (t > maxTokens) maxTokens = t;
+  });
+  if (maxTokens === 0) maxTokens = 1;
+  return history.slice().reverse().map(function(h) {
+    var val = (h.memories_created || 0) * 100;
+    var pct = Math.max(2, Math.round((val / maxTokens) * 100));
+    var color = h.users_failed > 0 ? 'var(--danger)' : 'var(--brand)';
+    return '<div class="cost-trend-bar" style="height:' + pct + '%;background:' + color + '" title="' + h.started_at + ': ' + h.memories_created + ' 记忆, ' + h.users_failed + ' 失败"></div>';
+  }).join('');
+}
+
+/* ── main.js — init entry (continued) ──────────────────────────── */
 async function loadStats() {
   var data = await api('/stats');
   if (!data) return;

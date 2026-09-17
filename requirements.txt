@@ -4,3 +4,7 @@ aiohttp>=3.8.0
 sqlite-vec>=0.1.6
 jieba>=0.42.1
 numpy>=1.20.0
+# 可选：本地 embedding（embedding_source=local 时需要）
+# 模型下载：python tools/download_bge_onnx.py
+# onnxruntime>=1.16.0
+# tokenizers>=0.15.0

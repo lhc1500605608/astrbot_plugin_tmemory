@@ -49,6 +49,42 @@ CREATE TABLE IF NOT EXISTS memory_events (
 )
 """
 
+# ── Proactive memory tables (Plan TMEAAA-379 B2 / BC-3) ───────────────────────
+
+_DDL_PROACTIVE_USER_POLICY = """
+CREATE TABLE IF NOT EXISTS proactive_user_policy (
+    canonical_user_id TEXT NOT NULL PRIMARY KEY,
+    opt_in INTEGER NOT NULL DEFAULT 0,
+    source TEXT NOT NULL DEFAULT 'user',
+    updated_at TEXT NOT NULL
+)
+"""
+
+_DDL_PROACTIVE_REMINDERS = """
+CREATE TABLE IF NOT EXISTS proactive_reminders (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    canonical_user_id TEXT NOT NULL,
+    unified_msg_origin TEXT NOT NULL,
+    text TEXT NOT NULL,
+    due_at TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    created_at TEXT NOT NULL,
+    sent_at TEXT NOT NULL DEFAULT ''
+)
+"""
+
+_DDL_PROACTIVE_SEND_LOG = """
+CREATE TABLE IF NOT EXISTS proactive_send_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    canonical_user_id TEXT NOT NULL,
+    trigger_type TEXT NOT NULL,
+    status TEXT NOT NULL,
+    reason TEXT NOT NULL DEFAULT '',
+    message TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL
+)
+"""
+
 _DDL_IDENTITY_MAPPINGS = """
 CREATE TABLE IF NOT EXISTS identity_bindings (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -74,7 +110,9 @@ CREATE TABLE IF NOT EXISTS distill_history (
     duration_sec REAL NOT NULL DEFAULT 0,
     tokens_input INTEGER NOT NULL DEFAULT -1,
     tokens_output INTEGER NOT NULL DEFAULT -1,
-    tokens_total INTEGER NOT NULL DEFAULT -1
+    tokens_total INTEGER NOT NULL DEFAULT -1,
+    rule_gated_batches INTEGER NOT NULL DEFAULT -1,
+    prompt_cache_hits INTEGER NOT NULL DEFAULT -1
 )
 """
 
@@ -199,6 +237,18 @@ CREATE TABLE IF NOT EXISTS query_embedding_cache (
     created_at TEXT NOT NULL,
     last_hit_at TEXT NOT NULL,
     hit_count INTEGER NOT NULL DEFAULT 1
+)
+"""
+
+_DDL_DISTILL_PROMPT_CACHE = """
+CREATE TABLE IF NOT EXISTS distill_prompt_cache (
+    transcript_hash TEXT PRIMARY KEY,
+    transcript TEXT NOT NULL,
+    memories_json TEXT NOT NULL,
+    model_id TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    last_hit_at TEXT NOT NULL,
+    hit_count INTEGER NOT NULL DEFAULT 0
 )
 """
 
@@ -467,6 +517,8 @@ class DatabaseManager:
                         "tokens_input": "INTEGER NOT NULL DEFAULT -1",
                         "tokens_output": "INTEGER NOT NULL DEFAULT -1",
                         "tokens_total": "INTEGER NOT NULL DEFAULT -1",
+                        "rule_gated_batches": "INTEGER NOT NULL DEFAULT -1",
+                        "prompt_cache_hits": "INTEGER NOT NULL DEFAULT -1",
                     }.items():
                         if col not in existing_dh:
                             conn.execute(f"ALTER TABLE distill_history ADD COLUMN {col} {ddl}")
@@ -479,6 +531,9 @@ class DatabaseManager:
         with self.db() as conn:
             conn.execute(_DDL_MEMORIES)
             conn.execute(_DDL_MEMORY_EVENTS)
+            conn.execute(_DDL_PROACTIVE_USER_POLICY)
+            conn.execute(_DDL_PROACTIVE_REMINDERS)
+            conn.execute(_DDL_PROACTIVE_SEND_LOG)
             conn.execute(_DDL_IDENTITY_MAPPINGS)
             conn.execute(_DDL_DISTILL_HISTORY)
             conn.execute(_DDL_CONVERSATION_CACHE)
@@ -491,6 +546,7 @@ class DatabaseManager:
             conn.execute(_DDL_PROFILE_ITEM_EVIDENCE)
             conn.execute(_DDL_PROFILE_RELATIONS)
             conn.execute(_DDL_QUERY_EMBEDDING_CACHE)
+            conn.execute(_DDL_DISTILL_PROMPT_CACHE)
 
             conn.execute("CREATE INDEX IF NOT EXISTS idx_identity_bindings_canonical ON identity_bindings (canonical_user_id)")
 
@@ -612,3 +668,9 @@ class DatabaseManager:
             conn.execute("CREATE INDEX IF NOT EXISTS idx_profile_evidence_user ON profile_item_evidence (canonical_user_id, created_at)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_profile_relations_from ON profile_relations (canonical_user_id, from_item_id, status)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_profile_relations_to ON profile_relations (canonical_user_id, to_item_id, status)")
+
+            # --- Proactive memory indexes ---
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_proactive_send_log_user ON proactive_send_log (canonical_user_id, status, created_at)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_proactive_send_log_status ON proactive_send_log (status, created_at)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_proactive_reminders_due ON proactive_reminders (status, due_at)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_proactive_reminders_user ON proactive_reminders (canonical_user_id, status)")
