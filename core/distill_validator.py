@@ -122,6 +122,8 @@ def record_distill_history(
     tokens_input: int = -1,
     tokens_output: int = -1,
     tokens_total: int = -1,
+    rule_gated_batches: int = -1,
+    prompt_cache_hits: int = -1,
 ):
     with plugin._db() as conn:
         conn.execute(
@@ -129,8 +131,9 @@ def record_distill_history(
             INSERT INTO distill_history(
                 started_at, finished_at, trigger_type, users_processed,
                 memories_created, users_failed, errors, duration_sec,
-                tokens_input, tokens_output, tokens_total
-            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                tokens_input, tokens_output, tokens_total,
+                rule_gated_batches, prompt_cache_hits
+            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 started_at,
@@ -144,6 +147,8 @@ def record_distill_history(
                 tokens_input,
                 tokens_output,
                 tokens_total,
+                rule_gated_batches,
+                prompt_cache_hits,
             ),
         )
 

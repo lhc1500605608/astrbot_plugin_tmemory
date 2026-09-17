@@ -11,6 +11,7 @@ from abc import ABC, abstractmethod
 from typing import List
 import aiohttp
 import logging
+import os
 
 logger = logging.getLogger("EmbeddingProvider")
 
@@ -220,3 +221,135 @@ class OpenAIEmbeddingProvider(BaseEmbeddingProvider):
         except Exception as e:
             logger.warning(f"OpenAI batch embedding failed: {e}")
             raise
+
+
+class LocalBgeEmbeddingProvider(BaseEmbeddingProvider):
+    """本地 bge-small-zh-v1.5 ONNX Embedding 提供者（零 API 成本）。
+
+    Plan TMEAAA-379 B3：模型由 ``tools/download_bge_onnx.py`` 下载到
+    ``data/bge-small-zh-v1.5``（Xenova 导出，含 ``model_quantized.onnx`` +
+    ``tokenizer.json``）。依赖 ``onnxruntime`` 与 ``tokenizers``，均为可选依赖：
+    缺失或模型不存在时构造抛 ``RuntimeError``，由 VectorManager 捕获并回退
+    standalone，不阻断插件启动。
+    """
+
+    source = "local"
+
+    def __init__(
+        self,
+        model_dir: str,
+        model_file: str = "model_quantized.onnx",
+        max_length: int = 512,
+    ):
+        self.model_dir = model_dir
+        self.model_file = model_file
+        self.max_length = max(16, int(max_length or 512))
+        self.model_name = f"bge-local:{os.path.basename(model_file)}"
+        self._session = None
+        self._tokenizer = None
+        self._input_names = set()
+        self._dim = 0
+        self._load()
+
+    def _load(self) -> None:
+        model_path = os.path.join(self.model_dir, self.model_file)
+        tokenizer_path = os.path.join(self.model_dir, "tokenizer.json")
+        if not os.path.isfile(model_path):
+            raise RuntimeError(
+                f"local embedding model not found: {model_path} "
+                f"(run tools/download_bge_onnx.py first)"
+            )
+        if not os.path.isfile(tokenizer_path):
+            raise RuntimeError(f"local embedding tokenizer not found: {tokenizer_path}")
+        try:
+            import onnxruntime as ort
+            from tokenizers import Tokenizer
+        except ImportError as e:
+            raise RuntimeError(
+                "local embedding requires optional deps 'onnxruntime' and 'tokenizers'"
+            ) from e
+
+        tokenizer = Tokenizer.from_file(tokenizer_path)
+        tokenizer.enable_truncation(max_length=self.max_length)
+        tokenizer.enable_padding()
+        self._tokenizer = tokenizer
+
+        sess_options = ort.SessionOptions()
+        sess_options.intra_op_num_threads = max(1, (os.cpu_count() or 2) // 2)
+        self._session = ort.InferenceSession(
+            model_path, sess_options=sess_options, providers=["CPUExecutionProvider"]
+        )
+        self._input_names = {i.name for i in self._session.get_inputs()}
+        dim = 0
+        for out in self._session.get_outputs():
+            shape = list(getattr(out, "shape", []) or [])
+            if shape and isinstance(shape[-1], int):
+                dim = max(dim, int(shape[-1]))
+        self._dim = dim
+        logger.info(
+            "[EmbeddingProvider] local bge loaded: model=%s dim=%s inputs=%s",
+            self.model_file,
+            self._dim,
+            sorted(self._input_names),
+        )
+
+    def get_dim(self) -> int:
+        return int(self._dim or 0)
+
+    def _encode(self, texts: List[str]) -> List[List[float]]:
+        import numpy as np
+
+        encodings = self._tokenizer.encode_batch([str(t or "") for t in texts])
+        feed = {}
+        if "input_ids" in self._input_names:
+            feed["input_ids"] = np.asarray([e.ids for e in encodings], dtype=np.int64)
+        if "attention_mask" in self._input_names:
+            feed["attention_mask"] = np.asarray(
+                [e.attention_mask for e in encodings], dtype=np.int64
+            )
+        if "token_type_ids" in self._input_names:
+            feed["token_type_ids"] = np.asarray(
+                [e.type_ids for e in encodings], dtype=np.int64
+            )
+
+        outputs = self._session.run(None, feed)
+        output_names = [o.name for o in self._session.get_outputs()]
+        embeddings = None
+        for name, value in zip(output_names, outputs):
+            arr = np.asarray(value)
+            if arr.ndim == 3:
+                mask = feed.get("attention_mask")
+                if mask is None:
+                    mask = np.ones(arr.shape[:2], dtype=np.int64)
+                mask_f = mask.astype(np.float32)[..., None]
+                summed = (arr * mask_f).sum(axis=1)
+                counts = np.clip(mask_f.sum(axis=1), 1e-9, None)
+                embeddings = summed / counts
+                break
+            if arr.ndim == 2 and ("sentence_embedding" in name or embeddings is None):
+                embeddings = arr
+                break
+        if embeddings is None:
+            raise RuntimeError("local embedding model produced no usable output")
+
+        norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
+        normalized = embeddings / np.clip(norms, 1e-9, None)
+        return [[float(x) for x in row] for row in normalized]
+
+    async def embed_text(self, text: str) -> List[float]:
+        import asyncio
+
+        result = await asyncio.to_thread(self._encode, [text])
+        return result[0] if result else []
+
+    async def embed_batch(self, texts: List[str]) -> List[List[float]]:
+        import asyncio
+
+        items = list(texts)
+        if not items:
+            return []
+        return await asyncio.to_thread(self._encode, items)
+
+    async def close(self) -> None:
+        self._session = None
+        self._tokenizer = None

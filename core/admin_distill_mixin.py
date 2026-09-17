@@ -50,8 +50,9 @@ class AdminDistillMixin:
         return get_distill_history(self._plugin, limit=limit)
 
     def get_distill_budget_info(self) -> Dict[str, Any]:
-        """返回日 token 预算消耗信息。"""
+        """返回日 token 预算消耗信息与蒸馏降本统计（B3）。"""
         from .distill_validator import get_daily_token_usage
+        from .prompt_cache import prompt_cache_stats
         budget = max(0, getattr(self._cfg, 'daily_token_budget', 0))
         used = get_daily_token_usage(self._plugin)
         return {
@@ -60,6 +61,13 @@ class AdminDistillMixin:
             "remaining": max(0, budget - used) if budget > 0 else -1,
             "pct": round(used / budget * 100, 1) if budget > 0 else 0.0,
             "unlimited": budget <= 0,
+            "rule_gating_enabled": bool(getattr(self._cfg, "distill_rule_gating", False)),
+            "rule_gated_batches": int(getattr(self._plugin, "_distill_rule_gated_batches", 0) or 0),
+            "rule_gated_rows": int(getattr(self._plugin, "_distill_rule_gated_rows", 0) or 0),
+            "rule_deferred_batches": int(getattr(self._plugin, "_distill_rule_deferred_batches", 0) or 0),
+            "prompt_cache_enabled": bool(getattr(self._cfg, "distill_prompt_cache", True)),
+            "prompt_cache_hits": int(getattr(self._plugin, "_distill_prompt_cache_hits", 0) or 0),
+            "prompt_cache": prompt_cache_stats(self._plugin),
         }
 
     # =====================================================================

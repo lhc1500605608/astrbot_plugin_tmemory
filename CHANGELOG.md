@@ -5,6 +5,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v0.11.0] - 2026-09-18
+
+### ⚠️ Breaking Changes / 迁移指南
+
+1. **嵌入来源变更（BC-1）** — 默认优先使用 AstrBot Provider/知识库嵌入；设置
+   `embedding_source=standalone` 可恢复 v0.10.0 的独立配置行为。
+2. **主动性默认关闭（BC-3）** — 新增 `proactive_enabled`（默认 `false`），需显式开启
+   并配置限流/预算/opt-in 策略。
+3. **蒸馏规则分级（BC-4）** — 新增规则分级路径；`distill_rule_gating=false` 恢复纯 LLM 路径。
+4. **导入写接口（BC-5）** — `/tm_import` 默认 dry-run，写入前自动备份并支持回滚。
+
+### Added（开发中）
+
+- **B1 平台 Provider 嵌入接入** (TMEAAA-380) — 复用平台 Embedding/Rerank Provider，
+  保留独立配置回退与维度变更重建索引。
+- **B2 主动性记忆** (TMEAAA-381) — Proactive / `send_message`，带开关、限流、预算与
+  用户级策略，默认关闭。
+- **B3 蒸馏降本** (TMEAAA-382) — 规则分级 + 本地 embedding + prompt 缓存。
+- **B6 质量基准与数据 API** (TMEAAA-383) — LongMemEval 类基准 + 导入/导出
+  （dry-run + 备份）。
+- **v0.11.0 控制面板** (TMEAAA-384) — 主动性/导入导出/嵌入来源/成本视图。
+
 ## [v0.10.0] - 2026-09-17
 
 ### ⚠️ Breaking Changes / 迁移指南

@@ -11,14 +11,20 @@ facade re-export：core/web 可直接 ``from ..adapters import get_adapter_name`
 
 from __future__ import annotations
 
-from . import config, conversation, event, llm, version
+from . import config, conversation, event, llm, provider, send, version
 
 __all__ = [
     "config",
     "conversation",
     "event",
     "llm",
+    "provider",
+    "send",
     "version",
+    "probe_send_capability",
+    "send_message",
+    "resolve_embedding_provider",
+    "resolve_rerank_provider",
     "get_astrbot_data_path",
     "get_current_persona_id",
     "get_current_conversation_id",
@@ -35,6 +41,8 @@ __all__ = [
 ]
 
 
+resolve_embedding_provider = provider.resolve_embedding_provider
+resolve_rerank_provider = provider.resolve_rerank_provider
 get_astrbot_data_path = config.get_astrbot_data_path
 get_current_persona_id = conversation.get_current_persona_id
 get_current_conversation_id = conversation.get_current_conversation_id
@@ -48,3 +56,5 @@ get_identity_adapter_name = event.get_identity_adapter_name
 get_memory_scope = event.get_memory_scope
 is_group_event = event.is_group_event
 get_current_persona = event.get_current_persona
+probe_send_capability = send.probe_send_capability
+send_message = send.send_message

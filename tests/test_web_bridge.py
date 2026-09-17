@@ -76,8 +76,13 @@ def test_route_table_covers_every_legacy_capability(bridge_module):
     legacy_sigs = _legacy_route_signatures()
 
     assert legacy_sigs <= bridge_without_session
-    # 唯一新增：bridge SDK 只有 apiGet/apiPost，配置更新需额外暴露 POST。
-    assert bridge_without_session - legacy_sigs == {("POST", "/config")}
+    # 唯一新增：bridge SDK 只有 apiGet/apiPost，配置更新需额外暴露 POST；
+    # B6 数据集导入/导出为新增 API（legacy 无对应能力）。
+    assert bridge_without_session - legacy_sigs == {
+        ("POST", "/config"),
+        ("POST", "/export"),
+        ("POST", "/import"),
+    }
     assert ("GET", "/session") in bridge_sigs
     assert ("POST", "/login") not in bridge_sigs
     assert all(method == method.upper() for method, _ in bridge_sigs)

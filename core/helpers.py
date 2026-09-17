@@ -157,8 +157,30 @@ class PluginHelpersMixin(DataAccessMixin):
 
         raise RuntimeError(f"[tmemory] \u65e0\u6cd5\u521b\u5efa\u6301\u4e45\u5316\u6570\u636e\u76ee\u5f55\u3002\u5df2\u5c1d\u8bd5: {candidates}")
 
+    def _load_sqlite_vec(self):
+        """在启用向量检索时加载 sqlite-vec 扩展（缺失时禁用并告警）。
+
+        v0.10.0 回归修复：该加载逻辑在 TMEAAA-96 重构中丢失，导致
+        ``_vec_available`` 恒为 False、向量索引路径完全失效。
+        """
+        self._sqlite_vec = None
+        self._vec_available = False
+        if not self._cfg.enable_vector_search:
+            return
+        try:
+            import sqlite_vec  # type: ignore[import-not-found]
+
+            self._sqlite_vec = sqlite_vec
+            self._vec_available = True
+            logger.info("[tmemory] sqlite-vec loaded; vector search available")
+        except ImportError:
+            logger.warning(
+                "[tmemory] sqlite-vec not installed; vector search disabled. "
+                "Run: pip install sqlite-vec"
+            )
+
     def _init_db(self):
-        self._db_mgr.init_db(self._vec_available, getattr(self, "embed_dim", 768))
+        self._db_mgr.init_db(self._vec_available, getattr(self._cfg, "embed_dim", 768))
 
     def _migrate_schema(self, conn: Optional[sqlite3.Connection] = None):
         if conn is None:
@@ -197,6 +219,12 @@ class PluginHelpersMixin(DataAccessMixin):
 
     async def _rebuild_vector_index(self) -> Tuple[int, int]:
         return await _vector.rebuild_vector_index(self)
+
+    def _embedding_status(self) -> Dict[str, object]:
+        """embedding/rerank 来源快照；未启用向量检索时返回空 dict。"""
+        if getattr(self, "_vector_manager", None) is None:
+            return {}
+        return _vector.embedding_status(self)
 
     def _log_memory_event(
         self,

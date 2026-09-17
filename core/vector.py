@@ -24,15 +24,40 @@ async def get_http_session(plugin):
 
 
 async def embed_text(plugin, text: str) -> Optional[List[float]]:
-    """生成文本向量。优先使用 VectorManager，如果不可用则回退到旧方法。
+    """生成文本向量。优先使用 VectorManager 的 Provider/独立提供者，
+    提供者异常时回退到独立 HTTP 配置。
 
     包含:并发限流(semaphore)、429/5xx 重试(最多 2 次)、可观测计数。
     """
-    if plugin._vector_manager and plugin._vector_manager.embedding_provider:
+    vm = getattr(plugin, "_vector_manager", None)
+    provider = getattr(vm, "embedding_provider", None) if vm is not None else None
+    if provider is not None:
         try:
-            return await plugin._vector_manager.embedding_provider.embed_text(text)
+            vec = await provider.embed_text(text)
         except Exception as e:
-            logger.warning("[tmemory] VectorManager embed_text failed: %s", e)
+            plugin._embed_provider_fail_count = (
+                getattr(plugin, "_embed_provider_fail_count", 0) + 1
+            )
+            plugin._embed_last_error = f"provider_fail: {str(e)[:180]}"
+            logger.warning(
+                "[tmemory] provider embed_text failed, fallback to standalone: %s", e
+            )
+            vec = None
+        if vec:
+            if len(vec) != plugin._cfg.embed_dim:
+                plugin._embed_fail_count += 1
+                plugin._embed_last_error = (
+                    f"provider dim mismatch {len(vec)} vs {plugin._cfg.embed_dim}"
+                )
+                logger.warning(
+                    "[tmemory] provider embed dim mismatch: got %d, expected %d",
+                    len(vec),
+                    plugin._cfg.embed_dim,
+                )
+            else:
+                plugin._embed_ok_count += 1
+                plugin._embed_last_source = "provider"
+                return vec
 
     if not plugin._vec_available or not plugin._cfg.embed_base_url:
         return None
@@ -84,6 +109,7 @@ async def embed_text(plugin, text: str) -> Optional[List[float]]:
                         )
                         return None
                     plugin._embed_ok_count += 1
+                    plugin._embed_last_source = "standalone"
                     return vec
             except Exception as e:
                 if attempt < max_retries:
@@ -198,6 +224,100 @@ async def rebuild_vector_index(plugin) -> Tuple[int, int]:
     return ok, fail
 
 
+def embedding_status(plugin) -> Dict[str, object]:
+    """返回当前 embedding/rerank 来源快照（日志 / 命令 / UI 展示用）。"""
+    vm = getattr(plugin, "_vector_manager", None)
+    if vm is None:
+        return {
+            "active_source": "none",
+            "embedding_source": getattr(getattr(plugin, "_cfg", None), "embedding_source", ""),
+            "provider_id": "",
+            "provider_dim": 0,
+            "rerank_source": "disabled",
+        }
+    status_fn = getattr(vm, "status", None)
+    if callable(status_fn):
+        try:
+            return status_fn()
+        except Exception as e:
+            logger.debug("[tmemory] vector status() failed: %s", e)
+    provider = getattr(vm, "embedding_provider", None)
+    return {
+        "active_source": "provider" if getattr(vm, "source", "") == "provider" else (
+            "standalone" if provider is not None else "none"
+        ),
+        "embedding_source": getattr(vm, "embedding_source", ""),
+        "provider_id": getattr(vm, "provider_id", ""),
+        "provider_dim": getattr(vm, "provider_dim", 0),
+        "rerank_source": "provider" if getattr(vm, "rerank_provider", None) else "disabled",
+    }
+
+
+async def apply_provider_dim_change(plugin) -> Dict[str, object]:
+    """Provider 嵌入维度与本地配置不一致时：更新维度、失效缓存、重建索引。
+
+    仅在 ``embedding_source=provider`` 且 Provider 已解析成功时生效。
+    维度未变化或非 Provider 来源直接返回 ``changed=False``。
+    """
+    result: Dict[str, object] = {
+        "changed": False,
+        "old_dim": int(plugin._cfg.embed_dim),
+        "new_dim": 0,
+        "cache_cleared": False,
+        "rebuilt": False,
+    }
+    vm = getattr(plugin, "_vector_manager", None)
+    provider = getattr(vm, "embedding_provider", None) if vm is not None else None
+    if provider is None or getattr(vm, "source", "") != "provider":
+        return result
+
+    try:
+        new_dim = int(getattr(vm, "provider_dim", 0) or 0)
+    except Exception:
+        new_dim = 0
+    result["new_dim"] = new_dim
+    old_dim = int(plugin._cfg.embed_dim)
+    if new_dim <= 0 or new_dim == old_dim:
+        return result
+
+    auto_rebuild = bool(getattr(plugin._cfg, "auto_rebuild_on_dim_change", True))
+    logger.warning(
+        "[tmemory] embedding dim changed %d -> %d (provider=%s, auto_rebuild=%s)",
+        old_dim,
+        new_dim,
+        getattr(vm, "provider_id", "") or "<auto>",
+        auto_rebuild,
+    )
+    plugin._cfg.embed_dim = new_dim
+    result["changed"] = True
+
+    # Query embedding 缓存与维度绑定：变更后必须整体失效，避免旧维度向量污染检索。
+    try:
+        with plugin._db() as conn:
+            conn.execute("DELETE FROM query_embedding_cache")
+        result["cache_cleared"] = True
+    except Exception as e:
+        logger.warning("[tmemory] query embedding cache clear failed: %s", e)
+
+    if plugin._vec_available and auto_rebuild:
+        try:
+            with plugin._db() as conn:
+                conn.execute("DROP TABLE IF EXISTS memory_vectors")
+                conn.execute("DROP TABLE IF EXISTS profile_item_vectors")
+            plugin._db_mgr.init_db(True, new_dim)
+            ok, fail = await rebuild_vector_index(plugin)
+            result["rebuilt"] = True
+            result["rebuilt_ok"] = ok
+            result["rebuilt_fail"] = fail
+            logger.info(
+                "[tmemory] vector index rebuilt after dim change: ok=%d fail=%d", ok, fail
+            )
+        except Exception as e:
+            logger.error("[tmemory] vector index rebuild after dim change failed: %s", e)
+            result["error"] = str(e)[:200]
+    return result
+
+
 async def get_cached_query_embedding(
     plugin, query: str
 ) -> Optional[List[float]]:
@@ -288,13 +408,36 @@ async def rerank_results(
     candidates: List[Dict[str, object]],
     top_n: int,
 ) -> List[Dict[str, object]]:
-    """调用 Reranker API 对候选记忆精排。
+    """调用 Reranker 对候选记忆精排。
 
-    兼容 /v1/rerank 接口(Jina、Cohere、混元、本地 rerank 服务)。
+    优先使用 AstrBot Rerank Provider（``rerank_provider_id``），缺失/异常时
+    回退独立 ``/v1/rerank`` 接口(Jina、Cohere、混元、本地 rerank 服务)。
     """
     if not candidates:
         return candidates[:top_n]
     documents = [str(c["memory"]) for c in candidates]
+
+    vm = getattr(plugin, "_vector_manager", None)
+    rerank_provider = getattr(vm, "rerank_provider", None) if vm is not None else None
+    if rerank_provider is not None:
+        try:
+            results = await rerank_provider.rerank(
+                query, documents, min(top_n, len(documents))
+            )
+            reranked_provider: List[Dict[str, object]] = []
+            for r in results or []:
+                idx = int(r.get("index", -1))
+                if 0 <= idx < len(candidates):
+                    item = dict(candidates[idx])
+                    item["rerank_score"] = float(r.get("relevance_score", 0.0))
+                    reranked_provider.append(item)
+            if reranked_provider:
+                return reranked_provider[:top_n]
+        except Exception as e:
+            logger.warning(
+                "[tmemory] provider rerank failed, fallback to HTTP rerank: %s", e
+            )
+
     payload: Dict[str, object] = {
         "query": query,
         "documents": documents,

@@ -10,6 +10,7 @@ from .core.config import PluginConfig, PluginLifecycleMixin, parse_config
 from .core.capture import CaptureFilter
 from .core.distill import DistillManager, DistillRuntimeMixin
 from .core.consolidation import ConsolidationRuntimeMixin, ProfileExtractionRuntimeMixin
+from .core.proactive import ProactiveRuntimeMixin
 from .core.session_lifecycle import SessionLifecycleRuntimeMixin
 from .core.utils import MemoryLogger, PluginHelpersMixin, PluginHandlersMixin
 from .core.identity import IdentityManager
@@ -38,6 +39,7 @@ _CMD_FIRST_WORDS = frozenset(
         "tm_pin",
         "tm_unpin",
         "tm_export",
+        "tm_import",
         "tm_purge",
     }
 )
@@ -64,6 +66,7 @@ def _optional_filter_hook(name: str):
 
 class TMemoryPlugin(
     SessionLifecycleRuntimeMixin,
+    ProactiveRuntimeMixin,
     PluginLifecycleMixin,
     DistillRuntimeMixin,
     ConsolidationRuntimeMixin,
@@ -100,12 +103,19 @@ class TMemoryPlugin(
         self._last_purify_ts = 0.0
         self._embed_ok_count = 0
         self._embed_fail_count = 0
+        self._embed_provider_fail_count = 0
+        self._embed_last_source = ""
         self._embed_last_error = ""
         self._vec_query_count = 0
         self._vec_hit_count = 0
         self._embed_semaphore = None
         self._http_session = None
         self._distill_skipped_rows: int = 0
+        # 蒸馏降本统计（Plan TMEAAA-379 B3）
+        self._distill_rule_gated_batches: int = 0
+        self._distill_rule_gated_rows: int = 0
+        self._distill_rule_deferred_batches: int = 0
+        self._distill_prompt_cache_hits: int = 0
         self._user_last_distilled_ts: Dict[str, float] = {}
         # 会话轮转检测（/new /reset）：UMO → 上次见到的对话 ID
         self._session_conv_ids: Dict[str, str] = {}
@@ -114,6 +124,9 @@ class TMemoryPlugin(
         # 兼容性打点（Plan TMEAAA-354 Phase 1）
         self._extra_user_temp_fallback_count: int = 0
         self._persona_private_fallback_count: int = 0
+        # 主动记忆（Plan TMEAAA-379 B2 / BC-3）：默认关闭 → 不建引擎、不建任务
+        self._proactive_task: Optional[asyncio.Task] = None
+        self._proactive_engine = None
 
         # ── CaptureFilter & DistillManager ──────────────────────────────────────────────────────
         self._capture_filter = CaptureFilter(self._cfg)
@@ -351,6 +364,13 @@ class TMemoryPlugin(
     async def tm_export(self, event: AstrMessageEvent):
         """导出当前用户的所有记忆(JSON):/tm_export"""
         async for result in self._handle_tm_export(event):
+            yield result
+
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @filter.command("tm_import")
+    async def tm_import(self, event: AstrMessageEvent):
+        """导入记忆数据(dry-run/apply):/tm_import [apply] <JSON>"""
+        async for result in self._handle_tm_import(event):
             yield result
 
     @filter.permission_type(filter.PermissionType.ADMIN)

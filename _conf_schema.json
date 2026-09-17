@@ -76,6 +76,23 @@
         "description": "启用向量检索",
         "hint": "开启后将启用向量检索能力，提升记忆召回质量。"
       },
+      "embedding_source": {
+        "type": "string",
+        "default": "provider",
+        "description": "Embedding 来源",
+        "hint": "provider=优先使用 AstrBot Provider/知识库嵌入（推荐）；standalone=使用下方独立配置；local=使用本地 bge-small-zh-v1.5 ONNX（零 API 成本，需先运行 tools/download_bge_onnx.py）。Provider 缺失或异常时自动回退 standalone，不报错。",
+        "options": [
+          "provider",
+          "standalone",
+          "local"
+        ]
+      },
+      "embedding_provider_id": {
+        "type": "string",
+        "default": "",
+        "description": "AstrBot Embedding Provider ID（可选）",
+        "hint": "留空时自动选择第一个可用的 AstrBot Embedding Provider。仅 embedding_source=provider 时生效。"
+      },
       "embedding_provider": {
         "type": "string",
         "default": "volc",
@@ -114,6 +131,24 @@
         "default": true,
         "description": "维度变更时自动重建",
         "hint": "检测到 sqlite-vec 向量维度配置变更时，自动清空并重建向量索引。"
+      },
+      "local_embedding_path": {
+        "type": "string",
+        "default": "data/bge-small-zh-v1.5",
+        "description": "本地 Embedding 模型目录",
+        "hint": "embedding_source=local 时使用的模型目录（相对插件数据目录）。先运行 tools/download_bge_onnx.py 下载 Xenova/bge-small-zh-v1.5。"
+      },
+      "local_embedding_model_file": {
+        "type": "string",
+        "default": "model_quantized.onnx",
+        "description": "本地 ONNX 模型文件名",
+        "hint": "模型目录下的 ONNX 文件名。量化模型默认 model_quantized.onnx。"
+      },
+      "local_embedding_max_length": {
+        "type": "int",
+        "default": 512,
+        "description": "本地 Embedding 最大 token 长度",
+        "hint": "本地模型单条文本最大 token 数，超出会截断。默认 512。"
       }
     }
   },
@@ -186,10 +221,34 @@
     "hint": "开启后停止后台自动蒸馏（手动蒸馏不受影响），用于成本控制或调试。",
     "default": false
   },
+  "distill_rule_gating": {
+    "type": "bool",
+    "description": "启用蒸馏规则分级门控（降本）",
+    "hint": "开启后用高精度规则先分级：无长期记忆信号的简单样本由规则直接处理（零 LLM 调用），含偏好/事实/例行/目标/约束/风格信号的复杂样本才升级 LLM。默认关闭以保持 v0.10.0 纯 LLM 行为；关闭即回滚。",
+    "default": false
+  },
+  "distill_rule_gate_min_chars": {
+    "type": "int",
+    "description": "规则门控长文本升级阈值",
+    "hint": "用户消息规范化后长度达到该阈值即升级 LLM，避免遗漏长文本中的隐含信息。仅 distill_rule_gating=true 生效。默认 40。",
+    "default": 40
+  },
+  "distill_prompt_cache": {
+    "type": "bool",
+    "description": "启用蒸馏 prompt 结果缓存",
+    "hint": "相同 transcript（对话内容完全相同）复用上次 LLM 蒸馏产出，缓存命中不计 token、不调用 LLM。默认开启，仅影响成本不影响产出。",
+    "default": true
+  },
+  "distill_prompt_cache_max_rows": {
+    "type": "int",
+    "description": "蒸馏 prompt 缓存条目上限",
+    "hint": "缓存表最多保留的条目数，超出后按最近最少使用淘汰。0=不限制。默认 1000。",
+    "default": 1000
+  },
   "daily_token_budget": {
     "type": "int",
     "description": "日 token 预算上限",
-    "hint": "每日蒸馏总 token 用量上限（基于 distill_history 当日累计）。超预算后自动跳过画像提取/巩固管线，仅保留规则蒸馏。0=不限制。",
+    "hint": "每日蒸馏总 token 用量上限（基于 distill_history 当日累计）。超预算后自动跳过画像提取/巩固管线，仅保留规则蒸馏；蒸馏时若预算已耗尽会强制走规则分级（不再调用 LLM）以免超支。0=不限制。",
     "default": 0
   },
   "capture_min_content_len": {
@@ -290,6 +349,79 @@
     "hint": "keep（默认）：仅记录日志，会话缓存与长期记忆全部保留；archive：会话缓存软归档（工作上下文不再召回，证据与蒸馏保留）；clear：删除该会话缓存（被画像证据引用的行保留）。需 AstrBot >= 4.28 的会话删除钩子，低版本自动跳过。",
     "default": "keep",
     "options": ["keep", "archive", "clear"]
+  },
+  "proactive": {
+    "type": "object",
+    "description": "主动性记忆（Proactive）",
+    "hint": "默认关闭。开启后按周期触发到期提醒与主动回忆；仅对 opt-in 用户发送，并受限流与每日预算约束。平台不支持主动推送时自动禁用并告警。",
+    "items": {
+      "proactive_enabled": {
+        "type": "bool",
+        "default": false,
+        "description": "启用主动性记忆",
+        "hint": "默认关闭。关闭时零调度、零副作用；回滚即置回 false。"
+      },
+      "proactive_interval_sec": {
+        "type": "int",
+        "default": 300,
+        "description": "调度周期（秒）",
+        "hint": "主动消息调度循环的检查间隔，最小 30 秒。建议 >= 300。"
+      },
+      "proactive_max_candidates_per_cycle": {
+        "type": "int",
+        "default": 5,
+        "description": "单轮最多候选数",
+        "hint": "每轮最多处理多少条主动消息候选，用于抑制批量打扰。"
+      },
+      "proactive_per_user_window_sec": {
+        "type": "int",
+        "default": 3600,
+        "description": "每用户限流窗口（秒）",
+        "hint": "统计窗口长度，配合「窗口内上限」实现每用户限流。"
+      },
+      "proactive_per_user_max_per_window": {
+        "type": "int",
+        "default": 3,
+        "description": "窗口内每用户上限",
+        "hint": "同一用户在限流窗口内最多接收多少条主动消息，超出则跳过并写审计。"
+      },
+      "proactive_min_interval_sec": {
+        "type": "int",
+        "default": 300,
+        "description": "同一用户最小发送间隔（秒）",
+        "hint": "两次主动消息之间的最小间隔，防止集中打扰。"
+      },
+      "proactive_daily_budget": {
+        "type": "int",
+        "default": 20,
+        "description": "每日主动消息预算",
+        "hint": "全部用户每日主动消息总量上限，超出则跳过并写审计。0=不限制。"
+      },
+      "proactive_reminder_enabled": {
+        "type": "bool",
+        "default": true,
+        "description": "启用到期提醒触发",
+        "hint": "开启后，到期的用户提醒会作为主动消息候选。"
+      },
+      "proactive_recall_enabled": {
+        "type": "bool",
+        "default": true,
+        "description": "启用主动回忆触发",
+        "hint": "开启后，基于用户画像生成主动回忆问候。"
+      },
+      "proactive_opt_in_default": {
+        "type": "bool",
+        "default": false,
+        "description": "默认 opt-in",
+        "hint": "false（推荐）：仅显式 opt-in 的用户接收；true：所有用户默认接收（仍需可 opt-out）。"
+      },
+      "proactive_max_message_chars": {
+        "type": "int",
+        "default": 200,
+        "description": "主动消息最大长度",
+        "hint": "主动消息文本截断长度，最小 20。"
+      }
+    }
   },
   "distill_model_settings": {
     "type": "object",

@@ -29,6 +29,11 @@ jobs:
       - name: Run pytest
         run: pytest -q
 
+      # TMEAAA-378: packaging gate. Builds a clean single-root zip and
+      # validates it against AstrBot's archive root-resolution rules.
+      - name: Verify plugin archive packaging
+        run: python3 tools/plugin_archive.py pack --output dist/astrbot_plugin_tmemory.zip
+
   compat:
     name: compat AstrBot ${{ matrix.astrbot-version }}
     runs-on: ubuntu-latest
