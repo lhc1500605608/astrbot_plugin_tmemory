@@ -8,6 +8,8 @@ import textwrap
 
 import pytest
 
+REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
+
 
 def _real_astrbot_available():
     """Return True if the real astrbot package is installed (not stubs)."""
@@ -75,7 +77,7 @@ def test_plugin_initializes_under_real_astrbot(tmp_path):
     env.setdefault("PYTHONUTF8", "1")
     result = subprocess.run(
         [sys.executable, "-c", script],
-        cwd="/Users/tango/Documents/paperclip/astrbot_plugin_tmemory",
+        cwd=REPO_ROOT,
         env=env,
         text=True,
         capture_output=True,
@@ -98,10 +100,14 @@ def test_plugin_is_discoverable_from_real_astrbot_plugin_directory(tmp_path):
 
         import yaml
 
+        # AstrBot 4.16.0: astrbot.core.star 存在循环导入，先导入 astrbot.api
+        # 才能安全加载 star_manager（仅 4.16.0 需要，后续版本顺序无关）。
+        import astrbot.api  # noqa: F401
+
         from astrbot.core.star.star_manager import PluginManager
         from astrbot.core.utils.astrbot_path import get_astrbot_plugin_path
 
-        repo_root = pathlib.Path(r"/Users/tango/Documents/paperclip/astrbot_plugin_tmemory")
+        repo_root = pathlib.Path(r"{REPO_ROOT}")
         astrbot_root = pathlib.Path(r"{astrbot_root}")
         os.environ["ASTRBOT_ROOT"] = str(astrbot_root)
 
@@ -115,8 +121,10 @@ def test_plugin_is_discoverable_from_real_astrbot_plugin_directory(tmp_path):
         modules = PluginManager._get_modules(str(plugin_root))
         assert any(item["pname"] == "astrbot_plugin_tmemory" for item in modules), modules
 
-        plugin_name = PluginManager._get_plugin_dir_name_from_metadata(str(installed_plugin))
-        assert plugin_name == "astrbot_plugin_tmemory"
+        # 4.16.0 无此私有 API；存在时必须返回安装目录名。
+        if hasattr(PluginManager, "_get_plugin_dir_name_from_metadata"):
+            plugin_name = PluginManager._get_plugin_dir_name_from_metadata(str(installed_plugin))
+            assert plugin_name == "astrbot_plugin_tmemory"
 
         expected_metadata = yaml.safe_load((repo_root / "metadata.yaml").read_text(encoding="utf-8"))
 
@@ -134,7 +142,7 @@ def test_plugin_is_discoverable_from_real_astrbot_plugin_directory(tmp_path):
     env.setdefault("PYTHONUTF8", "1")
     result = subprocess.run(
         [sys.executable, "-c", script],
-        cwd="/Users/tango/Documents/paperclip/astrbot_plugin_tmemory",
+        cwd=REPO_ROOT,
         env=env,
         text=True,
         capture_output=True,
@@ -157,7 +165,7 @@ def test_web_server_admin_import_works_from_real_astrbot_plugin_package(tmp_path
 
         from astrbot.core.utils.astrbot_path import get_astrbot_plugin_path
 
-        repo_root = pathlib.Path(r"/Users/tango/Documents/paperclip/astrbot_plugin_tmemory")
+        repo_root = pathlib.Path(r"{REPO_ROOT}")
         astrbot_root = pathlib.Path(r"{astrbot_root}")
         os.environ["ASTRBOT_ROOT"] = str(astrbot_root)
 
@@ -182,7 +190,7 @@ def test_web_server_admin_import_works_from_real_astrbot_plugin_package(tmp_path
     env.setdefault("PYTHONUTF8", "1")
     result = subprocess.run(
         [sys.executable, "-c", script],
-        cwd="/Users/tango/Documents/paperclip/astrbot_plugin_tmemory",
+        cwd=REPO_ROOT,
         env=env,
         text=True,
         capture_output=True,
@@ -193,7 +201,7 @@ def test_web_server_admin_import_works_from_real_astrbot_plugin_package(tmp_path
 
 
 def test_docker_init_deepseek_injection_handles_bom_without_leaking_key(tmp_path):
-    repo_root = pathlib.Path("/Users/tango/Documents/paperclip/astrbot_plugin_tmemory")
+    repo_root = REPO_ROOT
     init_script = repo_root / "docker" / "astrbot_init.sh"
     script_text = init_script.read_text(encoding="utf-8")
     python_block = script_text.split("python3 <<'PY'", 1)[1].split("\nPY", 1)[0]

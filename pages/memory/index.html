@@ -505,31 +505,36 @@ body { font-family: var(--font); background:var(--bg); color:var(--text); min-he
 <div class="toast-container" id="toastContainer"></div>
 
 <script>
-/* plugin_page_bridge.js -- Dashboard API bridge (no JWT, no login) */
+/* plugin_page_bridge.js -- Dashboard API bridge via AstrBotPluginPage SDK */
 var PLUGIN_NAME = 'astrbot_plugin_tmemory';
-var API_BASE = window.location.origin + '/api/' + PLUGIN_NAME;
 
 async function api(path, opts) {
   opts = opts || {};
-  var url = API_BASE + path;
+  var sdk = window.AstrBotPluginPage;
+  if (!sdk) {
+    console.error('API error: AstrBotPluginPage SDK not loaded');
+    toast('SDK 未加载，请刷新页面重试', 'error');
+    return null;
+  }
+  var endpoint = path.charAt(0) === '/' ? path.slice(1) : path;
+  var isPost = (opts.method && opts.method.toUpperCase() === 'POST') || opts.body;
   try {
-    var resp = await fetch(url, {
-      headers: { 'Content-Type': 'application/json' },
-      method: opts.method || 'GET',
-      body: opts.body || undefined,
-    });
-    var ct = resp.headers.get('content-type') || '';
-    if (!ct.includes('application/json')) {
-      var text = await resp.text();
-      console.error('Non-JSON response:', resp.status, text.slice(0, 200));
-      toast('服务端错误 (' + resp.status + ')', 'error');
-      return null;
-    }
-    var data = await resp.json();
-    if (resp.status >= 400) {
-      var msg = data.message || data.error || '请求失败';
-      toast(msg, 'error');
-      return null;
+    var data;
+    if (isPost) {
+      var body = opts.body ? JSON.parse(opts.body) : {};
+      data = await sdk.apiPost(endpoint, body);
+    } else {
+      var qIdx = endpoint.indexOf('?');
+      var ep = qIdx >= 0 ? endpoint.slice(0, qIdx) : endpoint;
+      var qs = qIdx >= 0 ? endpoint.slice(qIdx + 1) : '';
+      var params = {};
+      if (qs) {
+        qs.split('&').forEach(function(kv) {
+          var parts = kv.split('=');
+          params[decodeURIComponent(parts[0])] = decodeURIComponent(parts[1] || '');
+        });
+      }
+      data = await sdk.apiGet(ep, params);
     }
     if (data && data.status === 'error') {
       toast(data.message || '请求失败', 'error');
@@ -538,7 +543,7 @@ async function api(path, opts) {
     return data;
   } catch (e) {
     console.error('API error:', e);
-    toast('请求失败: ' + e.message, 'error');
+    toast('请求失败: ' + (e.message || e), 'error');
     return null;
   }
 }

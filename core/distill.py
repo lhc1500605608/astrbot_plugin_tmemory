@@ -172,11 +172,12 @@ class DistillManager:
 
 import asyncio
 import json
+import logging
 import re
 import time
 from typing import Dict, List, Tuple
 
-from astrbot.api import logger
+logger = logging.getLogger("astrbot")
 
 
 class DistillRuntimeMixin:

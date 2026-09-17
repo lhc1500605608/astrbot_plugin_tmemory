@@ -5,6 +5,48 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v0.10.0] - 2026-09-17
+
+### ⚠️ Breaking Changes / 迁移指南
+
+1. **旧 9966 独立端口面板下线** — 默认改用 AstrBot Dashboard 内嵌的 Plugin Pages
+   （需 AstrBot ≥4.28）。如需回滚，设置 `webui_legacy_enabled=true`（同时保持
+   `webui_enabled=true` 并设置 `webui_password`、确认端口未被占用）。
+2. **`support_platforms` 声明变更** — `metadata.yaml` 平台列表更新为
+   `aiocqhttp, qq_official, telegram, weixin_oc, weixin_official_account, wecom`。
+3. **`astrbot_version` 声明变更** — 最低要求从 `>=4.16` 提升至 `>=4.16,<5`，
+   插件页与会话生命周期功能需 AstrBot ≥4.28。
+4. **配置项 `webui_legacy_enabled`** — 新增回滚开关，默认 `false`。
+5. **配置项 `session_reset_policy`** — 新增 `/new` `/reset` 记忆策略
+   （`keep` / `archive` / `clear`，默认 `keep`），需 AstrBot ≥4.28 钩子。
+
+### Fixed
+
+- **Plugin Pages bridge 全路由 500** (TMEAAA-369) — `_probe_plugin_pages()`
+  现在同时校验 `Context.register_web_api` 与 `astrbot.api.web`
+  (`json_response` / `error_response` / `request`) 契约。AstrBot 4.23.2 虽已有
+  `register_web_api` 但缺 `astrbot.api.web`，此前被误判为可用，注册 bridge 后
+  请求即 `ModuleNotFoundError` → HTTP 500。现在不满足时跳过注册并记日志；
+  `web/bridge.py:register()` 也做同样的运行时契约校验（能力探测与运行时一致）。
+
+### Added
+
+- **会话生命周期对齐** (Phase 4a) — 接入 `ConversationManager.register_on_session_deleted`
+  与 `on_agent_begin` / `on_agent_done`（AstrBot ≥4.28）：`/new` `/reset` 时按
+  `session_reset_policy`（`keep` / `archive` / `clear`，默认 `keep`）处理会话缓存；
+  长期记忆默认保留。新增 `conversation_cache.archived_at` 软归档列，工作上下文
+  召回过滤归档行。详见 `docs/session-lifecycle.md`。(TMEAAA-358)
+- **Plugin Pages Bridge** — 新增 `web/bridge.py` 替代 legacy 独立端口面板，
+  通过 AstrBot Dashboard 插件页直接访问记忆管理 UI。(TMEAAA-354 Phase 3)
+- **Adapter 层** — 新增 `adapters/` 目录，统一跨适配器接口。(TMEAAA-354)
+
+### Changed
+
+- **配置安全标记** — `embedding_api_key` 和 `webui_password` 在 `_conf_schema.json`
+  中标记为 `secret: true`。
+- **注入位置提示更新** — `inject_position` 的 `extra_user_temp` 选项文档明确
+  需 AstrBot ≥4.28，低版本回退为 `system_prompt`。
+
 ## [v0.9.0] - 2026-05-11
 
 ### Added

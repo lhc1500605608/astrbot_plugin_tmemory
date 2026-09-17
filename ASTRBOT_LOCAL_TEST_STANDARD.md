@@ -25,6 +25,24 @@
 - `ASTRBOT_API_KEY` 已配置（默认 `admin`）
 - 鉴权头：首选 `X-API-Key: {ASTRBOT_API_KEY}`；`Authorization: Bearer {ASTRBOT_API_KEY}` 亦被接受
   （`docs/astrbot-openapi.yaml:250-255`）
+
+### API key 来源（≥4.28，易踩坑）
+
+`dashboard.api_key` 在 AstrBot ≥4.28 **已不存在**（`dashboard` 配置段无该字段）。OpenAPI key 是
+`data_v4.db` 中 `api_keys` 表的 PBKDF2 哈希记录（`astrbot/dashboard/services/api_key_service.py`），
+通过 Dashboard 的 `POST /api/api-keys` 或 `POST /api/apikey/create` 创建。
+
+- **自动预置**：`docker/astrbot_init.sh` 启动 AstrBot 后，后台运行
+  `docker/seed_openapi_key.py`，等 `api_keys` 表建好后写入原始值 = `ASTRBOT_API_KEY`（默认
+  `admin`）、scopes = `["*"]` 的 key。`docker compose up -d --force-recreate` 即可复现。
+- **手动修复**（容器已在运行）：`ASTRBOT_API_KEY=admin bash docker/seed_openapi_key.sh`。
+- **校验**：`curl -s -H "X-API-Key: admin" http://localhost:6186/api/v1/configs` 应返回
+  `{"status":"ok",...}`。
+
+> **坑位**：`api_keys.scopes` 是 JSON 列，必须是合法 JSON 数组。写入原始字符串 `*`（非 JSON）
+> 会让 SQLAlchemy 反序列化抛 `Expecting value: line 1 column 1 (char 0)`，导致**所有**已鉴权路由
+> 返回该 400，而 `X-API-Key` 本身其实已通过校验（缺 key 时报 `Missing API key`，key 错误时报
+> `Invalid API key`）。`docker/seed_openapi_key.py` 会修复此状态。
 - Docker 模式：`docker-compose up -d` 已启动 `astrbot_tmemory_test` 容器
 - 本地模式：设置 `ASTRBOT_REQUIRE_DOCKER=0`
 - **出网（≥4.28 实测约束）**：本地容器访问 `api.deepseek.com` 返回 `000`（`APIConnectionError`）。
@@ -141,3 +159,4 @@ Body:
 |------|------|------|
 | 2026-05-11 | 初始版本 | TMEAAA-350: 固化现行 AstrBot v4.x SSE 事件类型，明确 `type=response` 不再下发 |
 | 2026-09-17 | 对齐 AstrBot 4.28.0 契约 | TMEAAA-372（证据 TMEAAA-368）：补 `username`(chat body)/`umo`(im message)/`sessions?username`，补 SSE 事件类型表，补步骤 4 IM 平台前置与出网说明，标注适用版本范围（<4.28 / ≥4.28） |
+| 2026-09-17 | 补 OpenAPI key 预置说明 | TMEAAA-374：≥4.28 无 `dashboard.api_key`，改为 `api_keys` 表；新增 init 自动预置 / 手动修复脚本，记录 scopes JSON 坑位 |

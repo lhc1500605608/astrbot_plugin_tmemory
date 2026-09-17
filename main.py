@@ -4,12 +4,13 @@ from typing import Optional, Dict
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.provider import LLMResponse, ProviderRequest
-from astrbot.api.star import Context, Star, register
+from astrbot.api.star import Context, Star
 from .core.db import DatabaseManager
 from .core.config import PluginConfig, PluginLifecycleMixin, parse_config
 from .core.capture import CaptureFilter
 from .core.distill import DistillManager, DistillRuntimeMixin
 from .core.consolidation import ConsolidationRuntimeMixin, ProfileExtractionRuntimeMixin
+from .core.session_lifecycle import SessionLifecycleRuntimeMixin
 from .core.utils import MemoryLogger, PluginHelpersMixin, PluginHandlersMixin
 from .core.identity import IdentityManager
 
@@ -42,13 +43,27 @@ _CMD_FIRST_WORDS = frozenset(
 )
 
 
-@register(
-    "tmemory",
-    "shangtang",
-    "AstrBot 用户长期记忆插件(自动采集 + 定时LLM蒸馏 + 跨适配器合并)",
-    "0.8.5",
-)
+def _optional_filter_hook(name: str):
+    """按上游能力可选注册 filter 钩子；不可用时退化为无操作装饰器。
+
+    Plan TMEAAA-354 Phase 4a：``on_agent_begin`` / ``on_agent_done`` 仅在
+    AstrBot >= 4.28 可用；低版本加载插件不应报错。
+    """
+    factory = getattr(filter, name, None)
+    if callable(factory):
+        try:
+            return factory()
+        except Exception:
+            logger.debug("[tmemory] filter.%s() 不可用，跳过注册", name)
+
+    def _noop(func):
+        return func
+
+    return _noop
+
+
 class TMemoryPlugin(
+    SessionLifecycleRuntimeMixin,
     PluginLifecycleMixin,
     DistillRuntimeMixin,
     ConsolidationRuntimeMixin,
@@ -92,6 +107,13 @@ class TMemoryPlugin(
         self._http_session = None
         self._distill_skipped_rows: int = 0
         self._user_last_distilled_ts: Dict[str, float] = {}
+        # 会话轮转检测（/new /reset）：UMO → 上次见到的对话 ID
+        self._session_conv_ids: Dict[str, str] = {}
+        self._agent_begin_count: int = 0
+        self._agent_done_count: int = 0
+        # 兼容性打点（Plan TMEAAA-354 Phase 1）
+        self._extra_user_temp_fallback_count: int = 0
+        self._persona_private_fallback_count: int = 0
 
         # ── CaptureFilter & DistillManager ──────────────────────────────────────────────────────
         self._capture_filter = CaptureFilter(self._cfg)
@@ -110,6 +132,9 @@ class TMemoryPlugin(
         # ── WebUI 独立服务器(降级保护)────────────────────────────────────
         self._web_server = self._safe_load_web_server()
 
+        # ── Dashboard Plugin Pages bridge(>=4.28)─────────────────────────
+        self._pages_bridge = self._safe_register_pages_bridge()
+
     # =========================================================================
     # AstrBot 生命周期
     # =========================================================================
@@ -121,6 +146,10 @@ class TMemoryPlugin(
     @filter.event_message_type(filter.EventMessageType.ALL)
     async def on_any_message(self, event: AstrMessageEvent):
         """自动采集每条用户消息。"""
+        try:
+            await self._maybe_handle_session_rotation(event)
+        except Exception as e:
+            logger.debug("[tmemory] 会话轮转检测失败: %s", e)
         return await self._handle_on_any_message(event)
 
     @filter.on_llm_response()
@@ -132,6 +161,22 @@ class TMemoryPlugin(
     async def on_llm_request(self, event: AstrMessageEvent, req: ProviderRequest):
         """在 LLM 调用前注入记忆。"""
         return await self._handle_on_llm_request(event, req)
+
+    # =========================================================================
+    # 会话 / Agent 生命周期观测（/new /reset，AstrBot >= 4.28）
+    # =========================================================================
+
+    @_optional_filter_hook("on_agent_begin")
+    async def on_agent_begin(self, event: AstrMessageEvent, run_context=None):
+        """Agent 开始运行观测（能力不可用时本钩子不注册）。"""
+        return await self._handle_on_agent_begin(event, run_context)
+
+    @_optional_filter_hook("on_agent_done")
+    async def on_agent_done(
+        self, event: AstrMessageEvent, run_context=None, response=None
+    ):
+        """Agent 运行完成观测（能力不可用时本钩子不注册）。"""
+        return await self._handle_on_agent_done(event, run_context, response)
 
     # =========================================================================
     # AI 主动工具模式: remember / recall

@@ -266,7 +266,7 @@ def test_inject_user_message_after_appends_to_prompt(plugin):
 # ── extra_user_temp mode ───────────────────────────────────────────────────────
 
 
-def test_inject_extra_user_temp_appends_to_extra_parts(plugin):
+def test_inject_extra_user_temp_appends_to_extra_parts(plugin, mark_as_temp_support):
     """Memory block is appended to req.extra_user_content_parts, not prompt/system."""
     plugin._cfg.inject_position = "extra_user_temp"
     req = DummyReq(prompt="今天天气怎么样？", system_prompt="你是AI助手。")
@@ -281,7 +281,9 @@ def test_inject_extra_user_temp_appends_to_extra_parts(plugin):
     assert "用户在北京" in part.text
 
 
-def test_inject_extra_user_temp_preserves_prompt_and_system(plugin):
+def test_inject_extra_user_temp_preserves_prompt_and_system(
+    plugin, mark_as_temp_support
+):
     """extra_user_temp must not modify req.prompt or req.system_prompt."""
     plugin._cfg.inject_position = "extra_user_temp"
     req = DummyReq(prompt="你好", system_prompt="你是AI助手。")
@@ -292,7 +294,7 @@ def test_inject_extra_user_temp_preserves_prompt_and_system(plugin):
     assert req.system_prompt == "你是AI助手。", "System prompt must be unchanged"
 
 
-def test_inject_extra_user_temp_part_has_temp_marking(plugin):
+def test_inject_extra_user_temp_part_has_temp_marking(plugin, mark_as_temp_support):
     """The appended part must carry a temporary marker so it is not saved to history."""
     plugin._cfg.inject_position = "extra_user_temp"
     req = DummyReq(prompt="测试", system_prompt="你是AI助手。")

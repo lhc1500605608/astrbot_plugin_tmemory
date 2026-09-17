@@ -132,7 +132,8 @@ CREATE TABLE IF NOT EXISTS conversation_cache (
     session_key TEXT NOT NULL DEFAULT '',
     turn_index INTEGER NOT NULL DEFAULT 0,
     topic_hint TEXT NOT NULL DEFAULT '',
-    captured_at TEXT NOT NULL DEFAULT ''
+    captured_at TEXT NOT NULL DEFAULT '',
+    archived_at TEXT NOT NULL DEFAULT ''
 )
 """
 
@@ -406,6 +407,7 @@ class DatabaseManager:
                 "turn_index": "INTEGER NOT NULL DEFAULT 0",
                 "topic_hint": "TEXT NOT NULL DEFAULT ''",
                 "captured_at": "TEXT NOT NULL DEFAULT ''",
+                "archived_at": "TEXT NOT NULL DEFAULT ''",
             }
         )
         # Backfill captured_at and session_key for existing rows

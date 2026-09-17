@@ -341,6 +341,7 @@ def test_safe_load_web_server_merges_nested_webui_settings(plugin_module, tmp_pa
             "webui_password": "legacy-secret",
             "webui_settings": {
                 "webui_enabled": True,
+                "webui_legacy_enabled": True,
                 "webui_password": "nested-secret",
                 "webui_port": 9001,
             },
@@ -371,7 +372,7 @@ def test_load_web_server_class_preserves_package_context_for_admin_import(
 
     admin = web_server._get_admin()
 
-    assert web_server_cls.__module__ == "astrbot_plugin_tmemory.web_server"
+    assert web_server_cls.__module__ == "astrbot_plugin_tmemory.web.legacy_server"
     assert admin.__class__.__name__ == "AdminService"
 
 

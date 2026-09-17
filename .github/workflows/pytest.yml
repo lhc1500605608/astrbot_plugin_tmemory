@@ -5,7 +5,8 @@ on:
   pull_request:
 
 jobs:
-  test:
+  unit:
+    name: unit (stub, no AstrBot)
     runs-on: ubuntu-latest
 
     steps:
@@ -15,12 +16,45 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.10"
+          python-version: "3.12"
 
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt pytest pytest-asyncio
 
+      # 未安装 AstrBot：tests/conftest.py 安装 4.23.2 形状 stub，集成测试经
+      # skipif 自跳过。不再使用 --ignore（TMEAAA-361 AC2）。
+      # R1/R2 boundary gate (TMEAAA-357): core/ must not import astrbot*.
       - name: Run pytest
-        run: pytest --ignore=tests/test_real_astrbot_integration.py --ignore=tests/test_web_server.py
+        run: pytest -q
+
+  compat:
+    name: compat AstrBot ${{ matrix.astrbot-version }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        astrbot-version: ["4.16.0", "4.23.2", "4.28.1"]
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pytest pytest-asyncio
+          pip install "AstrBot==${{ matrix.astrbot-version }}"
+
+      - name: Report installed AstrBot version
+        run: python -c "import importlib.metadata as m; print('AstrBot', m.version('AstrBot'))"
+
+      # TMEAAA-361 AC1/AC2: 真实 AstrBot 版本矩阵，集成测试实际执行。
+      - name: Run real-AstrBot integration tests
+        run: pytest tests/test_real_astrbot_integration.py -q -rs

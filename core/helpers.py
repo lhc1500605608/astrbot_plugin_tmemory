@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 import os
 import re
 import sqlite3
@@ -10,8 +11,12 @@ import time
 from typing import TYPE_CHECKING, Dict, List, Optional, Sequence, Tuple
 
 import jieba
-from astrbot.api import logger
 
+from ..adapters import config as _config_adapter
+from ..adapters import conversation as _conversation_adapter
+from ..adapters import event as _event_adapter
+from ..adapters import llm as _llm_adapter
+from ..adapters import version as _version_adapter
 from . import maintenance as _maintenance
 from . import memory_ops as _memory_ops
 from . import vector as _vector
@@ -21,6 +26,8 @@ if TYPE_CHECKING:
     from astrbot.api.event import AstrMessageEvent
     from astrbot.api.provider import ProviderRequest
     from .db import _LockedConnection
+
+logger = logging.getLogger("astrbot")
 
 
 class PluginHelpersMixin(DataAccessMixin):
@@ -67,24 +74,21 @@ class PluginHelpersMixin(DataAccessMixin):
             original_prompt = getattr(req, "prompt", "") or ""
             req.prompt = original_prompt + ("\n\n" if original_prompt else "") + block
         elif self._cfg.inject_position == "extra_user_temp":
-            from astrbot.core.agent.message import TextPart
-
-            part = TextPart(text=block)
-            mark_fn = getattr(part, "mark_as_temp", None)
-            if callable(mark_fn):
-                mark_fn()
-                if (
-                    not hasattr(req, "extra_user_content_parts")
-                    or req.extra_user_content_parts is None
-                ):
-                    req.extra_user_content_parts = []
-                req.extra_user_content_parts.append(part)
-            else:
-                logger.warning(
-                    "[tmemory] mark_as_temp() not available in this AstrBot "
-                    "version; falling back to system_prompt injection for "
-                    "extra_user_temp position"
+            if not _llm_adapter.inject_extra_user_temp(req, block):
+                count = getattr(self, "_extra_user_temp_fallback_count", 0) + 1
+                self._extra_user_temp_fallback_count = count
+                message = (
+                    "[tmemory] %s 已回退到 system_prompt 注入（第 %s 次；"
+                    "UI 提示见 /api/capabilities）"
                 )
+                if count == 1:
+                    logger.warning(
+                        message, _version_adapter.extra_user_temp_hint(), count
+                    )
+                else:
+                    logger.debug(
+                        message, _version_adapter.extra_user_temp_hint(), count
+                    )
                 existing = getattr(req, "system_prompt", "") or ""
                 req.system_prompt = existing + ("\n\n" if existing else "") + block
         else:  # system_prompt
@@ -131,14 +135,11 @@ class PluginHelpersMixin(DataAccessMixin):
         cwd = os.getcwd()
         candidates = []
 
-        try:
-            from astrbot.core.utils.astrbot_path import get_astrbot_data_path
-
+        data_path = _config_adapter.get_astrbot_data_path()
+        if data_path:
             candidates.append(
-                os.path.join(get_astrbot_data_path(), "plugin_data", self.plugin_name)
+                os.path.join(data_path, "plugin_data", self.plugin_name)
             )
-        except Exception:
-            pass
 
         candidates.extend(
             [
@@ -207,109 +208,49 @@ class PluginHelpersMixin(DataAccessMixin):
         _memory_ops.log_memory_event(self, canonical_user_id, event_type, payload, conn)
 
     def _safe_get_unified_msg_origin(self, event: AstrMessageEvent) -> str:
-        try:
-            return str(getattr(event, "unified_msg_origin", "") or "")
-        except Exception:
-            return ""
+        return _event_adapter.get_unified_msg_origin(event)
 
     @staticmethod
     def _platform_str(val):
-        try:
-            from astrbot.core.platform.platform_metadata import PlatformMetadata  # type: ignore
-
-            if isinstance(val, PlatformMetadata):
-                return val.id or val.name
-        except ImportError:
-            pass
-        return str(val)
+        return _event_adapter.get_platform_str(val)
 
     def _get_adapter_name(self, event: AstrMessageEvent) -> str:
-        for name in ("get_platform_name", "get_adapter_name", "get_client_name"):
-            fn = getattr(event, name, None)
-            if callable(fn):
-                try:
-                    val = fn()
-                    if val:
-                        return str(val)
-                except Exception:
-                    pass
-
-        for attr in ("platform_name", "adapter_name", "adapter", "platform"):
-            val = getattr(event, attr, None)
-            if val:
-                return self._platform_str(val)
-
-        return "unknown_adapter"
+        return _event_adapter.get_adapter_name(event)
 
     def _get_adapter_user_id(self, event: AstrMessageEvent) -> str:
-        for name in ("get_sender_id", "get_user_id"):
-            fn = getattr(event, name, None)
-            if callable(fn):
-                try:
-                    val = fn()
-                    if val:
-                        return str(val)
-                except Exception:
-                    pass
-
-        sender_name = getattr(event, "get_sender_name", None)
-        if callable(sender_name):
-            try:
-                val = sender_name()
-                if val:
-                    return str(val)
-            except Exception:
-                pass
-
-        return "unknown_user"
+        return _event_adapter.get_adapter_user_id(event)
 
     def _get_memory_scope(self, event: AstrMessageEvent) -> str:
-        if self._cfg.memory_scope == "session":
-            try:
-                from astrbot.core.platform import MessageType  # type: ignore
-
-                if event.get_message_type() == MessageType.FRIEND_MESSAGE:
-                    return "private"
-                gid = event.get_group_id()
-                return f"group:{gid}" if gid else "private"
-            except Exception:
-                return "private"
-        return "user"
+        return _event_adapter.get_memory_scope(event, self._cfg.memory_scope)
 
     async def _get_current_persona_async(self, event: AstrMessageEvent) -> str:
-        try:
-            umo = self._safe_get_unified_msg_origin(event)
-            conv_mgr = getattr(self.context, "conversation_manager", None)
-            if conv_mgr and umo:
-                cid = await conv_mgr.get_curr_conversation_id(umo)
-                if cid:
-                    conv = await conv_mgr.get_conversation(umo, cid)
-                    if conv and getattr(conv, "persona_id", None):
-                        return str(conv.persona_id)
-        except Exception:
-            pass
+        """优先经 conversation_manager（公共 API）解析 persona。
+
+        conversation_manager 路径不可用/为空时，才退回事件私有字段兜底
+        （``_get_current_persona``，实际读取收敛在 adapters/event.py），并计数打点。
+        """
+        umo = self._safe_get_unified_msg_origin(event)
+        persona = await _conversation_adapter.get_current_persona_id(
+            self.context, umo
+        )
+        if persona:
+            return persona
         return self._get_current_persona(event)
 
     def _get_current_persona(self, event: AstrMessageEvent) -> str:
-        try:
-            extras = getattr(event, "_extras", {}) or {}
-            conv = extras.get("conversation") or getattr(event, "conversation", None)
-            if conv:
-                persona = getattr(conv, "persona_id", None)
-                if persona:
-                    return str(persona)
-        except Exception:
-            pass
-        return ""
+        """最后兜底：经 adapters/event 读取事件私有 conversation 字段并打点。"""
+        persona = _event_adapter.get_current_persona(event)
+        count = getattr(self, "_persona_private_fallback_count", 0) + 1
+        self._persona_private_fallback_count = count
+        logger.debug(
+            "[tmemory] persona 经事件私有字段兜底解析（count=%s, hit=%s）",
+            count,
+            bool(persona),
+        )
+        return persona
 
     def _is_group_event(self, event: AstrMessageEvent) -> bool:
-        try:
-            from astrbot.core.platform import MessageType  # type: ignore
-
-            return event.get_message_type() != MessageType.FRIEND_MESSAGE
-        except Exception:
-            gid = event.get_group_id()
-            return bool(gid)
+        return _event_adapter.is_group_event(event)
 
     def _build_sanitize_patterns(self) -> list:
         return [

@@ -1,6 +1,12 @@
+# 测试环境最小 AstrBot 版本：4.28（提供 astrbot.api.web，plugin pages bridge 运行时依赖）。
+# 注意：滚动 tag（nightly-latest）可能命中缓存的旧镜像（本仓库曾命中 4.23.2）。
+# 验证：docker exec astrbot_tmemory_test python3 -c "import astrbot.api.web"
+# 升级：docker compose pull astrbot && docker compose up -d --force-recreate astrbot
+x-astrbot-min-version: "4.28"
+
 services:
   astrbot:
-    image: soulter/astrbot:nightly-latest
+    image: soulter/astrbot:v4.28.0
     container_name: astrbot_tmemory_test
     restart: unless-stopped
     ports:
@@ -15,4 +21,5 @@ services:
       - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY:?DEEPSEEK_API_KEY is required}
       - DEEPSEEK_MODEL=${DEEPSEEK_MODEL:-deepseek-v4-flash}
       - DEEPSEEK_BASE_URL=${DEEPSEEK_BASE_URL:-https://api.deepseek.com}
+      - ASTRBOT_API_KEY=${ASTRBOT_API_KEY:-admin}   # OpenAPI/E2E 鉴权 key（≥4.28 由 init 预置到 api_keys 表）
       - TZ=${TZ:-Asia/Shanghai}
