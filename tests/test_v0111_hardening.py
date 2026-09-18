@@ -7,10 +7,19 @@
 4. 维度迁移重建时缺少 memory_vectors（no such table）
 """
 
+import sqlite3
+
 import jieba
 import pytest
 
-from core.db import DatabaseManager
+from core.db import (
+    DatabaseManager,
+    _DDL_MEMORIES,
+    _DDL_MEMORY_FTS,
+    _DDL_TRIGGER_AD,
+    _DDL_TRIGGER_AI,
+    _DDL_TRIGGER_AU,
+)
 from core.distill import _coerce_cycle_result
 
 
@@ -126,3 +135,75 @@ def test_legacy_memories_fts_schema_is_migrated():
     # 旧结构（memory/memory_type）必须升级为 tokenized_memory + canonical_user_id
     assert "tokenized_memory" in sql
     assert "canonical_user_id" in sql
+
+
+# ── 5. 旧库升级：FTS 半初始化致 malformed（TMEAAA-390）──────────────────────
+
+
+def _seed_legacy_memory(conn) -> None:
+    conn.execute(
+        "INSERT INTO memories(canonical_user_id, source_adapter, source_user_id,"
+        " memory, tokenized_memory, memory_hash, last_seen_at, created_at, updated_at)"
+        " VALUES('u1','a','u','用户喜欢周末爬山','','h1','','2026-01-01','2026-01-01')"
+    )
+
+
+def _count_fts_docs(conn) -> int:
+    return conn.execute("SELECT count(*) FROM memories_fts_docsize").fetchone()[0]
+
+
+def test_fts_schema_stale_true_when_table_missing():
+    """表缺失必须以“需要重建”处理，否则会留下空索引 + 触发器。"""
+    dm = DatabaseManager(":memory:")
+    with dm.db() as conn:
+        assert (
+            dm._fts_schema_stale(
+                conn, "memories_fts", "unicode61",
+                ("tokenized_memory", "canonical_user_id"),
+            )
+            is True
+        )
+
+
+def test_upgrade_legacy_db_without_fts_rebuilds_index(tmp_path):
+    """v0.11.0 旧库（有 memories 行、无 memories_fts）升级不应抛 malformed。"""
+    db = tmp_path / "legacy.db"
+    con = sqlite3.connect(db)
+    con.row_factory = sqlite3.Row
+    con.executescript(_DDL_MEMORIES)
+    _seed_legacy_memory(con)
+    con.commit()
+    con.close()
+
+    dm = DatabaseManager(str(db))
+    dm.init_db(False, 1024)
+    # 复刻 config.py:686 的第二次 migrate_schema：此前正于此抛 malformed。
+    with dm.db() as conn:
+        dm.migrate_schema(conn)
+        assert _count_fts_docs(conn) == 1
+        conn.execute("UPDATE memories SET last_seen_at='t' WHERE id=1")
+    dm.close()
+
+
+def test_upgrade_repairs_half_initialized_fts(tmp_path):
+    """已处于“空索引 + 触发器”坏状态的库，升级时必须自动修复。"""
+    db = tmp_path / "half.db"
+    con = sqlite3.connect(db)
+    con.row_factory = sqlite3.Row
+    con.executescript(_DDL_MEMORIES)
+    _seed_legacy_memory(con)
+    # 半初始化：CREATE 了 external-content FTS 与触发器，但从未 rebuild。
+    con.execute(_DDL_MEMORY_FTS)
+    con.execute(_DDL_TRIGGER_AI)
+    con.execute(_DDL_TRIGGER_AD)
+    con.execute(_DDL_TRIGGER_AU)
+    con.commit()
+    con.close()
+
+    dm = DatabaseManager(str(db))
+    dm.init_db(False, 1024)  # 修复前此处抛 database disk image is malformed
+    with dm.db() as conn:
+        assert _count_fts_docs(conn) == 1
+        dm.migrate_schema(conn)
+        conn.execute("UPDATE memories SET memory='changed' WHERE id=1")
+    dm.close()

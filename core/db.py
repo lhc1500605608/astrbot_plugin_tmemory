@@ -1,3 +1,5 @@
+import os
+import time
 import sqlite3
 import threading
 import logging
@@ -461,9 +463,44 @@ class DatabaseManager:
                 if self._conn is None:
                     conn = sqlite3.connect(self.db_path, check_same_thread=False)
                     conn.row_factory = sqlite3.Row
+                    if self._is_malformed(conn):
+                        # SQLite 文件损坏（database disk image is malformed）会中断
+                        # 插件加载。备份损坏文件并重建空库，保证插件可启动；
+                        # 旧数据保留在 <db>.corrupt-<ts> 供人工修复。
+                        try:
+                            conn.close()
+                        except sqlite3.Error:
+                            pass
+                        backup_path = f"{self.db_path}.corrupt-{int(time.time())}"
+                        try:
+                            os.replace(self.db_path, backup_path)
+                            logger.warning(
+                                "[tmemory] SQLite database malformed; backed up to %s and recreated a fresh database.",
+                                backup_path,
+                            )
+                        except OSError as e:  # noqa: BLE001
+                            logger.warning(
+                                "[tmemory] SQLite database malformed and backup failed (%s); recreating in place.",
+                                e,
+                            )
+                        conn = sqlite3.connect(self.db_path, check_same_thread=False)
+                        conn.row_factory = sqlite3.Row
                     self._load_vec_extension(conn)
                     self._conn = conn
         return _LockedConnection(self._conn_lock, self._conn)
+
+    @staticmethod
+    def _is_malformed(conn: sqlite3.Connection) -> bool:
+        """检测 SQLite 文件是否损坏（quick_check）。"""
+        try:
+            row = conn.execute("PRAGMA quick_check").fetchone()
+        except sqlite3.DatabaseError as e:  # noqa: BLE001
+            return "malformed" in str(e).lower()
+        except sqlite3.Error:
+            return False
+        if not row:
+            return False
+        return str(row[0]).strip().lower() != "ok"
 
     def close(self) -> None:
         with self._conn_lock:
@@ -505,6 +542,9 @@ class DatabaseManager:
         self._fts5_needs_rebuild = True
 
     def migrate_schema(self, conn: sqlite3.Connection) -> None:
+        # 先修复半初始化的 FTS 索引：任何内容表 UPDATE 都会经触发器写 FTS，
+        # 空索引会抛 malformed 并中断加载。
+        self._repair_inconsistent_fts(conn)
         self._ensure_columns(
             conn,
             "memories",
@@ -638,7 +678,9 @@ class DatabaseManager:
             "SELECT sql FROM sqlite_master WHERE type='table' AND name=?", (table,)
         ).fetchone()
         if not row:
-            return False
+            # 表缺失 = 需要新建 + rebuild；绝不能当作“无需重建”，否则会留下
+            # 空索引 + 触发器的半初始化状态，后续 UPDATE 触发 malformed。
+            return True
         sql = str(row["sql"] or "")
         if expected_tokenizer not in sql:
             return True
@@ -648,6 +690,81 @@ class DatabaseManager:
         for trigger in triggers:
             conn.execute(f"DROP TRIGGER IF EXISTS {trigger}")
         conn.execute(f"DROP TABLE IF EXISTS {table}")
+
+    @staticmethod
+    def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
+        return bool(
+            conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+                (table,),
+            ).fetchone()
+        )
+
+    @staticmethod
+    def _fts_index_inconsistent(
+        conn: sqlite3.Connection, fts_table: str, content_table: str
+    ) -> bool:
+        """检测外部内容 FTS 索引与内容表行数是否不一致（半初始化/损坏）。
+
+        FTS5 external-content 表若在 CREATE 后未执行 `'rebuild'`，索引为空但
+        触发器已建立；此后对内容表任何 UPDATE/DELETE 都会在空索引上执行
+        'delete' 并抛出 ``database disk image is malformed``。这里用 docsize
+        影子表行数与内容表行数比对来识别该状态（内容表为空则无需重建）。
+        """
+        if not DatabaseManager._table_exists(conn, fts_table):
+            return False
+        if not DatabaseManager._table_exists(conn, content_table):
+            return False
+        content_count = conn.execute(
+            f"SELECT count(*) FROM {content_table}"
+        ).fetchone()[0]
+        if not content_count:
+            return False
+        try:
+            indexed = conn.execute(
+                f"SELECT count(*) FROM {fts_table}_docsize"
+            ).fetchone()[0]
+        except sqlite3.Error:
+            return True
+        return int(indexed) != int(content_count)
+
+    def _repair_inconsistent_fts(self, conn: sqlite3.Connection) -> None:
+        """拆除半初始化的 FTS 表，交由 ``_init_fts`` 重建，避免触发器在空索引
+        上执行 'delete' 导致 ``database disk image is malformed``。"""
+        pairs = (
+            (
+                "memories_fts",
+                "memories",
+                ("t_memories_ai", "t_memories_ad", "t_memories_au"),
+            ),
+            (
+                "memory_episodes_fts",
+                "memory_episodes",
+                (
+                    "t_memory_episodes_ai",
+                    "t_memory_episodes_ad",
+                    "t_memory_episodes_au",
+                ),
+            ),
+            (
+                "profile_items_fts",
+                "profile_items",
+                (
+                    "t_profile_items_ai",
+                    "t_profile_items_ad",
+                    "t_profile_items_au",
+                ),
+            ),
+        )
+        for fts_table, content_table, triggers in pairs:
+            if self._fts_index_inconsistent(conn, fts_table, content_table):
+                logger.warning(
+                    "[tmemory] %s 索引与 %s 行数不一致（疑似半初始化），拆除以便重建",
+                    fts_table,
+                    content_table,
+                )
+                self._drop_fts(conn, fts_table, triggers)
+                self._fts5_needs_rebuild = True
 
     def _init_fts(self, conn: sqlite3.Connection) -> bool:
         """初始化 FTS5（内置 tokenizer）。失败时清晰降级，绝不留下半成品。"""
@@ -669,6 +786,7 @@ class DatabaseManager:
             "t_profile_items_au",
         )
         try:
+            conn.execute("SAVEPOINT tmem_fts_init")
             # memories_fts：索引 jieba 预处理后的 tokenized_memory，unicode61。
             memories_rebuild = self._fts5_needs_rebuild or self._fts_schema_stale(
                 conn, "memories_fts", _FTS_MEMORY_TOKENIZER,
@@ -676,12 +794,9 @@ class DatabaseManager:
             )
             if memories_rebuild:
                 self._drop_fts(conn, "memories_fts", memory_triggers)
-            conn.execute(_DDL_MEMORY_FTS)
-            conn.execute(_DDL_TRIGGER_AI)
-            conn.execute(_DDL_TRIGGER_AD)
-            conn.execute(_DDL_TRIGGER_AU)
 
-            # 历史记忆补齐 jieba 词元（FTS 索引源）
+            # 历史记忆补齐 jieba 词元（FTS 索引源）。必须在触发器建立前完成：
+            # 否则对空 FTS 索引执行 UPDATE 会经 t_memories_au 抛 malformed。
             untokenized = conn.execute(
                 "SELECT id, memory FROM memories WHERE tokenized_memory = ''"
             ).fetchall()
@@ -694,6 +809,11 @@ class DatabaseManager:
                         (tokens, int(row["id"])),
                     )
                 memories_rebuild = True
+
+            conn.execute(_DDL_MEMORY_FTS)
+            conn.execute(_DDL_TRIGGER_AI)
+            conn.execute(_DDL_TRIGGER_AD)
+            conn.execute(_DDL_TRIGGER_AU)
 
             # 原始中文文本 FTS：trigram（或 unicode61 回退）
             episodes_rebuild = self._fts_schema_stale(
@@ -724,6 +844,7 @@ class DatabaseManager:
                 conn.execute(
                     "INSERT INTO profile_items_fts(profile_items_fts) VALUES('rebuild')"
                 )
+            conn.execute("RELEASE SAVEPOINT tmem_fts_init")
             self._fts5_needs_rebuild = False
             logger.info(
                 "[tmemory] FTS5 ready: memories=tokenized+jieba/%s, text=%s",
@@ -732,6 +853,13 @@ class DatabaseManager:
             )
             return True
         except sqlite3.Error as e:
+            # 原子回滚：绝不留下“空索引 + 触发器”的半成品。
+            try:
+                conn.execute("ROLLBACK TO SAVEPOINT tmem_fts_init")
+                conn.execute("RELEASE SAVEPOINT tmem_fts_init")
+            except sqlite3.Error:
+                pass
+            self._fts5_needs_rebuild = True
             logger.warning(
                 "[tmemory] FTS5 初始化失败，中文检索降级为 LIKE（不影响启动）: %s", e
             )
