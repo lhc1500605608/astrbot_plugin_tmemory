@@ -44,22 +44,47 @@ class SQLiteVecKNNRetriever:
 
 
 class FTSMemoryDB:
-    """基于 SQLite FTS5 的全文检索"""
-    def __init__(self, conn: sqlite3.Connection, table_name: str = "memories_fts"):
+    """基于 SQLite FTS5 的全文检索。
+
+    mode:
+      - ``tokens``：查询用 Python jieba 分词后 AND 组合，匹配预分词的
+        ``tokenized_memory``（memories_fts, unicode61）。
+      - ``trigram``：原始中文文本用 ``trigram`` tokenizer，查询整体作为短语，
+        支持中文子串匹配（profile_items_fts）。
+    """
+
+    def __init__(
+        self,
+        conn: sqlite3.Connection,
+        table_name: str = "memories_fts",
+        mode: str = "tokens",
+    ):
         self.conn = conn
         self.table_name = table_name
+        self.mode = mode
 
-    def _tokenize(self, text: str) -> str:
-        if not text:
+    @staticmethod
+    def _quote(token: str) -> str:
+        return '"' + token.replace('"', '""') + '"'
+
+    def _build_query(self, query: str) -> str:
+        query = (query or "").strip()
+        if not query:
             return ""
-        tokens = jieba.cut_for_search(text)
-        return " ".join(tokens)
+        if self.mode == "trigram":
+            if len(query) < 3:
+                return ""
+            terms = [t for t in query.split() if len(t) >= 3]
+            if not terms:
+                terms = [query]
+            return " AND ".join(self._quote(t) for t in terms)
+        tokens = [token.strip() for token in jieba.cut_for_search(query) if token.strip()]
+        return " AND ".join(self._quote(t) for t in tokens)
 
     def search_fts(self, query: str, canonical_user_id: str, limit: int = 10,
                    fts_table: Optional[str] = None) -> List[Dict[str, Any]]:
         table = fts_table or self.table_name
-        query_tokens = [token.strip() for token in jieba.cut_for_search(query) if token.strip()]
-        fts_query = " AND ".join(query_tokens)
+        fts_query = self._build_query(query)
         if not fts_query:
             return []
 
@@ -133,12 +158,14 @@ class HybridMemorySystem:
         if table_prefix == "profile_item":
             vec_table = "profile_item_vectors"
             fts_table = "profile_items_fts"
+            fts_mode = "trigram"
         else:
             vec_table = "memory_vectors"
             fts_table = "memories_fts"
+            fts_mode = "tokens"
 
         self.knn_retriever = SQLiteVecKNNRetriever(self.conn, vector_dim, table_name=vec_table)
-        self.fts_db = FTSMemoryDB(self.conn, table_name=fts_table)
+        self.fts_db = FTSMemoryDB(self.conn, table_name=fts_table, mode=fts_mode)
         self.rrf_fusion = RRFSearchFusion(k=60)
 
     def hybrid_search(self, query: str, query_vector: Optional[List[float]], canonical_user_id: str, top_k: int = 80, recall_ratio: int = 1) -> List[Dict]:

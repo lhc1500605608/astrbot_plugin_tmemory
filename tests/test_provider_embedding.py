@@ -318,6 +318,9 @@ async def test_apply_provider_dim_change_rebuilds_when_vec_available(plugin, vec
         calls["init_db"] = (vec_available, embed_dim)
 
     monkeypatch.setattr(plugin._db_mgr, "init_db", fake_init_db)
+    # v0.11.1: 重建前先在连接上探测 vec0；测试环境无扩展，需显式模拟可用。
+    monkeypatch.setattr(plugin._db_mgr, "vec0_available", staticmethod(lambda conn: True))
+    monkeypatch.setattr(plugin._db_mgr, "vec_enabled", True)
 
     async def fake_rebuild(p):
         return (3, 1)

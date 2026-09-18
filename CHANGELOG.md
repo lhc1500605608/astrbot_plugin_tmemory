@@ -5,6 +5,37 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v0.11.1] - 2026-09-18
+
+线上故障修复（TMEAAA-387）。无配置迁移，直接替换安装即可。
+
+### Fixed
+
+- **蒸馏 worker 解包崩溃** — `_distill_worker_loop` 新增 `_coerce_cycle_result`
+  容错解包：上游返回元组长度漂移时截断/补零并告警，不再抛
+  `too many values to unpack`，蒸馏不再中断。
+- **sqlite-vec `vec0` 缺失** — 根因是仅 `import sqlite_vec` 从未在连接上
+  `load_extension`。现在 `DatabaseManager.db()` 对每个连接统一加载扩展，并在建
+  `memory_vectors` / `profile_item_vectors` 前用 `pragma_module_list` 校验 `vec0`；
+  不可用时清晰降级且**不建表、不抛错、不留 "no such table"**。`_vec_available`
+  改为以连接探测结果为准，消除“已加载但 vec0 不可用”的矛盾日志。
+- **中文 FTS5 不可用（no such tokenizer: jieba）** — 内置 SQLite 无 jieba
+  tokenizer。改为 `memories_fts` 索引 Python jieba 预处理后的
+  `tokenized_memory`（内置 `unicode61`），查询端同样 jieba 分词；`profile_items_fts`
+  / `memory_episodes_fts` 使用内置 `trigram`（不可用时回退 `unicode61`）。旧
+  jieba 结构表在启动时自动检测并重建索引；FTS5 完全不可用时才降级 LIKE。
+- **维度迁移重建失败（no such table: memory_vectors）** — 重建前先在连接上确认
+  `vec0` 可用，失败则保留旧索引并清晰降级，不再先 DROP 后失败导致索引丢失。
+- **默认维度错配（2048 → 1024）** — `vector_dim` 默认值由 2048 改为 1024，与主流
+  Provider（硅基流动 bge-m3/Qwen3-Embedding）对齐，避免每次启动触发 `2048 -> 1024`
+  迁移；启动仍会自动以 Provider 实际维度为准。
+
+### Added
+
+- 安全：检索最终落库查询补充 `canonical_user_id` 过滤，杜绝跨用户召回。
+- 回归测试：`tests/test_v0111_hardening.py`（vec0 逐连接加载/降级、中文 FTS、
+  旧 FTS 结构迁移、解包容错）。
+
 ## [v0.11.0] - 2026-09-18
 
 ### ⚠️ Breaking Changes / 迁移指南

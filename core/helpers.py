@@ -165,22 +165,40 @@ class PluginHelpersMixin(DataAccessMixin):
         """
         self._sqlite_vec = None
         self._vec_available = False
+        try:
+            self._db_mgr.set_vec_extension(None)
+        except Exception:
+            pass
         if not self._cfg.enable_vector_search:
             return
         try:
             import sqlite_vec  # type: ignore[import-not-found]
-
-            self._sqlite_vec = sqlite_vec
-            self._vec_available = True
-            logger.info("[tmemory] sqlite-vec loaded; vector search available")
         except ImportError:
             logger.warning(
                 "[tmemory] sqlite-vec not installed; vector search disabled. "
                 "Run: pip install sqlite-vec"
             )
+            return
+
+        self._sqlite_vec = sqlite_vec
+        # 模块可导入 ≠ 连接上 vec0 可用：注册后必须逐连接 load 并探测。
+        self._db_mgr.set_vec_extension(sqlite_vec)
+        with self._db() as conn:
+            vec_ok = self._db_mgr.vec0_available(conn)
+        if vec_ok:
+            self._vec_available = True
+            logger.info("[tmemory] sqlite-vec loaded; vector search available")
+        else:
+            self._vec_available = False
+            logger.warning(
+                "[tmemory] sqlite-vec imported but vec0 module is not available on "
+                "connection; vector search disabled (clean degradation)."
+            )
 
     def _init_db(self):
         self._db_mgr.init_db(self._vec_available, getattr(self._cfg, "embed_dim", 768))
+        if self._vec_available and not getattr(self._db_mgr, "vec_enabled", False):
+            self._vec_available = False
 
     def _migrate_schema(self, conn: Optional[sqlite3.Connection] = None):
         if conn is None:

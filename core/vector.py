@@ -299,22 +299,43 @@ async def apply_provider_dim_change(plugin) -> Dict[str, object]:
     except Exception as e:
         logger.warning("[tmemory] query embedding cache clear failed: %s", e)
 
-    if plugin._vec_available and auto_rebuild:
+    # 安全重建：先确认连接上 vec0 真可用，再决定是否 drop 旧索引。
+    # 不可用时保留旧索引并清晰降级，绝不留下 "no such table: memory_vectors"。
+    vec_ready = bool(getattr(plugin, "_vec_available", False))
+    if vec_ready:
         try:
-            with plugin._db() as conn:
-                conn.execute("DROP TABLE IF EXISTS memory_vectors")
-                conn.execute("DROP TABLE IF EXISTS profile_item_vectors")
-            plugin._db_mgr.init_db(True, new_dim)
-            ok, fail = await rebuild_vector_index(plugin)
-            result["rebuilt"] = True
-            result["rebuilt_ok"] = ok
-            result["rebuilt_fail"] = fail
-            logger.info(
-                "[tmemory] vector index rebuilt after dim change: ok=%d fail=%d", ok, fail
-            )
+            with plugin._db() as _probe:
+                vec_ready = plugin._db_mgr.vec0_available(_probe)
         except Exception as e:
-            logger.error("[tmemory] vector index rebuild after dim change failed: %s", e)
-            result["error"] = str(e)[:200]
+            logger.warning("[tmemory] vec0 probe failed before dim rebuild: %s", e)
+            vec_ready = False
+    if not vec_ready:
+        result["skipped_reason"] = "vec0_unavailable"
+        logger.warning(
+            "[tmemory] vector index rebuild skipped (vec0 unavailable); old index preserved"
+        )
+        return result
+    if not auto_rebuild:
+        result["skipped_reason"] = "auto_rebuild_disabled"
+        return result
+
+    try:
+        with plugin._db() as conn:
+            conn.execute("DROP TABLE IF EXISTS memory_vectors")
+            conn.execute("DROP TABLE IF EXISTS profile_item_vectors")
+        plugin._db_mgr.init_db(True, new_dim)
+        if not getattr(plugin._db_mgr, "vec_enabled", False):
+            raise RuntimeError("vector tables were not recreated (vec0 unavailable)")
+        ok, fail = await rebuild_vector_index(plugin)
+        result["rebuilt"] = True
+        result["rebuilt_ok"] = ok
+        result["rebuilt_fail"] = fail
+        logger.info(
+            "[tmemory] vector index rebuilt after dim change: ok=%d fail=%d", ok, fail
+        )
+    except Exception as e:
+        logger.error("[tmemory] vector index rebuild after dim change failed: %s", e)
+        result["error"] = str(e)[:200]
     return result
 
 

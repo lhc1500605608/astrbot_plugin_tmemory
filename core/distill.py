@@ -180,6 +180,27 @@ from typing import Dict, List, Tuple
 logger = logging.getLogger("astrbot")
 
 
+def _coerce_cycle_result(result, count: int) -> tuple:
+    """容错解包：容忍被调用方返回元组长度漂移。
+
+    回归修复（线上 `too many values to unpack (expected 2)`）：worker 循环不得
+    因上游返回结构变化而崩溃；超出部分截断并告警，缺失部分补零。
+    """
+    if isinstance(result, (tuple, list)):
+        values = list(result)
+    else:
+        values = [result]
+    if len(values) > count:
+        logger.warning(
+            "[tmemory] cycle returned %d values, expected %d; truncating",
+            len(values),
+            count,
+        )
+    elif len(values) < count:
+        values.extend([0] * (count - len(values)))
+    return tuple(values[:count])
+
+
 class DistillRuntimeMixin:
     async def _distill_worker_loop(self):
         """后台定时蒸馏循环（互斥门控 + token 预算 + 配置热加载）。"""
@@ -220,8 +241,11 @@ class DistillRuntimeMixin:
 
                 elif gate == "consolidation" and not budget_exceeded:
                     try:
-                        episodes, extracted = await self._run_consolidation_cycle(
-                            force=False, trigger="auto"
+                        episodes, extracted = _coerce_cycle_result(
+                            await self._run_consolidation_cycle(
+                                force=False, trigger="auto"
+                            ),
+                            2,
                         )
                         if episodes > 0 or extracted > 0:
                             logger.info(
@@ -234,8 +258,11 @@ class DistillRuntimeMixin:
 
                 elif gate == "flat_distill" and not budget_exceeded:
                     try:
-                        users, memories, _errors = await self._run_distill_cycle(
-                            force=False, trigger="auto"
+                        users, memories, _errors = _coerce_cycle_result(
+                            await self._run_distill_cycle(
+                                force=False, trigger="auto"
+                            ),
+                            3,
                         )
                         if users > 0:
                             logger.info(

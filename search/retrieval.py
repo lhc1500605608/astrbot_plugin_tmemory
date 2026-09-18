@@ -83,9 +83,10 @@ class RetrievalManager:
                            last_seen_at, scope, persona_id
                     FROM memories
                     WHERE id IN ({placeholders}) AND is_active=1
+                    AND canonical_user_id=?
                     {scope_cond} {persona_cond} {private_cond} {channel_cond}
                 """
-                rows = conn.execute(query_sql, [*hit_ids, *scope_params, *persona_params, *channel_params]).fetchall()
+                rows = conn.execute(query_sql, [*hit_ids, canonical_id, *scope_params, *persona_params, *channel_params]).fetchall()
                 candidates = {int(r["id"]): dict(r) for r in rows}
                 
                 return candidates, rrf_scores
@@ -382,9 +383,10 @@ class RetrievalManager:
                            pi.stability, pi.usage_count, pi.last_confirmed_at, pi.updated_at
                     FROM profile_items pi
                     WHERE pi.id IN ({placeholders}) AND pi.status = 'active'
+                      AND pi.canonical_user_id = ?
                       {scope_cond} {persona_cond} {private_cond}
                     """,
-                    [*hit_ids, scope, persona_id],
+                    [*hit_ids, canonical_id, scope, persona_id],
                 ).fetchall()
                 candidates = {int(r["id"]): dict(r) for r in rows}
                 return candidates, rrf_scores

@@ -2,7 +2,7 @@
 
 **MemoryForge** 是 [AstrBot](https://github.com/AstrBotDevs/AstrBot) 的长期记忆插件，通过自动采集对话、LLM 蒸馏和分层注入，让机器人在多轮、跨会话、跨平台场景下持续理解用户。
 
-> 当前版本：`v0.11.0`。v0.11.0 新增 B1 平台 Provider 嵌入、B2 主动性记忆、B3 蒸馏降本、B6 质量基准与数据 API（详见 `CHANGELOG.md`）。
+> 当前版本：`v0.11.1`。v0.11.1 修复线上四类故障：distill 解包崩溃、sqlite-vec vec0 逐连接加载、中文 FTS5 内置 tokenizer、维度迁移安全重建（详见 `CHANGELOG.md`）。
 
 ## 功能概览
 

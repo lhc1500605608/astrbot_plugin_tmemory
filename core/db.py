@@ -270,68 +270,132 @@ CREATE TABLE IF NOT EXISTS profile_relations (
 )
 """
 
-_DDL_FTS5 = """
+# ── FTS5 tokenizer 策略（v0.11.1）───────────────────────────────────────────
+# 内置 SQLite 不带 jieba tokenizer（需自行编译扩展），此前 tokenize='jieba'
+# 必然失败并整体降级。改为：
+#   * memories_fts 索引 ``tokenized_memory``（写入时 Python jieba 已分词），
+#     使用内置 ``unicode61``；查询端同样 jieba 分词后用 AND 组合。
+#   * profile_items_fts / memory_episodes_fts 直接索引原始中文文本，
+#     使用内置 ``trigram``（SQLite ≥3.34，支持中文子串），不可用时回退 unicode61。
+_FTS_MEMORY_TOKENIZER = "unicode61"
+_FTS_TEXT_TOKENIZER_CANDIDATES = ("trigram", "unicode61")
+
+_DDL_MEMORY_FTS = f"""
 CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
-    memory,
-    memory_type,
+    tokenized_memory,
+    canonical_user_id UNINDEXED,
     content='memories',
     content_rowid='id',
-    tokenize='jieba'
+    tokenize='{_FTS_MEMORY_TOKENIZER}'
 )
 """
 
 _DDL_TRIGGER_AI = """
 CREATE TRIGGER IF NOT EXISTS t_memories_ai AFTER INSERT ON memories BEGIN
-  INSERT INTO memories_fts(rowid, memory, memory_type)
-  VALUES (new.id, new.memory, new.memory_type);
+  INSERT INTO memories_fts(rowid, tokenized_memory, canonical_user_id)
+  VALUES (new.id, new.tokenized_memory, new.canonical_user_id);
 END;
 """
 _DDL_TRIGGER_AD = """
 CREATE TRIGGER IF NOT EXISTS t_memories_ad AFTER DELETE ON memories BEGIN
-  INSERT INTO memories_fts(memories_fts, rowid, memory, memory_type)
-  VALUES ('delete', old.id, old.memory, old.memory_type);
+  INSERT INTO memories_fts(memories_fts, rowid, tokenized_memory, canonical_user_id)
+  VALUES ('delete', old.id, old.tokenized_memory, old.canonical_user_id);
 END;
 """
 _DDL_TRIGGER_AU = """
 CREATE TRIGGER IF NOT EXISTS t_memories_au AFTER UPDATE ON memories BEGIN
-  INSERT INTO memories_fts(memories_fts, rowid, memory, memory_type)
-  VALUES ('delete', old.id, old.memory, old.memory_type);
-  INSERT INTO memories_fts(rowid, memory, memory_type)
-  VALUES (new.id, new.memory, new.memory_type);
+  INSERT INTO memories_fts(memories_fts, rowid, tokenized_memory, canonical_user_id)
+  VALUES ('delete', old.id, old.tokenized_memory, old.canonical_user_id);
+  INSERT INTO memories_fts(rowid, tokenized_memory, canonical_user_id)
+  VALUES (new.id, new.tokenized_memory, new.canonical_user_id);
 END;
 """
 
-_DDL_MEMORY_EPISODES_FTS = """
+
+def _fts_tokenizer_supported(conn: sqlite3.Connection, tokenizer: str) -> bool:
+    """探测给定 FTS5 tokenizer 是否由当前 SQLite 提供。"""
+    try:
+        conn.execute(
+            f"CREATE VIRTUAL TABLE temp._tmem_fts_probe USING fts5(x, tokenize='{tokenizer}')"
+        )
+        conn.execute("DROP TABLE temp._tmem_fts_probe")
+        return True
+    except sqlite3.OperationalError:
+        try:
+            conn.execute("DROP TABLE IF EXISTS temp._tmem_fts_probe")
+        except sqlite3.Error:
+            pass
+        return False
+
+
+def _select_text_fts_tokenizer(conn: sqlite3.Connection) -> Optional[str]:
+    for tok in _FTS_TEXT_TOKENIZER_CANDIDATES:
+        if _fts_tokenizer_supported(conn, tok):
+            return tok
+    return None
+
+
+def _memory_episodes_fts_ddl(tokenizer: str) -> str:
+    return f"""
 CREATE VIRTUAL TABLE IF NOT EXISTS memory_episodes_fts USING fts5(
     episode_title,
     episode_summary,
     topic_tags,
+    canonical_user_id UNINDEXED,
     content='memory_episodes',
     content_rowid='id',
-    tokenize='jieba'
+    tokenize='{tokenizer}'
 )
 """
 
-_DDL_TRIGGER_EP_AI = """
-CREATE TRIGGER IF NOT EXISTS t_memory_episodes_ai AFTER INSERT ON memory_episodes BEGIN
-  INSERT INTO memory_episodes_fts(rowid, episode_title, episode_summary, topic_tags)
-  VALUES (new.id, new.episode_title, new.episode_summary, new.topic_tags);
-END;
+
+_MEMORY_EPISODES_FTS_TRIGGERS = (
+    """CREATE TRIGGER IF NOT EXISTS t_memory_episodes_ai AFTER INSERT ON memory_episodes BEGIN
+  INSERT INTO memory_episodes_fts(rowid, episode_title, episode_summary, topic_tags, canonical_user_id)
+  VALUES (new.id, new.episode_title, new.episode_summary, new.topic_tags, new.canonical_user_id);
+END;""",
+    """CREATE TRIGGER IF NOT EXISTS t_memory_episodes_ad AFTER DELETE ON memory_episodes BEGIN
+  INSERT INTO memory_episodes_fts(memory_episodes_fts, rowid, episode_title, episode_summary, topic_tags, canonical_user_id)
+  VALUES ('delete', old.id, old.episode_title, old.episode_summary, old.topic_tags, old.canonical_user_id);
+END;""",
+    """CREATE TRIGGER IF NOT EXISTS t_memory_episodes_au AFTER UPDATE ON memory_episodes BEGIN
+  INSERT INTO memory_episodes_fts(memory_episodes_fts, rowid, episode_title, episode_summary, topic_tags, canonical_user_id)
+  VALUES ('delete', old.id, old.episode_title, old.episode_summary, old.topic_tags, old.canonical_user_id);
+  INSERT INTO memory_episodes_fts(rowid, episode_title, episode_summary, topic_tags, canonical_user_id)
+  VALUES (new.id, new.episode_title, new.episode_summary, new.topic_tags, new.canonical_user_id);
+END;""",
+)
+
+
+def _profile_items_fts_ddl(tokenizer: str) -> str:
+    return f"""
+CREATE VIRTUAL TABLE IF NOT EXISTS profile_items_fts USING fts5(
+    content,
+    facet_type,
+    canonical_user_id UNINDEXED,
+    content='profile_items',
+    content_rowid='id',
+    tokenize='{tokenizer}'
+)
 """
-_DDL_TRIGGER_EP_AD = """
-CREATE TRIGGER IF NOT EXISTS t_memory_episodes_ad AFTER DELETE ON memory_episodes BEGIN
-  INSERT INTO memory_episodes_fts(memory_episodes_fts, rowid, episode_title, episode_summary, topic_tags)
-  VALUES ('delete', old.id, old.episode_title, old.episode_summary, old.topic_tags);
-END;
-"""
-_DDL_TRIGGER_EP_AU = """
-CREATE TRIGGER IF NOT EXISTS t_memory_episodes_au AFTER UPDATE ON memory_episodes BEGIN
-  INSERT INTO memory_episodes_fts(memory_episodes_fts, rowid, episode_title, episode_summary, topic_tags)
-  VALUES ('delete', old.id, old.episode_title, old.episode_summary, old.topic_tags);
-  INSERT INTO memory_episodes_fts(rowid, episode_title, episode_summary, topic_tags)
-  VALUES (new.id, new.episode_title, new.episode_summary, new.topic_tags);
-END;
-"""
+
+
+_PROFILE_ITEMS_FTS_TRIGGERS = (
+    """CREATE TRIGGER IF NOT EXISTS t_profile_items_ai AFTER INSERT ON profile_items BEGIN
+  INSERT INTO profile_items_fts(rowid, content, facet_type, canonical_user_id)
+  VALUES (new.id, new.content, new.facet_type, new.canonical_user_id);
+END;""",
+    """CREATE TRIGGER IF NOT EXISTS t_profile_items_ad AFTER DELETE ON profile_items BEGIN
+  INSERT INTO profile_items_fts(profile_items_fts, rowid, content, facet_type, canonical_user_id)
+  VALUES ('delete', old.id, old.content, old.facet_type, old.canonical_user_id);
+END;""",
+    """CREATE TRIGGER IF NOT EXISTS t_profile_items_au AFTER UPDATE ON profile_items BEGIN
+  INSERT INTO profile_items_fts(profile_items_fts, rowid, content, facet_type, canonical_user_id)
+  VALUES ('delete', old.id, old.content, old.facet_type, old.canonical_user_id);
+  INSERT INTO profile_items_fts(rowid, content, facet_type, canonical_user_id)
+  VALUES (new.id, new.content, new.facet_type, new.canonical_user_id);
+END;""",
+)
 
 
 class _LockedConnection:
@@ -356,6 +420,40 @@ class DatabaseManager:
         self._conn_lock = threading.RLock()
         self._conn: Optional[sqlite3.Connection] = None
         self._fts5_needs_rebuild = False
+        # sqlite-vec 扩展：模块导入 ≠ 连接可用。必须在每个连接上显式 load，
+        # 否则会出现 "sqlite-vec loaded" 但 vec0 缺失（no such module: vec0）。
+        self._vec_module = None
+        self.vec_enabled = False
+
+    def set_vec_extension(self, module) -> None:
+        """注册 sqlite_vec 模块；连接建立时自动加载。"""
+        self._vec_module = module
+        self.vec_enabled = False
+        if self._conn is not None:
+            self._load_vec_extension(self._conn)
+            self.vec_enabled = self.vec0_available(self._conn)
+
+    def _load_vec_extension(self, conn: sqlite3.Connection) -> None:
+        if self._vec_module is None:
+            return
+        try:
+            conn.enable_load_extension(True)
+        except (AttributeError, sqlite3.Error):
+            pass
+        try:
+            self._vec_module.load(conn)
+        except Exception as e:  # noqa: BLE001 - 加载失败需清晰降级
+            logger.warning("[tmemory] sqlite-vec extension load failed: %s", e)
+
+    @staticmethod
+    def vec0_available(conn: sqlite3.Connection) -> bool:
+        try:
+            row = conn.execute(
+                "SELECT 1 FROM pragma_module_list WHERE name = 'vec0'"
+            ).fetchone()
+            return bool(row)
+        except sqlite3.Error:
+            return False
 
     def db(self) -> _LockedConnection:
         if self._conn is None:
@@ -363,6 +461,7 @@ class DatabaseManager:
                 if self._conn is None:
                     conn = sqlite3.connect(self.db_path, check_same_thread=False)
                     conn.row_factory = sqlite3.Row
+                    self._load_vec_extension(conn)
                     self._conn = conn
         return _LockedConnection(self._conn_lock, self._conn)
 
@@ -527,6 +626,139 @@ class DatabaseManager:
 
         self._migrate_fts5_to_content_sync(conn)
 
+    @staticmethod
+    def _fts_schema_stale(
+        conn: sqlite3.Connection,
+        table: str,
+        expected_tokenizer: str,
+        required_cols: tuple,
+    ) -> bool:
+        """返回 True 表示已存在的 FTS 表结构与当前策略不符，需要重建。"""
+        row = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name=?", (table,)
+        ).fetchone()
+        if not row:
+            return False
+        sql = str(row["sql"] or "")
+        if expected_tokenizer not in sql:
+            return True
+        return any(col not in sql for col in required_cols)
+
+    def _drop_fts(self, conn: sqlite3.Connection, table: str, triggers: tuple) -> None:
+        for trigger in triggers:
+            conn.execute(f"DROP TRIGGER IF EXISTS {trigger}")
+        conn.execute(f"DROP TABLE IF EXISTS {table}")
+
+    def _init_fts(self, conn: sqlite3.Connection) -> bool:
+        """初始化 FTS5（内置 tokenizer）。失败时清晰降级，绝不留下半成品。"""
+        text_tokenizer = _select_text_fts_tokenizer(conn)
+        if text_tokenizer is None:
+            logger.warning(
+                "[tmemory] FTS5 不可用（当前 SQLite 无内置可用 tokenizer），中文检索降级为 LIKE。"
+            )
+            return False
+        memory_triggers = ("t_memories_ai", "t_memories_ad", "t_memories_au")
+        episode_triggers = (
+            "t_memory_episodes_ai",
+            "t_memory_episodes_ad",
+            "t_memory_episodes_au",
+        )
+        profile_triggers = (
+            "t_profile_items_ai",
+            "t_profile_items_ad",
+            "t_profile_items_au",
+        )
+        try:
+            # memories_fts：索引 jieba 预处理后的 tokenized_memory，unicode61。
+            if self._fts_schema_stale(
+                conn, "memories_fts", _FTS_MEMORY_TOKENIZER,
+                ("tokenized_memory", "canonical_user_id"),
+            ):
+                self._drop_fts(conn, "memories_fts", memory_triggers)
+            conn.execute(_DDL_MEMORY_FTS)
+            conn.execute(_DDL_TRIGGER_AI)
+            conn.execute(_DDL_TRIGGER_AD)
+            conn.execute(_DDL_TRIGGER_AU)
+
+            # 历史记忆补齐 jieba 词元（FTS 索引源）
+            untokenized = conn.execute(
+                "SELECT id, memory FROM memories WHERE tokenized_memory = ''"
+            ).fetchall()
+            if untokenized:
+                logger.info("[tmemory] 正在为 %s 条历史记忆生成全文检索词元...", len(untokenized))
+                for row in untokenized:
+                    tokens = " ".join(jieba.cut_for_search(str(row["memory"])))
+                    conn.execute(
+                        "UPDATE memories SET tokenized_memory = ? WHERE id = ?",
+                        (tokens, int(row["id"])),
+                    )
+
+            # 原始中文文本 FTS：trigram（或 unicode61 回退）
+            if self._fts_schema_stale(
+                conn, "memory_episodes_fts", text_tokenizer, ("canonical_user_id",)
+            ):
+                self._drop_fts(conn, "memory_episodes_fts", episode_triggers)
+            conn.execute(_memory_episodes_fts_ddl(text_tokenizer))
+            for trigger in _MEMORY_EPISODES_FTS_TRIGGERS:
+                conn.execute(trigger)
+
+            if self._fts_schema_stale(
+                conn, "profile_items_fts", text_tokenizer, ("canonical_user_id",)
+            ):
+                self._drop_fts(conn, "profile_items_fts", profile_triggers)
+            conn.execute(_profile_items_fts_ddl(text_tokenizer))
+            for trigger in _PROFILE_ITEMS_FTS_TRIGGERS:
+                conn.execute(trigger)
+
+            conn.execute("INSERT INTO memories_fts(memories_fts) VALUES('rebuild')")
+            conn.execute(
+                "INSERT INTO memory_episodes_fts(memory_episodes_fts) VALUES('rebuild')"
+            )
+            conn.execute(
+                "INSERT INTO profile_items_fts(profile_items_fts) VALUES('rebuild')"
+            )
+            self._fts5_needs_rebuild = False
+            logger.info(
+                "[tmemory] FTS5 ready: memories=tokenized+jieba/%s, text=%s",
+                _FTS_MEMORY_TOKENIZER,
+                text_tokenizer,
+            )
+            return True
+        except sqlite3.Error as e:
+            logger.warning(
+                "[tmemory] FTS5 初始化失败，中文检索降级为 LIKE（不影响启动）: %s", e
+            )
+            return False
+
+    def _init_vector_tables(
+        self, conn: sqlite3.Connection, embed_dim: int, requested: bool
+    ) -> bool:
+        """建表前校验 vec0 是否真在连接上可用；不可用则清晰降级。"""
+        self.vec_enabled = False
+        if not requested:
+            return False
+        if not self.vec0_available(conn):
+            logger.warning(
+                "[tmemory] sqlite-vec vec0 module 在连接上不可用；跳过向量表创建，"
+                "向量检索降级（不会出现 no such table）。"
+            )
+            return False
+        try:
+            conn.execute(
+                f"CREATE VIRTUAL TABLE IF NOT EXISTS memory_vectors "
+                f"USING vec0(memory_id INTEGER PRIMARY KEY, embedding float[{embed_dim}])"
+            )
+            conn.execute(
+                f"CREATE VIRTUAL TABLE IF NOT EXISTS profile_item_vectors "
+                f"USING vec0(profile_item_id INTEGER PRIMARY KEY, embedding float[{embed_dim}])"
+            )
+            self.vec_enabled = True
+            return True
+        except sqlite3.Error as e:
+            logger.warning("[tmemory] failed to create vector tables: %s", e)
+            self.vec_enabled = False
+            return False
+
     def init_db(self, vec_available: bool, embed_dim: int) -> None:
         with self.db() as conn:
             conn.execute(_DDL_MEMORIES)
@@ -552,88 +784,8 @@ class DatabaseManager:
 
             self.migrate_schema(conn)
 
-            # Check FTS5
-            try:
-                conn.execute("CREATE VIRTUAL TABLE IF NOT EXISTS tmemory_fts_test USING fts5(text, tokenize='jieba')")
-                conn.execute("DROP TABLE tmemory_fts_test")
-                
-                conn.execute(_DDL_FTS5)
-                conn.execute(_DDL_TRIGGER_AI)
-                conn.execute(_DDL_TRIGGER_AD)
-                conn.execute(_DDL_TRIGGER_AU)
-
-                conn.execute(_DDL_MEMORY_EPISODES_FTS)
-                conn.execute(_DDL_TRIGGER_EP_AI)
-                conn.execute(_DDL_TRIGGER_EP_AD)
-                conn.execute(_DDL_TRIGGER_EP_AU)
-
-                conn.execute("""
-                    CREATE VIRTUAL TABLE IF NOT EXISTS profile_items_fts USING fts5(
-                        content,
-                        facet_type,
-                        content='profile_items',
-                        content_rowid='id',
-                        tokenize='jieba'
-                    )
-                """)
-                conn.execute("""
-                    CREATE TRIGGER IF NOT EXISTS t_profile_items_ai AFTER INSERT ON profile_items BEGIN
-                      INSERT INTO profile_items_fts(rowid, content, facet_type)
-                      VALUES (new.id, new.content, new.facet_type);
-                    END;
-                """)
-                conn.execute("""
-                    CREATE TRIGGER IF NOT EXISTS t_profile_items_ad AFTER DELETE ON profile_items BEGIN
-                      INSERT INTO profile_items_fts(profile_items_fts, rowid, content, facet_type)
-                      VALUES ('delete', old.id, old.content, old.facet_type);
-                    END;
-                """)
-                conn.execute("""
-                    CREATE TRIGGER IF NOT EXISTS t_profile_items_au AFTER UPDATE ON profile_items BEGIN
-                      INSERT INTO profile_items_fts(profile_items_fts, rowid, content, facet_type)
-                      VALUES ('delete', old.id, old.content, old.facet_type);
-                      INSERT INTO profile_items_fts(rowid, content, facet_type)
-                      VALUES (new.id, new.content, new.facet_type);
-                    END;
-                """)
-
-                # Data migration for empty tokenized_memory
-                untokenized = conn.execute("SELECT id, memory FROM memories WHERE tokenized_memory = ''").fetchall()
-                if untokenized:
-                    logger.info(f"[tmemory] 正在为 {len(untokenized)} 条历史记忆生成全文检索词元...")
-                    if self._fts5_needs_rebuild:
-                        conn.execute("DROP TRIGGER IF EXISTS t_memories_ai")
-                        conn.execute("DROP TRIGGER IF EXISTS t_memories_ad")
-                        conn.execute("DROP TRIGGER IF EXISTS t_memories_au")
-                    for row in untokenized:
-                        mem_text = str(row["memory"])
-                        tokens = " ".join(jieba.cut_for_search(mem_text))
-                        conn.execute("UPDATE memories SET tokenized_memory = ? WHERE id = ?", (tokens, int(row["id"])))
-                    if self._fts5_needs_rebuild:
-                        conn.execute(_DDL_TRIGGER_AI)
-                        conn.execute(_DDL_TRIGGER_AD)
-                        conn.execute(_DDL_TRIGGER_AU)
-                    logger.info("[tmemory] 历史记忆分词完成。")
-
-                if self._fts5_needs_rebuild:
-                    conn.execute("INSERT INTO memories_fts(memories_fts) VALUES('rebuild')")
-                    self._fts5_needs_rebuild = False
-                    logger.info("[tmemory] FTS5 索引重建完成。")
-            except sqlite3.OperationalError as e:
-                logger.warning(f"[tmemory] FTS5 w/ jieba tokenizer is NOT available: {e}. Falling back to plain LIKE.")
-
-            if vec_available:
-                try:
-                    conn.execute(
-                        f"CREATE VIRTUAL TABLE IF NOT EXISTS memory_vectors "
-                        f"USING vec0(memory_id INTEGER PRIMARY KEY, embedding float[{embed_dim}])"
-                    )
-                    conn.execute(
-                        f"CREATE VIRTUAL TABLE IF NOT EXISTS profile_item_vectors "
-                        f"USING vec0(profile_item_id INTEGER PRIMARY KEY, embedding float[{embed_dim}])"
-                    )
-                except Exception as _ve:
-                    logger.warning("[tmemory] failed to create vector tables: %s", _ve)
+            self._init_fts(conn)
+            self._init_vector_tables(conn, embed_dim, vec_available)
 
             # --- Existing indexes ---
             conn.execute("CREATE INDEX IF NOT EXISTS idx_memories_user ON memories (canonical_user_id, is_active, updated_at)")
