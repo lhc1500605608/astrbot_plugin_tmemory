@@ -238,7 +238,7 @@ def parse_config(raw_config: dict) -> PluginConfig:
     c.embedding_provider_id = str(vr_merged.get("embedding_provider_id", "")).strip()
     c.embed_provider_id = str(vr_merged.get("embedding_provider", "")).strip()
     c.embed_model_id = str(vr_merged.get("embedding_model", "")).strip()
-    c.embed_dim = max(64, _safe_int(vr_merged.get("vector_dim", 2048), 2048, label="vector_dim"))
+    c.embed_dim = max(64, _safe_int(vr_merged.get("vector_dim", 1024), 1024, label="vector_dim"))
     c.auto_rebuild_on_dim_change = _safe_bool(vr_merged.get("auto_rebuild_on_dim_change", True), True, label="auto_rebuild_on_dim_change")
     c.embed_base_url = str(vr_merged.get("embedding_base_url", "")).strip()
     c.embed_api_key = str(vr_merged.get("embedding_api_key", "")).strip()
@@ -413,7 +413,7 @@ def apply_safe_defaults(plugin) -> None:
     c.embed_provider_id = ""
     c.embed_model_id = ""
     plugin.embed_model = ""
-    c.embed_dim = 1536
+    c.embed_dim = 1024
     c.auto_rebuild_on_dim_change = True
     plugin.vector_weight = 0.4
     plugin.min_vector_sim = 0.15

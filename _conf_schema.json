@@ -122,9 +122,9 @@
       },
       "vector_dim": {
         "type": "int",
-        "default": 2048,
+        "default": 1024,
         "description": "向量维度",
-        "hint": "Embedding 模型的输出维度，默认 2048。变更维度时需要重建向量库。"
+        "hint": "Embedding 模型的输出维度。请与所选 Provider 的实际维度保持一致（硅基流动 bge-m3/Qwen3-Embedding 为 1024）。启动时会自动对齐 Provider 维度并安全重建，默认 1024。"
       },
       "auto_rebuild_on_dim_change": {
         "type": "bool",
