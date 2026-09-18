@@ -670,10 +670,11 @@ class DatabaseManager:
         )
         try:
             # memories_fts：索引 jieba 预处理后的 tokenized_memory，unicode61。
-            if self._fts_schema_stale(
+            memories_rebuild = self._fts5_needs_rebuild or self._fts_schema_stale(
                 conn, "memories_fts", _FTS_MEMORY_TOKENIZER,
                 ("tokenized_memory", "canonical_user_id"),
-            ):
+            )
+            if memories_rebuild:
                 self._drop_fts(conn, "memories_fts", memory_triggers)
             conn.execute(_DDL_MEMORY_FTS)
             conn.execute(_DDL_TRIGGER_AI)
@@ -692,31 +693,37 @@ class DatabaseManager:
                         "UPDATE memories SET tokenized_memory = ? WHERE id = ?",
                         (tokens, int(row["id"])),
                     )
+                memories_rebuild = True
 
             # 原始中文文本 FTS：trigram（或 unicode61 回退）
-            if self._fts_schema_stale(
+            episodes_rebuild = self._fts_schema_stale(
                 conn, "memory_episodes_fts", text_tokenizer, ("canonical_user_id",)
-            ):
+            )
+            if episodes_rebuild:
                 self._drop_fts(conn, "memory_episodes_fts", episode_triggers)
             conn.execute(_memory_episodes_fts_ddl(text_tokenizer))
             for trigger in _MEMORY_EPISODES_FTS_TRIGGERS:
                 conn.execute(trigger)
 
-            if self._fts_schema_stale(
+            profile_rebuild = self._fts_schema_stale(
                 conn, "profile_items_fts", text_tokenizer, ("canonical_user_id",)
-            ):
+            )
+            if profile_rebuild:
                 self._drop_fts(conn, "profile_items_fts", profile_triggers)
             conn.execute(_profile_items_fts_ddl(text_tokenizer))
             for trigger in _PROFILE_ITEMS_FTS_TRIGGERS:
                 conn.execute(trigger)
 
-            conn.execute("INSERT INTO memories_fts(memories_fts) VALUES('rebuild')")
-            conn.execute(
-                "INSERT INTO memory_episodes_fts(memory_episodes_fts) VALUES('rebuild')"
-            )
-            conn.execute(
-                "INSERT INTO profile_items_fts(profile_items_fts) VALUES('rebuild')"
-            )
+            if memories_rebuild:
+                conn.execute("INSERT INTO memories_fts(memories_fts) VALUES('rebuild')")
+            if episodes_rebuild:
+                conn.execute(
+                    "INSERT INTO memory_episodes_fts(memory_episodes_fts) VALUES('rebuild')"
+                )
+            if profile_rebuild:
+                conn.execute(
+                    "INSERT INTO profile_items_fts(profile_items_fts) VALUES('rebuild')"
+                )
             self._fts5_needs_rebuild = False
             logger.info(
                 "[tmemory] FTS5 ready: memories=tokenized+jieba/%s, text=%s",
