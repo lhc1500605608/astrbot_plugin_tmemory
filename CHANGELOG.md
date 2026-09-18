@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v0.11.2] - 2026-09-18
+
+线上数据库损坏自愈（board 抢修）。无配置迁移。
+
+### Fixed
+
+- **SQLite 损坏导致插件无法加载（`database disk image is malformed`）** — `DatabaseManager.db()`
+  打开连接后执行 `PRAGMA quick_check`；检测到损坏时把旧库备份为 `<db>.corrupt-<ts>`，
+  并重建空库，使插件可正常启动。旧数据保留在备份文件，供人工用 `sqlite3 .recover` 修复。
+
 ## [v0.11.1] - 2026-09-18
 
 线上故障修复（TMEAAA-387）。无配置迁移，直接替换安装即可。
@@ -29,12 +39,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **默认维度错配（2048 → 1024）** — `vector_dim` 默认值由 2048 改为 1024，与主流
   Provider（硅基流动 bge-m3/Qwen3-Embedding）对齐，避免每次启动触发 `2048 -> 1024`
   迁移；启动仍会自动以 Provider 实际维度为准。
+- **旧库升级 `database disk image is malformed`（TMEAAA-390）** — `_fts_schema_stale()`
+  在 FTS 表缺失时错误返回“无需重建”，导致外部内容 FTS 只建空索引与触发器、跳过
+  `'rebuild'`；此后任何 `UPDATE memories` 都会在空索引上触发 FTS5 `'delete'` 抛
+  `malformed` 并中断加载（v0.11.0 无 jieba FTS，命中的所有升级用户）。现在表缺失即
+  视为需要重建；升级前新增一致性修复（docsize 与内容表行数比对，拆除半初始化索引），
+  jieba 词元回填移至建触发器之前；`_init_fts` 以 SAVEPOINT 原子化，失败整体回滚，
+  绝不留“空索引 + 触发器”半成品。
 
 ### Added
 
 - 安全：检索最终落库查询补充 `canonical_user_id` 过滤，杜绝跨用户召回。
 - 回归测试：`tests/test_v0111_hardening.py`（vec0 逐连接加载/降级、中文 FTS、
-  旧 FTS 结构迁移、解包容错）。
+  旧 FTS 结构迁移、解包容错、旧库/半初始化 FTS 升级重建）。
 
 ## [v0.11.0] - 2026-09-18
 
