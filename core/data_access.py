@@ -108,6 +108,7 @@ class DataAccessMixin:
         persona_id: str = "",
         exclude_private: bool = False,
         summary_channel: str = "canonical",
+        reinforce: bool = True,
     ) -> List[Dict[str, object]]:
         query_vec: Optional[List[float]] = None
         if self._vec_available and query:
@@ -136,7 +137,7 @@ class DataAccessMixin:
         else:
             top_result = deduped[:limit]
 
-        if top_result:
+        if top_result and reinforce:
             reinforce_now = self._now()
             reinforce_ids = [int(item["id"]) for item in top_result]
             placeholders = ",".join(["?"] * len(reinforce_ids))
