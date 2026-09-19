@@ -5,6 +5,29 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v0.11.3] - 2026-09-18
+
+新增只读记忆召回公共 API（TMEAAA-396）。无配置迁移，不改 schema。
+
+### Added
+
+- **`TMemoryPlugin.recall_for_prompt(umo, query, session_type="private", limit=None)`**
+  — 供关联插件 kanjyou 在主动消息生成时注入真实记忆的只读、无副作用接口：
+  - 复用 recall 工具检索链路（`_retrieve_memories`，以新增的 `reinforce=False`
+    只读调用，不写 `reinforce_count` / `attention_score`）。
+  - persona 隔离：按会话 `persona_id` 维度检索（`''` 视为通用）；
+    persona 优先经 `conversation_manager`，回退 `conversation_cache`。
+  - 隐私边界：`session_type == "group"` 强制 `exclude_private=True`，除非
+    配置 `private_memory_in_group`；私聊可含 private。
+  - 不依赖 event：从 umo 优先经 `conversation_cache` / `identity_bindings`
+    解析 canonical_user_id。
+  - 健壮：异常 / 未初始化 / 禁用（`memory_mode=distill_only`）返回 `[]`，
+    绝不抛出；内部 `asyncio.wait_for` 超时 ≤2s。
+  - 返回纯文本条目列表（每条 ≤200 字），按检索相关度排序。
+- 回归测试：`tests/test_recall_for_prompt.py`（私聊含 private、群聊排除 private、
+  `private_memory_in_group` 覆盖、persona 隔离、异常/禁用/未解析 umo 返回 `[]`、
+  截断与纯文本返回）。
+
 ## [v0.11.2] - 2026-09-18
 
 线上数据库损坏自愈（board 抢修）。无配置迁移。
