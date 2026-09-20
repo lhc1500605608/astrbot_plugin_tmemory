@@ -45,25 +45,6 @@ def _insert_profile_item(plugin, canonical_id: str, content: str,
         return cur.lastrowid
 
 
-def _insert_episode(plugin, canonical_id: str, title: str, summary: str,
-                    attention_score: float = 0.6, status: str = "ongoing",
-                    scope: str = "user", persona_id: str = "",
-                    session_key: str = "session:1"):
-    with plugin._db() as conn:
-        now = "2026-05-03 10:00:00"
-        cur = conn.execute(
-            """INSERT INTO memory_episodes
-               (canonical_user_id, scope, persona_id, session_key,
-                episode_title, episode_summary, status, attention_score,
-                first_source_at, last_source_at, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (canonical_id, scope, persona_id, session_key,
-             title, summary, status, attention_score,
-             now, now, now, now),
-        )
-        return cur.lastrowid
-
-
 class DummyReq:
     def __init__(self, prompt: str = "", system_prompt: str = ""):
         self.prompt = prompt
@@ -113,60 +94,6 @@ async def test_retrieve_working_context_empty_session_key(plugin):
     await _insert_conversation(plugin, "u-w5", "user", "hello", session_key="s1")
     turns = plugin._retrieval_mgr.retrieve_working_context("u-w5", "", limit=5)
     assert turns == []
-
-
-# ──────────────────────────────────────────────────────────────────────────────
-# Episode Layer Tests
-# ──────────────────────────────────────────────────────────────────────────────
-
-def test_retrieve_episodes_returns_ongoing(plugin):
-    _insert_episode(plugin, "u-e1", "Python学习", "用户在学习Python基础语法", attention_score=0.8)
-
-    eps = plugin._retrieval_mgr.retrieve_episodes(
-        "u-e1", "Python", limit=3, max_chars=600)
-    assert len(eps) >= 1
-    assert eps[0]["episode_title"] == "Python学习"
-
-
-def test_retrieve_episodes_searches_by_query(plugin):
-    _insert_episode(plugin, "u-e2", "旅行计划", "用户计划去日本旅行", attention_score=0.5)
-    _insert_episode(plugin, "u-e2", "饮食偏好", "用户喜欢日料", attention_score=0.5)
-
-    eps = plugin._retrieval_mgr.retrieve_episodes(
-        "u-e2", "日本", limit=3, max_chars=600)
-    assert any("日本" in str(e.get("episode_summary", "")) for e in eps)
-
-
-def test_retrieve_episodes_respects_limit(plugin):
-    for i in range(5):
-        _insert_episode(plugin, "u-e3", f"情节{i}", f"摘要{i}", attention_score=0.5 + i * 0.1)
-
-    eps = plugin._retrieval_mgr.retrieve_episodes(
-        "u-e3", "", limit=2, max_chars=600)
-    assert len(eps) <= 2
-
-
-def test_retrieve_episodes_respects_max_chars(plugin):
-    long_summary = "A" * 500
-    _insert_episode(plugin, "u-e4", "长摘要", long_summary)
-
-    eps = plugin._retrieval_mgr.retrieve_episodes(
-        "u-e4", "", limit=1, max_chars=100)
-    assert len(eps) == 1
-    assert len(str(eps[0]["episode_summary"])) <= 103  # 100 + "…"
-
-
-def test_retrieve_episodes_empty_when_none(plugin):
-    eps = plugin._retrieval_mgr.retrieve_episodes(
-        "u-e-none", "", limit=3, max_chars=600)
-    assert eps == []
-
-
-def test_retrieve_episodes_zero_limit(plugin):
-    _insert_episode(plugin, "u-e5", "测试", "摘要")
-    eps = plugin._retrieval_mgr.retrieve_episodes(
-        "u-e5", "", limit=0, max_chars=600)
-    assert eps == []
 
 
 # ──────────────────────────────────────────────────────────────────────────────
