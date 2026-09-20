@@ -2,7 +2,7 @@
 
 **MemoryForge** 是 [AstrBot](https://github.com/AstrBotDevs/AstrBot) 的长期记忆插件，通过自动采集对话、LLM 蒸馏和分层注入，让机器人在多轮、跨会话、跨平台场景下持续理解用户。
 
-> 当前版本：`v0.11.3`。v0.11.3 新增只读无副作用的记忆召回公共 API `recall_for_prompt`，供关联插件（kanjyou）主动消息注入真实记忆；v0.11.2 新增 SQLite 损坏自愈（损坏库自动备份为 `<db>.corrupt-<ts>` 并重建）；v0.11.1 修复线上四类故障：distill 解包崩溃、sqlite-vec vec0 逐连接加载、中文 FTS5 内置 tokenizer、维度迁移安全重建（详见 `CHANGELOG.md`）。
+> 当前版本：`v0.11.4`。v0.11.4 为技术债重构收尾：按 ADR-009 500 行边界物理拆分 `core/config.py`、`core/db.py`、`core/memory_ops.py` 三个热点模块（原文件保留 facade re-export，import 路径不变），并清理死代码，纯重构无行为变更；v0.11.3 新增只读无副作用的记忆召回公共 API `recall_for_prompt`，供关联插件（kanjyou）主动消息注入真实记忆；v0.11.2 新增 SQLite 损坏自愈（损坏库自动备份为 `<db>.corrupt-<ts>` 并重建）；v0.11.1 修复线上四类故障：distill 解包崩溃、sqlite-vec vec0 逐连接加载、中文 FTS5 内置 tokenizer、维度迁移安全重建（详见 `CHANGELOG.md`）。
 
 ## 功能概览
 
