@@ -5,6 +5,34 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v0.11.4] - 2026-09-20
+
+技术债重构收尾（TMEAAA-424/433）。纯内部模块拆分，无行为 / 配置语义 / schema 变更，
+无配置迁移，直接替换安装即可。
+
+### Changed
+
+- **热点模块按 ADR-009 边界物理拆分**（原文件保留薄 facade re-export，外部
+  `from core.* import ...` 路径全部不变）：
+  - `core/config.py` 807→380：`PluginLifecycleMixin` + `apply_safe_defaults` 迁至
+    `core/lifecycle.py`
+  - `core/db.py` 963→381：DDL / schema 迁至 `core/db_schema.py`；FTS 索引与分词
+    迁至 `core/db_fts.py`；记忆事件写入迁至 `core/memory_events.py`
+  - `core/memory_ops.py` 882→291：蒸馏写入迁至 `core/distill_ops.py`；画像写入
+    迁至 `core/profile_ops.py`
+  - 新增模块全部 ≤500 行
+- `PluginConfig.embed_dim` 字段默认值 1536→1024，与 `parse_config` /
+  `apply_safe_defaults` 对齐（有效默认值本就为 1024，无行为变更）。
+
+### Removed
+
+- 死代码 `search/retrieval.py::RetrievalManager.retrieve_episodes` 及其 6 项对应
+  测试（无调用方）。
+
+### Notes
+
+- 验证：`pytest -q` → 588 passed, 3 skipped（基线 594，-6 为已删死代码测试）。
+
 ## [v0.11.3] - 2026-09-18
 
 新增只读记忆召回公共 API（TMEAAA-396）。无配置迁移，不改 schema。
