@@ -178,55 +178,34 @@ class PluginLifecycleMixin:
         """
         apply_safe_defaults(self)
 
+    # provider-only：VectorManager 现在只消费这些键。
+    _VECTOR_CONFIG_KEYS = (
+        "enable_vector_search",
+        "embedding_provider_id",
+        "rerank_provider_id",
+    )
+
     def _get_vector_retrieval_config(self) -> Dict:
-        """兼容旧平铺配置和新嵌套配置的向量检索配置读取（含 standalone/local 子分组）。"""
+        """读取 provider-only 向量检索配置（兼容更早期的顶层平铺键）。"""
         vector_cfg = self.config.get("vector_retrieval", {})
         if not isinstance(vector_cfg, dict):
             vector_cfg = {}
 
-        merged = dict(vector_cfg)
-        # 展开子分组为 VectorManager 需要的平铺键（子分组优先于同名的旧平铺键）
-        for sub in ("standalone_embedding", "local_embedding"):
-            sub_cfg = vector_cfg.get(sub)
-            if isinstance(sub_cfg, dict):
-                for key, value in sub_cfg.items():
-                    merged[key] = value
-        # 更早期的顶层平铺键回退
-        legacy_keys = (
-            "enable_vector_search",
-            "embedding_source",
-            "embedding_provider_id",
-            "embedding_provider",
-            "embedding_api_key",
-            "embedding_model",
-            "embedding_base_url",
-            "vector_dim",
-            "auto_rebuild_on_dim_change",
-            "local_embedding_path",
-            "local_embedding_model_file",
-            "local_embedding_max_length",
-        )
-        for key in legacy_keys:
-            if key not in merged and key in self.config:
+        merged = {}
+        for key in self._VECTOR_CONFIG_KEYS:
+            if key in vector_cfg:
+                merged[key] = vector_cfg.get(key)
+            elif key in self.config:
                 merged[key] = self.config.get(key)
         return merged
 
     def _get_vector_retrieval_config_from_cfg(self) -> Dict:
-        """从 self._cfg 返回 vector_retrieval 字典用于传递给 VectorManager"""
+        """从 self._cfg 返回 provider-only vector_retrieval 字典给 VectorManager。"""
         return {
             "enable_vector_search": self._cfg.enable_vector_search,
             "embedding_source": self._cfg.embedding_source,
             "embedding_provider_id": self._cfg.embedding_provider_id,
-            "embedding_provider": self._cfg.embed_provider_id,
-            "embedding_api_key": self._cfg.embed_api_key,
-            "embedding_model": self._cfg.embed_model_id,
-            "embedding_base_url": self._cfg.embed_base_url,
-            "vector_dim": self._cfg.embed_dim,
-            "auto_rebuild_on_dim_change": self._cfg.auto_rebuild_on_dim_change,
             "rerank_provider_id": self._cfg.rerank_provider_id,
-            "local_embedding_path": self._cfg.local_embedding_path,
-            "local_embedding_model_file": self._cfg.local_embedding_model_file,
-            "local_embedding_max_length": self._cfg.local_embedding_max_length,
         }
 
     def _legacy_webui_config(self) -> Dict:
@@ -330,6 +309,66 @@ class PluginLifecycleMixin:
             raise ImportError("TMemoryWebServer not found in web/legacy_server.py")
         return cls
 
+    async def _build_vector_manager(self) -> None:
+        """构建并初始化 VectorManager（provider 未就绪时允许以 source=none 启动）。"""
+        try:
+            from ..vector_manager import VectorManager
+
+            vr = self._get_vector_retrieval_config_from_cfg()
+            self._vector_manager = VectorManager(self.db_path, vr)
+            # 注入 AstrBot Context（Provider 解析用）；兼容只有两参构造的 VectorManager。
+            try:
+                self._vector_manager.context = getattr(self, "context", None)
+            except Exception:
+                pass
+            await self._vector_manager.initialize()
+            logger.info(
+                "[tmemory] VectorManager initialized: %s",
+                self._vector_manager.status()
+                if hasattr(self._vector_manager, "status")
+                else "source=none",
+            )
+        except Exception as e:
+            logger.error("[tmemory] Failed to initialize VectorManager: %s", e)
+            self._vector_manager = None
+
+    async def _resume_vector_provider(self) -> None:
+        """AstrBot 加载完成：补解析冷启动时尚未就绪的 Embedding Provider。
+
+        AstrBot 4.28 冷启动顺序为先加载插件、后实例化 provider，``initialize``
+        解析 provider 时列表为空；provider-only 收敛后已无 standalone 回退，
+        不补解析会导致每次重启都以 ``active_source=none`` 启动（TMEAAA-472）。
+        """
+        if not bool(getattr(self._cfg, "enable_vector_search", False)):
+            return
+
+        vm = getattr(self, "_vector_manager", None)
+        if vm is None:
+            await self._build_vector_manager()
+            vm = getattr(self, "_vector_manager", None)
+        else:
+            refresh = getattr(vm, "refresh", None)
+            if callable(refresh):
+                try:
+                    await refresh()
+                except Exception as e:
+                    logger.warning(
+                        "[tmemory] embedding provider refresh failed: %s", e
+                    )
+
+        if vm is None or getattr(vm, "source", "none") != "provider":
+            return
+        try:
+            from . import vector as _vector
+
+            dim_result = await _vector.apply_provider_dim_change(self)
+            if dim_result.get("changed"):
+                logger.warning(
+                    "[tmemory] embedding dim reconciled after load: %s", dim_result
+                )
+        except Exception as e:
+            logger.warning("[tmemory] provider dim reconcile after load failed: %s", e)
+
     async def initialize(self):
         self._load_sqlite_vec()
         self._init_db()
@@ -353,25 +392,7 @@ class PluginLifecycleMixin:
 
         # 初始化 VectorManager(如果向量检索启用)
         if self._cfg.enable_vector_search:
-            try:
-                from ..vector_manager import VectorManager
-                vr = self._get_vector_retrieval_config_from_cfg()
-                self._vector_manager = VectorManager(self.db_path, vr)
-                # 注入 AstrBot Context（Provider 解析用）；兼容只有两参构造的 VectorManager。
-                try:
-                    self._vector_manager.context = getattr(self, "context", None)
-                except Exception:
-                    pass
-                await self._vector_manager.initialize()
-                logger.info(
-                    "[tmemory] VectorManager initialized: %s",
-                    self._vector_manager.status()
-                    if hasattr(self._vector_manager, "status")
-                    else "source=standalone",
-                )
-            except Exception as e:
-                logger.error("[tmemory] Failed to initialize VectorManager: %s", e)
-                self._vector_manager = None
+            await self._build_vector_manager()
 
         # Provider 维度变化 → 更新维度、失效 query 缓存、重建索引（BC-2 回滚见 auto_rebuild_on_dim_change）
         if self._vector_manager is not None:

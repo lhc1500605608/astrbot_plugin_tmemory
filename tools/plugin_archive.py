@@ -33,7 +33,6 @@ INCLUDE_TOP_LEVEL_FILES = (
     "README.md",
     "CHANGELOG.md",
     "LICENSE",
-    "embeddingProvider.py",
     "hybrid_search.py",
     "vector_manager.py",
 )

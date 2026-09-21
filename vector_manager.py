@@ -2,26 +2,22 @@
 向量检索辅助管理器
 
 负责：
-- 初始化 Embedding 提供者（优先 AstrBot Provider，缺失/异常回退独立配置）
+- 初始化 Embedding 提供者（仅使用 AstrBot 已配置的 Embedding Provider）
 - 解析可选的 AstrBot Rerank Provider
 
-配置（``vector_retrieval``）：
-- ``embedding_source``: ``provider``（默认，优先平台 Provider）| ``standalone``
+配置（``vector_retrieval``，provider-only）：
 - ``embedding_provider_id``: 指定 AstrBot Embedding Provider；留空自动选第一个
 - ``rerank_provider_id``: 指定 AstrBot Rerank Provider；留空不启用
-- 其余 ``embedding_*`` 键为 standalone 回退配置（v0.10.0 行为）
+
+``embedding_source`` 已收敛为 ``provider``；旧值（``standalone`` / ``local``）
+由 ``core.config.parse_config`` 归一化并告警，不再驱动本模块。
 """
 
 import logging
+import time
 from typing import Any, Dict, Optional
 
 from . import adapters as _adapters
-from .embeddingProvider import (
-    BaseEmbeddingProvider,
-    LocalBgeEmbeddingProvider,
-    VolcEmbeddingsProvider,
-    OpenAIEmbeddingProvider,
-)
 
 logger = logging.getLogger("VectorManager")
 
@@ -33,7 +29,7 @@ class VectorManager:
         self.db_path = db_path
         self.config = config
         self.context = context
-        self.embedding_provider: Optional[BaseEmbeddingProvider] = None
+        self.embedding_provider: Optional[Any] = None
         self.rerank_provider: Optional[Any] = None
         self.embedding_source: str = "provider"
         self.source: str = "none"
@@ -41,128 +37,70 @@ class VectorManager:
         self.provider_model: str = ""
         self.provider_dim: int = 0
         self.fallback_reason: str = ""
+        # 上次解析尝试时刻（monotonic）；0.0 表示允许立即再次尝试。
+        self._last_resolve_ts: float = 0.0
 
     async def initialize(self):
         """初始化 Embedding / Rerank 提供者"""
         await self._init_embedding_provider(self.config)
         self._init_rerank_provider(self.config)
+        # provider 未就绪时保持 0.0，让首次使用可立即惰性补解析（TMEAAA-472）。
+        if self.embedding_provider is not None:
+            self._last_resolve_ts = time.monotonic()
+
+    async def refresh(self, min_interval_sec: float = 0.0) -> bool:
+        """provider 就绪后补解析（幂等）；返回 embedding provider 是否可用。
+
+        AstrBot 4.28 冷启动会先加载插件、后实例化 provider，``initialize`` 时
+        provider 列表为空；``OnAstrBotLoadedEvent`` 或首次 embed 时调用本方法补解析。
+
+        ``min_interval_sec`` 用于热路径节流：距上次尝试不足该间隔时直接跳过，
+        避免 provider 长期缺失时每次 embed 都重复探测并重复告警。
+        """
+        now = time.monotonic()
+        if min_interval_sec > 0 and (now - self._last_resolve_ts) < min_interval_sec:
+            return self.embedding_provider is not None
+        self._last_resolve_ts = now
+        if self.embedding_provider is None:
+            self.fallback_reason = ""
+            await self._init_embedding_provider(self.config)
+        if self.rerank_provider is None:
+            self._init_rerank_provider(self.config)
+        return self.embedding_provider is not None
 
     async def _init_embedding_provider(self, config: dict):
-        """初始化 Embedding 提供者：Provider / local 优先，回退 standalone。"""
-        source = str(config.get("embedding_source", "provider") or "provider").strip().lower()
-        if source not in ("provider", "standalone", "local"):
-            source = "provider"
-        self.embedding_source = source
-
-        if source == "local":
-            self._init_local_provider(config)
-            if self.embedding_provider is not None:
-                self.source = "local"
-                self.provider_model = getattr(self.embedding_provider, "model_name", "")
-                self.provider_dim = self.embedding_provider.get_dim()
-                logger.info(
-                    "[VectorManager] embedding source=local path=%s dim=%s",
-                    config.get("local_embedding_path", ""),
-                    self.provider_dim,
-                )
-            else:
-                if not self.fallback_reason:
-                    self.fallback_reason = "local embedding unavailable"
-                logger.info(
-                    "[VectorManager] embedding source=local unavailable (%s), "
-                    "fallback=standalone",
-                    self.fallback_reason,
-                )
-
-        if source == "provider":
-            try:
-                provider = _adapters.provider.resolve_embedding_provider(
-                    self.context, str(config.get("embedding_provider_id", "") or "")
-                )
-            except Exception as e:  # 探测/解析绝不应阻断启动
-                provider = None
-                self.fallback_reason = f"provider resolve error: {e}"
-                logger.warning("[VectorManager] embedding provider resolve failed: %s", e)
-
-            if provider is not None:
-                self.embedding_provider = provider
-                self.source = "provider"
-                self.provider_id = getattr(provider, "provider_id", "")
-                self.provider_model = getattr(provider, "model_name", "")
-                self.provider_dim = provider.get_dim()
-                logger.info(
-                    "[VectorManager] embedding source=provider id=%s model=%s dim=%s",
-                    self.provider_id or "<auto>",
-                    self.provider_model or "<unknown>",
-                    self.provider_dim,
-                )
-            else:
-                if not self.fallback_reason:
-                    self.fallback_reason = "no available AstrBot embedding provider"
-                logger.info(
-                    "[VectorManager] embedding source=provider unavailable (%s), "
-                    "fallback=standalone",
-                    self.fallback_reason,
-                )
-
-        if self.embedding_provider is None:
-            await self._init_standalone_provider(config)
-            self.source = "standalone" if self.embedding_provider else "none"
-            if self.embedding_provider is not None:
-                logger.info(
-                    "[VectorManager] embedding source=standalone type=%s model=%s",
-                    config.get("embedding_provider", ""),
-                    config.get("embedding_model", ""),
-                )
-
-    def _init_local_provider(self, config: dict):
-        """初始化本地 bge-small-zh-v1.5 ONNX 提供者；不可用返回 None（不抛异常）。"""
+        """初始化 Embedding 提供者：仅解析 AstrBot Provider，缺失则降级为 none。"""
+        self.embedding_source = "provider"
         try:
-            path = str(config.get("local_embedding_path", "data/bge-small-zh-v1.5") or "").strip()
-            model_file = str(config.get("local_embedding_model_file", "model_quantized.onnx") or "").strip()
-            max_length = int(config.get("local_embedding_max_length", 512) or 512)
-            self.embedding_provider = LocalBgeEmbeddingProvider(
-                path, model_file or "model_quantized.onnx", max_length
+            provider = _adapters.provider.resolve_embedding_provider(
+                self.context, str(config.get("embedding_provider_id", "") or "")
             )
-        except Exception as e:
-            self.embedding_provider = None
-            self.fallback_reason = f"local embedding init failed: {e}"
-            logger.warning("[VectorManager] local embedding init failed: %s", e)
+        except Exception as e:  # 探测/解析绝不应阻断启动
+            provider = None
+            self.fallback_reason = f"provider resolve error: {e}"
+            logger.warning("[VectorManager] embedding provider resolve failed: %s", e)
 
-
-    async def _init_standalone_provider(self, config: dict):
-        """初始化独立配置的 Embedding 提供者（v0.10.0 回滚路径）。"""
-        provider_type = config.get("embedding_provider", "volc")
-        api_key = config.get("embedding_api_key", "")
-        model = config.get("embedding_model", "")
-        base_url = config.get("embedding_base_url", "")
-
-        try:
-            if provider_type == "volc":
-                if not api_key:
-                    logger.warning("[VectorManager] Embedding API key not configured")
-                    return
-                if not model:
-                    model = "doubao-embedding-vision-251215"
-                self.embedding_provider = VolcEmbeddingsProvider(api_key, model)
-
-            elif provider_type == "openai":
-                if not api_key:
-                    logger.warning("[VectorManager] Embedding API key not configured")
-                    return
-                if not model:
-                    model = "text-embedding-3-small"
-                if not base_url:
-                    base_url = "https://api.openai.com/v1"
-                self.embedding_provider = OpenAIEmbeddingProvider(api_key, model, base_url)
-
-            else:
-                logger.warning(f"[VectorManager] Unknown embedding provider: {provider_type}")
-                self.embedding_provider = None
-
-        except Exception as e:
-            logger.error(f"[VectorManager] Failed to init embedding provider: {e}")
-            self.embedding_provider = None
+        if provider is not None:
+            self.embedding_provider = provider
+            self.source = "provider"
+            self.fallback_reason = ""
+            self.provider_id = getattr(provider, "provider_id", "")
+            self.provider_model = getattr(provider, "model_name", "")
+            self.provider_dim = provider.get_dim()
+            logger.info(
+                "[VectorManager] embedding source=provider id=%s model=%s dim=%s",
+                self.provider_id or "<auto>",
+                self.provider_model or "<unknown>",
+                self.provider_dim,
+            )
+        else:
+            self.source = "none"
+            if not self.fallback_reason:
+                self.fallback_reason = "no available AstrBot embedding provider"
+            logger.info(
+                "[VectorManager] embedding source=provider unavailable (%s)",
+                self.fallback_reason,
+            )
 
     def _init_rerank_provider(self, config: dict):
         """解析可选的 AstrBot Rerank Provider（失败仅告警，不影响嵌入）。"""
@@ -183,7 +121,7 @@ class VectorManager:
             )
         else:
             logger.info(
-                "[VectorManager] rerank provider id=%s unavailable, fallback to standalone",
+                "[VectorManager] rerank provider id=%s unavailable, fallback to HTTP",
                 provider_id,
             )
 
@@ -198,8 +136,6 @@ class VectorManager:
             "fallback_reason": self.fallback_reason,
             "rerank_source": "provider" if self.rerank_provider is not None else "disabled",
             "rerank_provider_id": getattr(self.rerank_provider, "provider_id", ""),
-            "standalone_provider": self.config.get("embedding_provider", ""),
-            "local_embedding_path": self.config.get("local_embedding_path", ""),
         }
 
     async def close(self):

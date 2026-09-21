@@ -243,8 +243,11 @@ class CommandHandlersMixin:
         provider_ready = bool(
             getattr(getattr(self, "_vector_manager", None), "embedding_provider", None)
         )
-        if not self._cfg.embed_provider_id and not provider_ready:
-            yield event.plain_result("\u672a\u914d\u7f6e embed_provider_id\uff0c\u65e0\u6cd5\u751f\u6210\u5411\u91cf\u3002")
+        if not provider_ready:
+            yield event.plain_result(
+                "未检测到可用的 AstrBot Embedding Provider，无法生成向量。\n"
+                "请在 AstrBot 中配置 Embedding Provider（留空自动选第一个可用项）。"
+            )
             return
 
         raw = (event.message_str or "").strip()
