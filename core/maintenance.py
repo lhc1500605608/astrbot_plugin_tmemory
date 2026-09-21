@@ -548,3 +548,74 @@ def optimize_context(plugin, canonical_id: str) -> None:
         )
 
     plugin._trim_conversation(canonical_id, keep_last=plugin._cfg.cache_max_rows)
+
+
+def audit_assistant_attributed_memories(
+    plugin, canonical_id: str = "", apply: bool = False
+) -> Dict:
+    """审计并（可选）停用"助手发言被误记为用户记忆"的历史数据（TMEAAA-457）。
+
+    角色护栏阻止新泄漏；本函数用于清理修复前已写入的错误记忆。检测是保守的：
+    只标记能在 ``conversation_cache`` 的 assistant 发言中找到原文、且在 user
+    发言中找不到依据的记忆。被改写的（paraphrase）错误记忆无法自动识别，仍需
+    通过 ``/tm_memory`` 或 WebUI 人工复核。
+
+    Args:
+        canonical_id: 限定用户；为空则扫描全部。
+        apply: False（默认）仅返回命中 id；True 则将其 ``is_active`` 置 0。
+
+    Returns:
+        {"scanned": N, "flagged": [id...], "deactivated": N}
+    """
+    from .attribution import _norm, is_assistant_attributed
+
+    with plugin._db() as conn:
+        if canonical_id:
+            mem_rows = conn.execute(
+                "SELECT id, canonical_user_id, memory FROM memories"
+                " WHERE is_active=1 AND canonical_user_id=?",
+                (canonical_id,),
+            ).fetchall()
+        else:
+            mem_rows = conn.execute(
+                "SELECT id, canonical_user_id, memory FROM memories WHERE is_active=1"
+            ).fetchall()
+
+        role_cache: Dict[str, tuple] = {}
+        flagged: list[int] = []
+        for m in mem_rows:
+            cid = str(m["canonical_user_id"])
+            if cid not in role_cache:
+                conv = conn.execute(
+                    "SELECT role, content FROM conversation_cache"
+                    " WHERE canonical_user_id=?",
+                    (cid,),
+                ).fetchall()
+                user_texts = [
+                    _norm(r["content"]) for r in conv if str(r["role"]) != "assistant"
+                ]
+                assistant_texts = [
+                    _norm(r["content"]) for r in conv if str(r["role"]) == "assistant"
+                ]
+                role_cache[cid] = (user_texts, assistant_texts)
+            user_texts, assistant_texts = role_cache[cid]
+            if assistant_texts and is_assistant_attributed(
+                str(m["memory"]), user_texts, assistant_texts
+            ):
+                flagged.append(int(m["id"]))
+
+        deactivated = 0
+        if apply and flagged:
+            now = plugin._now()
+            placeholders = ",".join(["?"] * len(flagged))
+            deactivated = conn.execute(
+                f"UPDATE memories SET is_active=0, updated_at=?"
+                f" WHERE id IN ({placeholders})",
+                [now] + flagged,
+            ).rowcount
+
+    return {
+        "scanned": len(mem_rows),
+        "flagged": flagged,
+        "deactivated": int(deactivated or 0),
+    }

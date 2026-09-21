@@ -1,74 +1,63 @@
 {
-  "enable_auto_capture": {
-    "type": "bool",
-    "description": "自动采集用户消息",
-    "hint": "开启后，每条用户消息会自动写入 conversation_cache，供后续定时蒸馏。",
-    "default": true
-  },
-  "capture_assistant_reply": {
-    "type": "bool",
-    "description": "采集助手回复",
-    "hint": "开启后，LLM 回复也会被采集到 conversation_cache。",
-    "default": true
-  },
-  "enable_memory_injection": {
-    "type": "bool",
-    "description": "启用记忆注入",
-    "hint": "在 on_llm_request 阶段将召回记忆追加到 system_prompt。",
-    "default": true
-  },
-  "inject_enable_vector_search": {
-    "type": "bool",
-    "description": "注入路径启用向量语义召回",
-    "hint": "开启后 on_llm_request 热路径将生成 query embedding 并启用混合召回（向量+FTS），提升记忆注入相关性。需配合 vector_retrieval.enable_vector_search 使用。",
-    "default": false
-  },
-  "inject_memory_limit": {
-    "type": "int",
-    "description": "注入记忆条数上限",
-    "hint": "每次请求最多注入多少条长期记忆。",
-    "default": 5
-  },
-  "distill_interval_sec": {
-    "type": "int",
-    "description": "蒸馏间隔（秒）",
-    "hint": "后台 worker 的轮询间隔。建议设置为 14400~21600（4~6 次/天），降低 token 消耗并提升蒸馏稳定性。",
-    "default": 17280
-  },
-  "distill_min_batch_count": {
-    "type": "int",
-    "description": "最小蒸馏批量",
-    "hint": "单用户未蒸馏消息达到该数量才触发蒸馏。建议 >= 12，兼顾质量与可触发性。",
-    "default": 20
-  },
-  "distill_batch_limit": {
-    "type": "int",
-    "description": "单次蒸馏上限",
-    "hint": "每次蒸馏最多处理多少条缓存消息。提高该值可减少蒸馏轮次。",
-    "default": 80
-  },
-  "cache_max_rows": {
-    "type": "int",
-    "description": "缓存保留行数",
-    "hint": "conversation_cache 超出后会触发规则摘要压缩，保留最近 N 行。",
-    "default": 20
-  },
-  "memory_max_chars": {
-    "type": "int",
-    "description": "记忆最大字符数",
-    "hint": "规则蒸馏 fallback 时单条记忆的最大长度。",
-    "default": 220
-  },
-  "private_memory_in_group": {
-    "type": "bool",
-    "default": false,
-    "description": "群聊中注入私聊记忆",
-    "hint": "默认关闭。开启后群聊中也会注入该用户的私聊专属记忆，可能泄露隐私。"
+  "basic": {
+    "type": "object",
+    "description": "基础设置",
+    "hint": "采集、缓存与低信息量过滤等基础行为。",
+    "items": {
+      "enable_auto_capture": {
+        "type": "bool",
+        "default": true,
+        "description": "自动采集用户消息",
+        "hint": "开启后，每条用户消息会自动写入 conversation_cache，供后续定时蒸馏。"
+      },
+      "capture_assistant_reply": {
+        "type": "bool",
+        "default": true,
+        "description": "采集助手回复",
+        "hint": "开启后，LLM 回复也会被采集到 conversation_cache。"
+      },
+      "capture_min_content_len": {
+        "type": "int",
+        "default": 5,
+        "description": "采集最小有效字符数",
+        "hint": "去除标点/空白后有效字符数低于此值的消息跳过采集，避免纯感叹词/颜文字进入缓存。0=不启用。默认 5。"
+      },
+      "capture_dedup_window": {
+        "type": "int",
+        "default": 10,
+        "description": "采集去重窗口",
+        "hint": "在同用户最近 N 条未蒸馏缓存中，若发现相同内容则跳过写入，抑制重复消息积累。0=不启用。默认 10。"
+      },
+      "capture_skip_prefixes": {
+        "type": "string",
+        "default": "",
+        "description": "跳过采集的内容前缀",
+        "hint": "逗号分隔的前缀列表，以这些前缀开头的消息不会被采集。内置了 tschedule 兼容前缀（'提醒 #'），无需手动添加。支持新版 tschedule 的 no-memory 协议标记，优先级最高（自动生效）。"
+      },
+      "capture_skip_regex": {
+        "type": "string",
+        "default": "",
+        "description": "跳过采集的正则表达式",
+        "hint": "高级过滤。填写 Python 正则表达式，匹配到的消息（用户/助手双侧）不会被写入对话缓存。留空不启用。示例：^\\[系统\\]|^SYSTEM:"
+      },
+      "cache_max_rows": {
+        "type": "int",
+        "default": 20,
+        "description": "缓存保留行数",
+        "hint": "conversation_cache 超出后会触发规则摘要压缩，保留最近 N 行。"
+      },
+      "memory_max_chars": {
+        "type": "int",
+        "default": 220,
+        "description": "记忆最大字符数",
+        "hint": "规则蒸馏 fallback 时单条记忆的最大长度。"
+      }
+    }
   },
   "vector_retrieval": {
     "type": "object",
-    "description": "向量检索与 Embedding 配置",
-    "hint": "统一管理向量检索相关的所有配置",
+    "description": "向量检索",
+    "hint": "Embedding 与向量召回。优先从 AstrBot Provider 中选择 Embedding 模型（推荐）；仅在无法使用 Provider 时才需要配置「独立 / 高级模式」。",
     "items": {
       "enable_vector_search": {
         "type": "bool",
@@ -80,7 +69,7 @@
         "type": "string",
         "default": "provider",
         "description": "Embedding 来源",
-        "hint": "provider=优先使用 AstrBot Provider/知识库嵌入（推荐）；standalone=使用下方独立配置；local=使用本地 bge-small-zh-v1.5 ONNX（零 API 成本，需先运行 tools/download_bge_onnx.py）。Provider 缺失或异常时自动回退 standalone，不报错。",
+        "hint": "provider=使用 AstrBot 已配置的 Embedding Provider（推荐，在下方填写其 Provider ID）；standalone=使用下方「独立 / 高级模式」手填参数；local=使用本地 bge-small-zh-v1.5 ONNX（零 API 成本，需先运行 tools/download_bge_onnx.py）。Provider 缺失或异常时自动回退 standalone，不报错。",
         "options": [
           "provider",
           "standalone",
@@ -90,35 +79,9 @@
       "embedding_provider_id": {
         "type": "string",
         "default": "",
-        "description": "AstrBot Embedding Provider ID（可选）",
-        "hint": "留空时自动选择第一个可用的 AstrBot Embedding Provider。仅 embedding_source=provider 时生效。"
-      },
-      "embedding_provider": {
-        "type": "string",
-        "default": "volc",
-        "description": "Embedding 提供商",
-        "hint": "选择 Embedding API 提供商",
-        "options": ["volc", "openai"]
-      },
-      "embedding_api_key": {
-        "type": "string",
-        "default": "",
-        "description": "Embedding API Key",
-        "hint": "对应 Embedding 提供商的 API 鉴权密钥。volc=火山方舟 API Key；openai=OpenAI 或兼容服务的 API Key。",
-        "obvious_hint": true,
-        "secret": true
-      },
-      "embedding_model": {
-        "type": "string",
-        "default": "doubao-embedding-vision-251215",
-        "description": "Embedding 模型名称",
-        "hint": "volc 默认: doubao-embedding-vision-251215；openai 默认: text-embedding-3-small。请根据选择的提供商填写对应模型名。"
-      },
-      "embedding_base_url": {
-        "type": "string",
-        "default": "",
-        "description": "API Base URL（可选）",
-        "hint": "自定义 API 基础地址。openai 提供商默认为 https://api.openai.com/v1；volc 提供商通常留空（使用内置地址）。用于中转代理场景。"
+        "description": "Embedding Provider ID",
+        "hint": "填写 AstrBot「模型」中已配置的 **Embedding** Provider 的 ID（不是对话 / chat_completion Provider）。AstrBot 配置页暂无 Embedding Provider 下拉框，请手动填写其 ID；留空时自动选择第一个可用的 Embedding Provider。无需手填 key/model/base_url。仅 embedding_source=provider 时生效。",
+        "obvious_hint": true
       },
       "vector_dim": {
         "type": "int",
@@ -132,223 +95,361 @@
         "description": "维度变更时自动重建",
         "hint": "检测到 sqlite-vec 向量维度配置变更时，自动清空并重建向量索引。"
       },
+      "standalone_embedding": {
+        "type": "object",
+        "description": "独立 / 高级模式（standalone）",
+        "hint": "仅当 embedding_source=standalone 时生效。正常情况下请直接在 AstrBot 中配置 Embedding Provider 并填写上方的「Embedding Provider ID」，无需填写此处。",
+        "items": {
+          "embedding_provider": {
+            "type": "string",
+            "default": "volc",
+            "description": "Embedding 提供商",
+            "hint": "选择 Embedding API 提供商。",
+            "options": [
+              "volc",
+              "openai"
+            ]
+          },
+          "embedding_api_key": {
+            "type": "string",
+            "default": "",
+            "description": "Embedding API Key",
+            "hint": "对应 Embedding 提供商的 API 鉴权密钥。volc=火山方舟 API Key；openai=OpenAI 或兼容服务的 API Key。",
+            "obvious_hint": true,
+            "secret": true
+          },
+          "embedding_model": {
+            "type": "string",
+            "default": "doubao-embedding-vision-251215",
+            "description": "Embedding 模型名称",
+            "hint": "volc 默认: doubao-embedding-vision-251215；openai 默认: text-embedding-3-small。请根据选择的提供商填写对应模型名。"
+          },
+          "embedding_base_url": {
+            "type": "string",
+            "default": "",
+            "description": "API Base URL（可选）",
+            "hint": "自定义 API 基础地址。openai 提供商默认为 https://api.openai.com/v1；volc 提供商通常留空（使用内置地址）。用于中转代理场景。"
+          }
+        }
+      },
+      "local_embedding": {
+        "type": "object",
+        "description": "本地 ONNX 模式（local）",
+        "hint": "仅当 embedding_source=local 时生效。需先运行 tools/download_bge_onnx.py 下载 Xenova/bge-small-zh-v1.5。",
+        "items": {
+          "local_embedding_path": {
+            "type": "string",
+            "default": "data/bge-small-zh-v1.5",
+            "description": "本地 Embedding 模型目录",
+            "hint": "embedding_source=local 时使用的模型目录（相对插件数据目录）。"
+          },
+          "local_embedding_model_file": {
+            "type": "string",
+            "default": "model_quantized.onnx",
+            "description": "本地 ONNX 模型文件名",
+            "hint": "模型目录下的 ONNX 文件名。量化模型默认 model_quantized.onnx。"
+          },
+          "local_embedding_max_length": {
+            "type": "int",
+            "default": 512,
+            "description": "本地 Embedding 最大 token 长度",
+            "hint": "本地模型单条文本最大 token 数，超出会截断。默认 512。"
+          }
+        }
+      },
+      "embedding_provider": {
+        "type": "string",
+        "default": "volc",
+        "description": "",
+        "invisible": true
+      },
+      "embedding_api_key": {
+        "type": "string",
+        "default": "",
+        "description": "",
+        "invisible": true
+      },
+      "embedding_model": {
+        "type": "string",
+        "default": "doubao-embedding-vision-251215",
+        "description": "",
+        "invisible": true
+      },
+      "embedding_base_url": {
+        "type": "string",
+        "default": "",
+        "description": "",
+        "invisible": true
+      },
       "local_embedding_path": {
         "type": "string",
         "default": "data/bge-small-zh-v1.5",
-        "description": "本地 Embedding 模型目录",
-        "hint": "embedding_source=local 时使用的模型目录（相对插件数据目录）。先运行 tools/download_bge_onnx.py 下载 Xenova/bge-small-zh-v1.5。"
+        "description": "",
+        "invisible": true
       },
       "local_embedding_model_file": {
         "type": "string",
         "default": "model_quantized.onnx",
-        "description": "本地 ONNX 模型文件名",
-        "hint": "模型目录下的 ONNX 文件名。量化模型默认 model_quantized.onnx。"
+        "description": "",
+        "invisible": true
       },
       "local_embedding_max_length": {
         "type": "int",
         "default": 512,
-        "description": "本地 Embedding 最大 token 长度",
-        "hint": "本地模型单条文本最大 token 数，超出会截断。默认 512。"
+        "description": "",
+        "invisible": true
       }
     }
   },
-  "webui_settings": {
+  "distill": {
     "type": "object",
-    "description": "WebUI 管理面板",
-    "hint": "独立端口的记忆管理面板，包含思维导图、记忆编辑、审计日志等功能。",
+    "description": "蒸馏调度与成本",
+    "hint": "后台自动蒸馏的触发、节流与降本开关。",
     "items": {
-      "webui_enabled": {
+      "distill_pause": {
         "type": "bool",
-        "description": "启用 WebUI 面板",
-        "hint": "开启后将在独立端口启动记忆管理面板。",
-        "default": false
+        "default": false,
+        "description": "暂停自动蒸馏",
+        "hint": "开启后停止后台自动蒸馏（手动蒸馏不受影响），用于成本控制或调试。"
       },
-      "webui_legacy_enabled": {
-        "type": "bool",
-        "description": "启用 legacy 独立端口面板（回滚）",
-        "hint": "默认关闭，改用 Dashboard 插件页（Plugin Pages，需 AstrBot >=4.28）。仅在需要回滚到旧 9966 端口面板时开启，需同时开启 webui_enabled。",
-        "default": false
-      },
-      "webui_port": {
+      "distill_interval_sec": {
         "type": "int",
-        "description": "监听端口",
-        "hint": "WebUI 面板监听的端口号。",
-        "default": 9966
+        "default": 17280,
+        "description": "蒸馏间隔（秒）",
+        "hint": "后台 worker 的轮询间隔。建议设置为 14400~21600（4~6 次/天），降低 token 消耗并提升蒸馏稳定性。"
       },
-      "webui_host": {
-        "type": "string",
-        "description": "监听地址",
-        "hint": "绑定的 IP 地址。0.0.0.0 表示监听所有接口，127.0.0.1 表示仅本机。",
-        "default": "0.0.0.0"
-      },
-      "webui_username": {
-        "type": "string",
-        "description": "管理员用户名",
-        "hint": "登录 WebUI 面板的用户名。",
-        "default": "admin"
-      },
-      "webui_password": {
-        "type": "string",
-        "description": "管理员密码",
-        "hint": "登录 WebUI 面板的密码。必须设置密码后面板才会启动。",
-        "obvious_hint": true,
-        "secret": true,
-        "default": ""
-      },
-      "webui_ip_whitelist": {
-        "type": "string",
-        "description": "IP 白名单",
-        "hint": "允许访问的 IP 地址，多个用逗号分隔。留空表示允许所有 IP。示例：127.0.0.1,192.168.1.0",
-        "default": ""
-      },
-      "webui_trust_proxy": {
-        "type": "bool",
-        "description": "信任反向代理",
-        "hint": "开启后将从 X-Forwarded-For / X-Real-IP 头获取真实客户端 IP，适用于 Nginx 等反代场景。",
-        "default": false
-      },
-      "webui_token_expire_hours": {
+      "distill_min_batch_count": {
         "type": "int",
-        "description": "登录有效期（小时）",
-        "hint": "JWT token 的有效时间。",
-        "default": 24
+        "default": 20,
+        "description": "最小蒸馏批量",
+        "hint": "单用户未蒸馏消息达到该数量才触发蒸馏。建议 >= 12，兼顾质量与可触发性。"
+      },
+      "distill_batch_limit": {
+        "type": "int",
+        "default": 80,
+        "description": "单次蒸馏上限",
+        "hint": "每次蒸馏最多处理多少条缓存消息。提高该值可减少蒸馏轮次。"
+      },
+      "distill_user_throttle_sec": {
+        "type": "int",
+        "default": 0,
+        "description": "单用户蒸馏冷却时间（秒）",
+        "hint": "单用户完成一轮蒸馏后的最短冷却时间（秒）。冷却内即便积累了足够消息也不会再次蒸馏，防止高频用户垄断蒸馏资源。0=不启用。建议与 distill_interval_sec 相同。"
+      },
+      "daily_token_budget": {
+        "type": "int",
+        "default": 0,
+        "description": "日 token 预算上限",
+        "hint": "每日蒸馏总 token 用量上限（基于 distill_history 当日累计）。超预算后自动跳过画像提取/巩固管线，仅保留规则蒸馏；蒸馏时若预算已耗尽会强制走规则分级（不再调用 LLM）以免超支。0=不限制。"
+      },
+      "distill_rule_gating": {
+        "type": "bool",
+        "default": false,
+        "description": "启用蒸馏规则分级门控（降本）",
+        "hint": "开启后用高精度规则先分级：无长期记忆信号的简单样本由规则直接处理（零 LLM 调用），含偏好/事实/例行/目标/约束/风格信号的复杂样本才升级 LLM。默认关闭以保持 v0.10.0 纯 LLM 行为；关闭即回滚。"
+      },
+      "distill_rule_gate_min_chars": {
+        "type": "int",
+        "default": 40,
+        "description": "规则门控长文本升级阈值",
+        "hint": "用户消息规范化后长度达到该阈值即升级 LLM，避免遗漏长文本中的隐含信息。仅 distill_rule_gating=true 生效。默认 40。"
+      },
+      "distill_prompt_cache": {
+        "type": "bool",
+        "default": true,
+        "description": "启用蒸馏 prompt 结果缓存",
+        "hint": "相同 transcript（对话内容完全相同）复用上次 LLM 蒸馏产出，缓存命中不计 token、不调用 LLM。默认开启，仅影响成本不影响产出。"
+      },
+      "distill_prompt_cache_max_rows": {
+        "type": "int",
+        "default": 1000,
+        "description": "蒸馏 prompt 缓存条目上限",
+        "hint": "缓存表最多保留的条目数，超出后按最近最少使用淘汰。0=不限制。默认 1000。"
       }
     }
   },
-  "distill_pause": {
-    "type": "bool",
-    "description": "暂停自动蒸馏",
-    "hint": "开启后停止后台自动蒸馏（手动蒸馏不受影响），用于成本控制或调试。",
-    "default": false
+  "distill_model_settings": {
+    "type": "object",
+    "description": "蒸馏模型",
+    "hint": "统一管理用于记忆蒸馏和手动作业（精馏、合并等）的 LLM 模型。",
+    "items": {
+      "use_independent_distill_model": {
+        "type": "bool",
+        "default": false,
+        "description": "启用独立蒸馏模型",
+        "hint": "开启后将使用下方配置的独立模型进行记忆蒸馏，不再依赖聊天消息的模型。"
+      },
+      "distill_provider_id": {
+        "type": "string",
+        "default": "",
+        "description": "蒸馏 Provider",
+        "hint": "用于后台自动记忆蒸馏的模型提供商。从下拉列表中选择已配置的 Provider。",
+        "_special": "select_provider"
+      },
+      "distill_model_id": {
+        "type": "string",
+        "default": "",
+        "description": "蒸馏 Model ID（可选）",
+        "hint": "指定蒸馏使用的模型 ID（如 gpt-4o、deepseek-chat）。留空则使用所选 Provider 的默认模型。"
+      },
+      "purify_provider_id": {
+        "type": "string",
+        "default": "",
+        "description": "手动精馏 Provider",
+        "hint": "用于 WebUI 手动精馏、合并、拆分记忆等操作的模型提供商。从下拉列表中选择已配置的 Provider。",
+        "_special": "select_provider"
+      },
+      "purify_model_id": {
+        "type": "string",
+        "default": "",
+        "description": "手动精馏 Model ID（可选）",
+        "hint": "指定手动精馏使用的模型 ID。留空则使用所选 Provider 的默认模型。"
+      }
+    }
   },
-  "distill_rule_gating": {
-    "type": "bool",
-    "description": "启用蒸馏规则分级门控（降本）",
-    "hint": "开启后用高精度规则先分级：无长期记忆信号的简单样本由规则直接处理（零 LLM 调用），含偏好/事实/例行/目标/约束/风格信号的复杂样本才升级 LLM。默认关闭以保持 v0.10.0 纯 LLM 行为；关闭即回滚。",
-    "default": false
+  "injection": {
+    "type": "object",
+    "description": "记忆注入",
+    "hint": "控制召回记忆如何追加进对话上下文。",
+    "items": {
+      "enable_memory_injection": {
+        "type": "bool",
+        "default": true,
+        "description": "启用记忆注入",
+        "hint": "在 on_llm_request 阶段将召回记忆追加到 system_prompt。"
+      },
+      "inject_enable_vector_search": {
+        "type": "bool",
+        "default": false,
+        "description": "注入路径启用向量语义召回",
+        "hint": "开启后 on_llm_request 热路径将生成 query embedding 并启用混合召回（向量+FTS），提升记忆注入相关性。需配合「向量检索」中的 enable_vector_search 使用。"
+      },
+      "inject_memory_limit": {
+        "type": "int",
+        "default": 5,
+        "description": "注入记忆条数上限",
+        "hint": "每次请求最多注入多少条长期记忆。"
+      },
+      "inject_max_chars": {
+        "type": "int",
+        "default": 0,
+        "description": "注入块最大字符数",
+        "hint": "记忆块超出此长度时截断。0=不限。建议 500~2000。"
+      },
+      "inject_position": {
+        "type": "string",
+        "default": "system_prompt",
+        "description": "记忆注入位置",
+        "hint": "system_prompt（默认）：追加到 system_prompt 末尾；user_message_before：作为用户消息前缀；user_message_after：作为用户消息后缀；slot：替换 system_prompt 中的占位符（见注入占位符）；extra_user_temp：追加到当前请求且不写入会话历史（需要 AstrBot >= 4.28，低版本将回退为 system_prompt 注入并在日志中告警）。",
+        "options": [
+          "system_prompt",
+          "user_message_before",
+          "user_message_after",
+          "slot",
+          "extra_user_temp"
+        ]
+      },
+      "inject_slot_marker": {
+        "type": "string",
+        "default": "{{tmemory}}",
+        "description": "注入占位符",
+        "hint": "inject_position=slot 时，system_prompt 中会被替换为记忆块的占位符文本。"
+      }
+    }
   },
-  "distill_rule_gate_min_chars": {
-    "type": "int",
-    "description": "规则门控长文本升级阈值",
-    "hint": "用户消息规范化后长度达到该阈值即升级 LLM，避免遗漏长文本中的隐含信息。仅 distill_rule_gating=true 生效。默认 40。",
-    "default": 40
+  "session_identity": {
+    "type": "object",
+    "description": "会话与身份",
+    "hint": "记忆作用域、会话隔离与重置语义。",
+    "items": {
+      "memory_mode": {
+        "type": "string",
+        "default": "hybrid",
+        "description": "记忆模式",
+        "hint": "hybrid（默认）=蒸馏+主动工具并存；distill_only=仅定时蒸馏（原有模式）；active_only=仅 AI 主动工具（不自动蒸馏）。",
+        "options": [
+          "hybrid",
+          "distill_only",
+          "active_only"
+        ]
+      },
+      "memory_scope": {
+        "type": "string",
+        "default": "user",
+        "description": "记忆隔离范围",
+        "hint": "user=所有会话共用记忆（默认）；session=按会话隔离（群聊每个群独立）。",
+        "options": [
+          "user",
+          "session"
+        ]
+      },
+      "private_memory_in_group": {
+        "type": "bool",
+        "default": false,
+        "description": "群聊中注入私聊记忆",
+        "hint": "默认关闭。开启后群聊中也会注入该用户的私聊专属记忆，可能泄露隐私。"
+      },
+      "session_reset_policy": {
+        "type": "string",
+        "default": "keep",
+        "description": "会话重置（/new /reset）记忆语义",
+        "hint": "keep（默认）：仅记录日志，会话缓存与长期记忆全部保留；archive：会话缓存软归档（工作上下文不再召回，证据与蒸馏保留）；clear：删除该会话缓存（被画像证据引用的行保留）。需 AstrBot >= 4.28 的会话删除钩子，低版本自动跳过。",
+        "options": [
+          "keep",
+          "archive",
+          "clear"
+        ]
+      }
+    }
   },
-  "distill_prompt_cache": {
-    "type": "bool",
-    "description": "启用蒸馏 prompt 结果缓存",
-    "hint": "相同 transcript（对话内容完全相同）复用上次 LLM 蒸馏产出，缓存命中不计 token、不调用 LLM。默认开启，仅影响成本不影响产出。",
-    "default": true
-  },
-  "distill_prompt_cache_max_rows": {
-    "type": "int",
-    "description": "蒸馏 prompt 缓存条目上限",
-    "hint": "缓存表最多保留的条目数，超出后按最近最少使用淘汰。0=不限制。默认 1000。",
-    "default": 1000
-  },
-  "daily_token_budget": {
-    "type": "int",
-    "description": "日 token 预算上限",
-    "hint": "每日蒸馏总 token 用量上限（基于 distill_history 当日累计）。超预算后自动跳过画像提取/巩固管线，仅保留规则蒸馏；蒸馏时若预算已耗尽会强制走规则分级（不再调用 LLM）以免超支。0=不限制。",
-    "default": 0
-  },
-  "capture_min_content_len": {
-    "type": "int",
-    "description": "采集最小有效字符数",
-    "hint": "去除标点/空白后有效字符数低于此值的消息跳过采集，避免纯感叹词/颜文字进入缓存。0=不启用。默认 5。",
-    "default": 5
-  },
-  "capture_dedup_window": {
-    "type": "int",
-    "description": "采集去重窗口",
-    "hint": "在同用户最近 N 条未蒸馏缓存中，若发现相同内容则跳过写入，抑制重复消息积累。0=不启用。默认 10。",
-    "default": 10
-  },
-  "distill_user_throttle_sec": {
-    "type": "int",
-    "description": "单用户蒸馏冷却时间（秒）",
-    "hint": "单用户完成一轮蒸馏后的最短冷却时间（秒）。冷却内即便积累了足够消息也不会再次蒸馏，防止高频用户垄断蒸馏资源。0=不启用。建议与 distill_interval_sec 相同。",
-    "default": 0
-  },
-  "capture_skip_prefixes": {
-    "type": "string",
-    "description": "跳过采集的内容前缀",
-    "hint": "逗号分隔的前缀列表，以这些前缀开头的消息不会被采集。内置了 tschedule 兼容前缀（'提醒 #'），无需手动添加。支持新版 tschedule 的 no-memory 协议标记，优先级最高（自动生效）。",
-    "default": ""
-  },
-  "capture_skip_regex": {
-    "type": "string",
-    "description": "跳过采集的正则表达式",
-    "hint": "高级过滤。填写 Python 正则表达式，匹配到的消息（用户/助手双侧）不会被写入对话缓存。留空不启用。示例：^\\[系统\\]|^SYSTEM:",
-    "default": ""
-  },
-  "memory_scope": {
-    "type": "string",
-    "description": "记忆隔离范围",
-    "hint": "user=所有会话共用记忆（默认）；session=按会话隔离（群聊每个群独立）。",
-    "default": "user"
-  },
-  "memory_mode": {
-    "type": "string",
-    "description": "记忆模式",
-    "hint": "hybrid（默认）=蒸馏+主动工具并存；distill_only=仅定时蒸馏（原有模式）；active_only=仅 AI 主动工具（不自动蒸馏）。",
-    "default": "hybrid",
-    "options": ["hybrid", "distill_only", "active_only"]
-  },
-  "inject_position": {
-    "type": "string",
-    "description": "记忆注入位置",
-    "hint": "system_prompt（默认）：追加到 system_prompt 末尾；user_message_before：作为用户消息前缀；user_message_after：作为用户消息后缀；slot：替换 system_prompt 中的占位符（见 inject_slot_marker）；extra_user_temp：追加到当前请求且不写入会话历史（需要 AstrBot >= 4.28，低版本将回退为 system_prompt 注入并在日志中告警）。",
-    "default": "system_prompt",
-    "options": ["system_prompt", "user_message_before", "user_message_after", "slot", "extra_user_temp"]
-  },
-  "inject_slot_marker": {
-    "type": "string",
-    "description": "注入占位符",
-    "hint": "inject_position=slot 时，system_prompt 中会被替换为记忆块的占位符文本。",
-    "default": "{{tmemory}}"
-  },
-  "inject_max_chars": {
-    "type": "int",
-    "description": "注入块最大字符数",
-    "hint": "记忆块超出此长度时截断。0=不限。建议 500~2000。",
-    "default": 0
-  },
-  "enable_layered_injection": {
-    "type": "bool",
-    "description": "启用分层记忆注入 [已废弃]",
-    "hint": "已被统一的 profile_items 注入替代。保留以保持向后兼容，不再驱动主逻辑。",
-    "default": false
-  },
-  "inject_working_turns": {
-    "type": "int",
-    "description": "Working 层：注入最近对话轮数 [已废弃 — 仅 working context 仍使用此值]",
-    "hint": "保留以控制当前对话上下文注入轮数。其他分层注入逻辑已废弃。",
-    "default": 5
-  },
-  "inject_episode_limit": {
-    "type": "int",
-    "description": "Episodic 层：注入情节摘要数量 [已废弃]",
-    "hint": "已被 profile_items 检索替代。保留以保持向后兼容，不再驱动主逻辑。",
-    "default": 3
-  },
-  "inject_episode_max_chars": {
-    "type": "int",
-    "description": "Episodic 层：单条情节摘要最大字符数 [已废弃]",
-    "hint": "已被 profile_items 检索替代。保留以保持向后兼容，不再驱动主逻辑。",
-    "default": 600
-  },
-  "inject_style_max_chars": {
-    "type": "int",
-    "description": "Style 层：风格指导最大字符数 [已废弃]",
-    "hint": "已被 profile_items 检索替代。保留以保持向后兼容，不再驱动主逻辑。",
-    "default": 400
-  },
-  "session_reset_policy": {
-    "type": "string",
-    "description": "会话重置（/new /reset）记忆语义",
-    "hint": "keep（默认）：仅记录日志，会话缓存与长期记忆全部保留；archive：会话缓存软归档（工作上下文不再召回，证据与蒸馏保留）；clear：删除该会话缓存（被画像证据引用的行保留）。需 AstrBot >= 4.28 的会话删除钩子，低版本自动跳过。",
-    "default": "keep",
-    "options": ["keep", "archive", "clear"]
+  "profile_storage": {
+    "type": "object",
+    "description": "用户画像",
+    "hint": "控制画像提取、存储和管理的核心配置。替代旧的三层整合流水线。",
+    "items": {
+      "profile_extraction_enabled": {
+        "type": "bool",
+        "default": false,
+        "description": "启用画像提取",
+        "hint": "开启后，后台worker将从对话缓存中提取用户画像条目(profile items)，替代旧的 episodic + semantic 两阶段流水线。默认关闭以保持向后兼容。"
+      },
+      "profile_extraction_min_messages": {
+        "type": "int",
+        "default": 8,
+        "description": "画像提取最少消息数",
+        "hint": "单用户未处理消息数低于此值时不触发画像提取。建议 >= 8。"
+      },
+      "profile_extraction_max_users_per_cycle": {
+        "type": "int",
+        "default": 10,
+        "description": "每轮最多处理用户数",
+        "hint": "单次提取周期内最多处理多少用户。"
+      },
+      "profile_extraction_timeout_sec": {
+        "type": "int",
+        "default": 120,
+        "description": "提取超时（秒）",
+        "hint": "画像提取阶段的最大执行时间，超时后跳过。"
+      },
+      "profile_stability_default": {
+        "type": "float",
+        "default": 0.5,
+        "description": "默认稳定性",
+        "hint": "新建画像条目的初始稳定性值。越高越不容易被单条新证据覆盖。范围 [0, 1]。"
+      },
+      "profile_auto_archive_threshold": {
+        "type": "float",
+        "default": 0.0,
+        "description": "自动归档阈值",
+        "hint": "当画像条目的 confidence 低于此阈值时自动归档。0=不自动归档。范围 [0, 1]。"
+      },
+      "profile_max_items_per_user": {
+        "type": "int",
+        "default": 200,
+        "description": "每用户画像条目上限",
+        "hint": "超出时优先合并低质量条目。范围 >= 10。"
+      }
+    }
   },
   "proactive": {
     "type": "object",
@@ -423,167 +524,367 @@
       }
     }
   },
-  "distill_model_settings": {
+  "webui_settings": {
     "type": "object",
-    "description": "蒸馏与提纯模型配置",
-    "hint": "统一管理用于记忆蒸馏和手动作业（精馏、合并等）的 LLM 模型。",
+    "description": "WebUI 管理面板",
+    "hint": "独立端口的记忆管理面板，包含思维导图、记忆编辑、审计日志等功能。",
     "items": {
-      "use_independent_distill_model": {
+      "webui_enabled": {
         "type": "bool",
         "default": false,
-        "description": "启用独立蒸馏模型",
-        "hint": "开启后将使用下方配置的独立模型进行记忆蒸馏，不再依赖聊天消息的模型。"
+        "description": "启用 WebUI 面板",
+        "hint": "开启后将在独立端口启动记忆管理面板。"
       },
-      "distill_provider_id": {
+      "webui_legacy_enabled": {
+        "type": "bool",
+        "default": false,
+        "description": "启用 legacy 独立端口面板（回滚）",
+        "hint": "默认关闭，改用 Dashboard 插件页（Plugin Pages，需 AstrBot >=4.28）。仅在需要回滚到旧 9966 端口面板时开启，需同时开启 webui_enabled。"
+      },
+      "webui_port": {
+        "type": "int",
+        "default": 9966,
+        "description": "监听端口",
+        "hint": "WebUI 面板监听的端口号。"
+      },
+      "webui_host": {
+        "type": "string",
+        "default": "0.0.0.0",
+        "description": "监听地址",
+        "hint": "绑定的 IP 地址。0.0.0.0 表示监听所有接口，127.0.0.1 表示仅本机。"
+      },
+      "webui_username": {
+        "type": "string",
+        "default": "admin",
+        "description": "管理员用户名",
+        "hint": "登录 WebUI 面板的用户名。"
+      },
+      "webui_password": {
         "type": "string",
         "default": "",
-        "description": "蒸馏 Provider",
-        "hint": "用于后台自动记忆蒸馏的模型提供商。从下拉列表中选择已配置的 Provider。",
-        "_special": "select_provider"
+        "description": "管理员密码",
+        "hint": "登录 WebUI 面板的密码。必须设置密码后面板才会启动。",
+        "obvious_hint": true,
+        "secret": true
       },
-      "distill_model_id": {
+      "webui_ip_whitelist": {
         "type": "string",
         "default": "",
-        "description": "蒸馏 Model ID（可选）",
-        "hint": "指定蒸馏使用的模型 ID（如 gpt-4o、deepseek-chat）。留空则使用所选 Provider 的默认模型。"
+        "description": "IP 白名单",
+        "hint": "允许访问的 IP 地址，多个用逗号分隔。留空表示允许所有 IP。示例：127.0.0.1,192.168.1.1"
       },
-      "purify_provider_id": {
-        "type": "string",
-        "default": "",
-        "description": "手动精馏 Provider",
-        "hint": "用于 WebUI 手动精馏、合并、拆分记忆等操作的模型提供商。从下拉列表中选择已配置的 Provider。",
-        "_special": "select_provider"
+      "webui_trust_proxy": {
+        "type": "bool",
+        "default": false,
+        "description": "信任反向代理",
+        "hint": "开启后将从 X-Forwarded-For / X-Real-IP 头获取真实客户端 IP，适用于 Nginx 等反代场景。"
       },
-      "purify_model_id": {
-        "type": "string",
-        "default": "",
-        "description": "手动精馏 Model ID（可选）",
-        "hint": "指定手动精馏使用的模型 ID。留空则使用所选 Provider 的默认模型。"
+      "webui_token_expire_hours": {
+        "type": "int",
+        "default": 24,
+        "description": "登录有效期（小时）",
+        "hint": "JWT token 的有效时间。"
       }
     }
   },
-  "profile_storage": {
-    "type": "object",
-    "description": "用户画像存储与提取",
-    "hint": "控制画像提取、存储和管理的核心配置。替代旧的三层整合流水线。",
-    "items": {
-      "profile_extraction_enabled": {
-        "type": "bool",
-        "default": false,
-        "description": "启用画像提取",
-        "hint": "开启后，后台worker将从对话缓存中提取用户画像条目(profile items)，替代旧的 episodic + semantic 两阶段流水线。默认关闭以保持向后兼容。"
-      },
-      "profile_extraction_min_messages": {
-        "type": "int",
-        "default": 8,
-        "description": "画像提取最少消息数",
-        "hint": "单用户未处理消息数低于此值时不触发画像提取。建议 >= 8。"
-      },
-      "profile_extraction_max_users_per_cycle": {
-        "type": "int",
-        "default": 10,
-        "description": "每轮最多处理用户数",
-        "hint": "单次提取周期内最多处理多少用户。"
-      },
-      "profile_extraction_timeout_sec": {
-        "type": "int",
-        "default": 120,
-        "description": "提取超时（秒）",
-        "hint": "画像提取阶段的最大执行时间，超时后跳过。"
-      },
-      "profile_stability_default": {
-        "type": "float",
-        "default": 0.5,
-        "description": "默认稳定性",
-        "hint": "新建画像条目的初始稳定性值。越高越不容易被单条新证据覆盖。范围 [0, 1]。"
-      },
-      "profile_auto_archive_threshold": {
-        "type": "float",
-        "default": 0.0,
-        "description": "自动归档阈值",
-        "hint": "当画像条目的 confidence 低于此阈值时自动归档。0=不自动归档。范围 [0, 1]。"
-      },
-      "profile_max_items_per_user": {
-        "type": "int",
-        "default": 200,
-        "description": "每用户画像条目上限",
-        "hint": "超出时优先合并低质量条目。范围 >= 10。"
-      }
-    }
+  "enable_auto_capture": {
+    "type": "bool",
+    "default": true,
+    "description": "",
+    "invisible": true
+  },
+  "capture_assistant_reply": {
+    "type": "bool",
+    "default": true,
+    "description": "",
+    "invisible": true
+  },
+  "capture_min_content_len": {
+    "type": "int",
+    "default": 5,
+    "description": "",
+    "invisible": true
+  },
+  "capture_dedup_window": {
+    "type": "int",
+    "default": 10,
+    "description": "",
+    "invisible": true
+  },
+  "capture_skip_prefixes": {
+    "type": "string",
+    "default": "",
+    "description": "",
+    "invisible": true
+  },
+  "capture_skip_regex": {
+    "type": "string",
+    "default": "",
+    "description": "",
+    "invisible": true
+  },
+  "cache_max_rows": {
+    "type": "int",
+    "default": 20,
+    "description": "",
+    "invisible": true
+  },
+  "memory_max_chars": {
+    "type": "int",
+    "default": 220,
+    "description": "",
+    "invisible": true
+  },
+  "distill_pause": {
+    "type": "bool",
+    "default": false,
+    "description": "",
+    "invisible": true
+  },
+  "distill_interval_sec": {
+    "type": "int",
+    "default": 17280,
+    "description": "",
+    "invisible": true
+  },
+  "distill_min_batch_count": {
+    "type": "int",
+    "default": 20,
+    "description": "",
+    "invisible": true
+  },
+  "distill_batch_limit": {
+    "type": "int",
+    "default": 80,
+    "description": "",
+    "invisible": true
+  },
+  "distill_user_throttle_sec": {
+    "type": "int",
+    "default": 0,
+    "description": "",
+    "invisible": true
+  },
+  "daily_token_budget": {
+    "type": "int",
+    "default": 0,
+    "description": "",
+    "invisible": true
+  },
+  "distill_rule_gating": {
+    "type": "bool",
+    "default": false,
+    "description": "",
+    "invisible": true
+  },
+  "distill_rule_gate_min_chars": {
+    "type": "int",
+    "default": 40,
+    "description": "",
+    "invisible": true
+  },
+  "distill_prompt_cache": {
+    "type": "bool",
+    "default": true,
+    "description": "",
+    "invisible": true
+  },
+  "distill_prompt_cache_max_rows": {
+    "type": "int",
+    "default": 1000,
+    "description": "",
+    "invisible": true
+  },
+  "enable_memory_injection": {
+    "type": "bool",
+    "default": true,
+    "description": "",
+    "invisible": true
+  },
+  "inject_enable_vector_search": {
+    "type": "bool",
+    "default": false,
+    "description": "",
+    "invisible": true
+  },
+  "inject_memory_limit": {
+    "type": "int",
+    "default": 5,
+    "description": "",
+    "invisible": true
+  },
+  "inject_max_chars": {
+    "type": "int",
+    "default": 0,
+    "description": "",
+    "invisible": true
+  },
+  "inject_position": {
+    "type": "string",
+    "default": "system_prompt",
+    "description": "",
+    "invisible": true,
+    "options": [
+      "system_prompt",
+      "user_message_before",
+      "user_message_after",
+      "slot",
+      "extra_user_temp"
+    ]
+  },
+  "inject_slot_marker": {
+    "type": "string",
+    "default": "{{tmemory}}",
+    "description": "",
+    "invisible": true
+  },
+  "memory_mode": {
+    "type": "string",
+    "default": "hybrid",
+    "description": "",
+    "invisible": true,
+    "options": [
+      "hybrid",
+      "distill_only",
+      "active_only"
+    ]
+  },
+  "memory_scope": {
+    "type": "string",
+    "default": "user",
+    "description": "",
+    "invisible": true,
+    "options": [
+      "user",
+      "session"
+    ]
+  },
+  "private_memory_in_group": {
+    "type": "bool",
+    "default": false,
+    "description": "",
+    "invisible": true
+  },
+  "session_reset_policy": {
+    "type": "string",
+    "default": "keep",
+    "description": "",
+    "invisible": true,
+    "options": [
+      "keep",
+      "archive",
+      "clear"
+    ]
+  },
+  "enable_layered_injection": {
+    "type": "bool",
+    "default": false,
+    "description": "[已废弃] 已被统一的 profile_items 注入替代。",
+    "invisible": true
+  },
+  "inject_working_turns": {
+    "type": "int",
+    "default": 5,
+    "description": "[已废弃] 仅 working context 仍使用此值。",
+    "invisible": true
+  },
+  "inject_episode_limit": {
+    "type": "int",
+    "default": 3,
+    "description": "[已废弃] 已被 profile_items 检索替代。",
+    "invisible": true
+  },
+  "inject_episode_max_chars": {
+    "type": "int",
+    "default": 600,
+    "description": "[已废弃] 已被 profile_items 检索替代。",
+    "invisible": true
+  },
+  "inject_style_max_chars": {
+    "type": "int",
+    "default": 400,
+    "description": "[已废弃] 已被 profile_items 检索替代。",
+    "invisible": true
   },
   "consolidation_pipeline": {
     "type": "object",
     "description": "三层记忆整合流水线 [已废弃]",
-    "hint": "已被 profile_storage 替代。仅保留配置项以保持向后兼容，不再驱动任何实现逻辑。",
+    "hint": "已被「用户画像」替代。保留配置项以保持向后兼容与值不丢失，不再在配置页展示。",
+    "invisible": true,
     "items": {
       "enable_consolidation_pipeline": {
         "type": "bool",
         "default": false,
-        "description": "启用整合流水线 [已废弃]",
-        "hint": "已被 profile_extraction_enabled 替代。"
+        "description": "",
+        "invisible": true
       },
       "enable_episodic_summarization": {
         "type": "bool",
         "default": true,
-        "description": "Stage B：情节摘要 [已废弃]",
-        "hint": "已被画像提取直接链路替代。"
+        "description": "",
+        "invisible": true
       },
       "enable_episode_semantic_distill": {
         "type": "bool",
         "default": true,
-        "description": "Stage C：语义提取 [已废弃]",
-        "hint": "已被画像提取直接链路替代。"
+        "description": "",
+        "invisible": true
       },
       "distill_max_users_per_cycle": {
         "type": "int",
         "default": 10,
-        "description": "每轮最多处理用户数 [已废弃]"
+        "description": "",
+        "invisible": true
       },
       "stage_timeout_sec": {
         "type": "int",
         "default": 120,
-        "description": "阶段超时（秒）[已废弃]"
+        "description": "",
+        "invisible": true
       },
       "episode_summary_min_messages": {
         "type": "int",
         "default": 5,
-        "description": "情节摘要最少消息数 [已废弃]"
+        "description": "",
+        "invisible": true
       },
       "episode_summary_max_input_tokens": {
         "type": "int",
         "default": 3000,
-        "description": "情节摘要最大输入 token 数 [已废弃]"
+        "description": "",
+        "invisible": true
       },
       "episode_session_gap_minutes": {
         "type": "int",
         "default": 60,
-        "description": "会话间隔（分钟）[已废弃]"
+        "description": "",
+        "invisible": true
       }
     }
   },
   "consolidation_model_settings": {
     "type": "object",
-    "description": "整合流水线模型配置",
-    "hint": "用于情节摘要和语义提取的 LLM 模型。默认复用蒸馏模型配置，开启独立模型后可单独指定。",
+    "description": "整合流水线模型配置 [已废弃]",
+    "hint": "随三层整合流水线一并废弃。保留配置项以保持向后兼容与值不丢失，不再在配置页展示。",
+    "invisible": true,
     "items": {
       "use_independent_consolidation_model": {
         "type": "bool",
         "default": false,
-        "description": "启用独立整合模型",
-        "hint": "开启后使用下方配置的独立模型进行情节摘要与语义提取，不再复用蒸馏模型。"
+        "description": "",
+        "invisible": true
       },
       "consolidation_provider_id": {
         "type": "string",
         "default": "",
-        "description": "整合 Provider",
-        "hint": "用于整合流水线的模型提供商。从下拉列表中选择已配置的 Provider。",
-        "_special": "select_provider"
+        "description": "",
+        "invisible": true
       },
       "consolidation_model_id": {
         "type": "string",
         "default": "",
-        "description": "整合 Model ID（可选）",
-        "hint": "指定整合使用的模型 ID。留空则使用所选 Provider 的默认模型。"
+        "description": "",
+        "invisible": true
       }
     }
   }

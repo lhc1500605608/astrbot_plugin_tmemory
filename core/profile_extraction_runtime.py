@@ -13,14 +13,23 @@ logger = logging.getLogger("astrbot")
 
 
 def _build_transcript(rows: List[Dict]) -> str:
-    """Build a compact transcript from conversation rows."""
-    lines = []
+    """Build a role-separated transcript: assistant turns are context only."""
+    user_lines: List[str] = []
+    assistant_lines: List[str] = []
     for i, r in enumerate(rows):
-        role = str(r.get("role", "user"))
-        content = str(r.get("content", ""))
-        prefix = f"[{i + 1}][{role}]"
-        lines.append(f"{prefix} {content}")
-    return "\n".join(lines)
+        entry = f"[{i + 1}] {r.get('content', '')}"
+        if str(r.get("role", "user")) == "assistant":
+            assistant_lines.append(entry)
+        else:
+            user_lines.append(entry)
+
+    transcript = "【用户发言（唯一可作为用户画像依据）】\n" + "\n".join(user_lines)
+    if assistant_lines:
+        transcript += (
+            "\n【助手发言（仅作上下文参考，禁止作为用户画像依据）】\n"
+            + "\n".join(assistant_lines)
+        )
+    return transcript
 
 
 class ProfileExtractionRuntimeMixin:
@@ -114,6 +123,11 @@ class ProfileExtractionRuntimeMixin:
                     continue
 
                 valid_items = self._validate_profile_items(items)
+                if valid_items:
+                    from .attribution import filter_assistant_attributed
+                    valid_items = filter_assistant_attributed(
+                        valid_items, rows, key="content"
+                    )
                 if not valid_items:
                     self._mark_rows_distilled([int(r["id"]) for r in rows])
                     continue

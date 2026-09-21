@@ -35,15 +35,35 @@ class DistillOpsMixin:
             errors 为结构化错误记录列表，替代旧版静默回退。
         """
         from . import prompt_cache as _prompt_cache
+        from .attribution import filter_assistant_attributed
 
         username = str(rows[0].get("canonical_user_id", "")) if rows else ""
-        transcript_lines = []
+        user_lines: list[str] = []
+        assistant_lines: list[str] = []
+        user_transcript_lines: list[str] = []
         for row in rows:
             role = str(row["role"])
             content = str(row["content"])
-            transcript_lines.append(f"{role}: {content}")
+            if role == "assistant":
+                assistant_lines.append(f"- {content}")
+            else:
+                # user / summary / anything else is user-attributable material.
+                label = "" if role == "user" else f"[{role}] "
+                user_lines.append(f"- {label}{content}")
+                user_transcript_lines.append(f"{role}: {content}")
 
-        transcript = "\n".join(transcript_lines)
+        transcript = (
+            "【用户发言（唯一可作为用户画像依据）】\n"
+            + "\n".join(user_lines)
+        )
+        if assistant_lines:
+            transcript += (
+                "\n【助手发言（仅作上下文参考，禁止作为用户画像依据）】\n"
+                + "\n".join(assistant_lines)
+            )
+
+        # 规则蒸馏回退只能使用用户发言，避免把助手内容写进用户记忆（TMEAAA-457）。
+        user_transcript = "\n".join(user_transcript_lines)
 
         chat_provider_id = await self.plugin._distill_mgr.resolve_distill_provider_id(rows, self.plugin.context)
         chat_model_id = await self.plugin._distill_mgr.resolve_distill_model_id(rows)
@@ -56,15 +76,18 @@ class DistillOpsMixin:
             )
             fallback_err.log()
             return (
-                [
-                    {
-                        "memory": self.plugin._distill_mgr.distill_text(transcript),
-                        "memory_type": "fact",
-                        "importance": 0.55,
-                        "confidence": 0.50,
-                        "score": 0.60,
-                    }
-                ],
+                filter_assistant_attributed(
+                    [
+                        {
+                            "memory": self.plugin._distill_mgr.distill_text(user_transcript),
+                            "memory_type": "fact",
+                            "importance": 0.55,
+                            "confidence": 0.50,
+                            "score": 0.60,
+                        }
+                    ],
+                    rows,
+                ),
                 -1,
                 -1,
                 [fallback_err],
@@ -78,7 +101,7 @@ class DistillOpsMixin:
                 self.plugin._distill_prompt_cache_hits = (
                     getattr(self.plugin, "_distill_prompt_cache_hits", 0) + 1
                 )
-                return cached_items, 0, 0, []
+                return filter_assistant_attributed(cached_items, rows), 0, 0, []
 
         style_analysis = get_style_analyzer().analyze(rows)
         style_context = get_style_analyzer().build_style_context(style_analysis)
@@ -109,6 +132,7 @@ class DistillOpsMixin:
                 tok_in, tok_out = -1, -1
 
             if parsed:
+                parsed = filter_assistant_attributed(parsed, rows)
                 if cache_enabled:
                     _prompt_cache.store_distill_items(
                         self.plugin, cache_key, transcript, parsed, chat_model_id
@@ -139,15 +163,18 @@ class DistillOpsMixin:
         )
         fallback_err.log()
         return (
-            [
-                {
-                    "memory": self.plugin._distill_mgr.distill_text(transcript),
-                    "memory_type": "fact",
-                    "importance": 0.55,
-                    "confidence": 0.50,
-                    "score": 0.60,
-                }
-            ],
+            filter_assistant_attributed(
+                [
+                    {
+                        "memory": self.plugin._distill_mgr.distill_text(user_transcript),
+                        "memory_type": "fact",
+                        "importance": 0.55,
+                        "confidence": 0.50,
+                        "score": 0.60,
+                    }
+                ],
+                rows,
+            ),
             -1,
             -1,
             [fallback_err],

@@ -32,11 +32,17 @@ PLUGIN_NAME = "astrbot_plugin_tmemory"
 
 # 与 legacy WebUI 一致：这些配置键允许通过 bridge 写回。
 NESTED_CONFIG_KEYS = (
-    "webui_settings",
+    "basic",
     "vector_retrieval",
-    "profile_storage",
-    "consolidation_pipeline",
+    "distill",
     "distill_model_settings",
+    "injection",
+    "session_identity",
+    "profile_storage",
+    "proactive",
+    "webui_settings",
+    # 已弃用（保留以兼容旧配置写回）
+    "consolidation_pipeline",
     "consolidation_model_settings",
 )
 

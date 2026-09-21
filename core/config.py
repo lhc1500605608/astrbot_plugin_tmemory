@@ -165,38 +165,146 @@ def _safe_bool(value, default: bool, *, label: str = "") -> bool:
         return default
     return bool(value)
 
+# =============================================================================
+# 配置分组迁移（TMEAAA-460）
+# =============================================================================
+# 配置项从旧平铺结构迁移到新分组结构。AstrBot 的 AstrBotConfig.check_config_integrity
+# 会删除「存档中存在但 schema 中不存在」的键，因此旧路径必须继续保留在 schema 中
+# （标记 invisible，不在 UI 展示），再由 migrate_legacy_config 把旧值复制到新分组路径，
+# 从而做到「旧键仍可读、不丢值」。
+#
+# 每项为 (旧路径, 新路径, 默认值)。路径用点号分隔，相对于配置根。
+LEGACY_KEY_MOVES = [
+    ("enable_auto_capture", "basic.enable_auto_capture", True),
+    ("capture_assistant_reply", "basic.capture_assistant_reply", True),
+    ("capture_min_content_len", "basic.capture_min_content_len", 5),
+    ("capture_dedup_window", "basic.capture_dedup_window", 10),
+    ("capture_skip_prefixes", "basic.capture_skip_prefixes", ""),
+    ("capture_skip_regex", "basic.capture_skip_regex", ""),
+    ("cache_max_rows", "basic.cache_max_rows", 20),
+    ("memory_max_chars", "basic.memory_max_chars", 220),
+    ("distill_pause", "distill.distill_pause", False),
+    ("distill_interval_sec", "distill.distill_interval_sec", 17280),
+    ("distill_min_batch_count", "distill.distill_min_batch_count", 20),
+    ("distill_batch_limit", "distill.distill_batch_limit", 80),
+    ("distill_user_throttle_sec", "distill.distill_user_throttle_sec", 0),
+    ("daily_token_budget", "distill.daily_token_budget", 0),
+    ("distill_rule_gating", "distill.distill_rule_gating", False),
+    ("distill_rule_gate_min_chars", "distill.distill_rule_gate_min_chars", 40),
+    ("distill_prompt_cache", "distill.distill_prompt_cache", True),
+    ("distill_prompt_cache_max_rows", "distill.distill_prompt_cache_max_rows", 1000),
+    ("enable_memory_injection", "injection.enable_memory_injection", True),
+    ("inject_enable_vector_search", "injection.inject_enable_vector_search", False),
+    ("inject_memory_limit", "injection.inject_memory_limit", 5),
+    ("inject_max_chars", "injection.inject_max_chars", 0),
+    ("inject_position", "injection.inject_position", "system_prompt"),
+    ("inject_slot_marker", "injection.inject_slot_marker", "{{tmemory}}"),
+    ("memory_mode", "session_identity.memory_mode", "hybrid"),
+    ("memory_scope", "session_identity.memory_scope", "user"),
+    ("private_memory_in_group", "session_identity.private_memory_in_group", False),
+    ("session_reset_policy", "session_identity.session_reset_policy", "keep"),
+    ("vector_retrieval.embedding_provider",
+     "vector_retrieval.standalone_embedding.embedding_provider", "volc"),
+    ("vector_retrieval.embedding_api_key",
+     "vector_retrieval.standalone_embedding.embedding_api_key", ""),
+    ("vector_retrieval.embedding_model",
+     "vector_retrieval.standalone_embedding.embedding_model", "doubao-embedding-vision-251215"),
+    ("vector_retrieval.embedding_base_url",
+     "vector_retrieval.standalone_embedding.embedding_base_url", ""),
+    ("vector_retrieval.local_embedding_path",
+     "vector_retrieval.local_embedding.local_embedding_path", "data/bge-small-zh-v1.5"),
+    ("vector_retrieval.local_embedding_model_file",
+     "vector_retrieval.local_embedding.local_embedding_model_file", "model_quantized.onnx"),
+    ("vector_retrieval.local_embedding_max_length",
+     "vector_retrieval.local_embedding.local_embedding_max_length", 512),
+]
+
+
+def _get_path(data, path: str):
+    """按点号路径读取嵌套 dict；任一层缺失返回 None。"""
+    cur = data
+    for part in path.split("."):
+        if not isinstance(cur, dict) or part not in cur:
+            return None
+        cur = cur[part]
+    return cur
+
+
+def _set_path(data: dict, path: str, value) -> None:
+    """按点号路径写入嵌套 dict，缺失的中间层自动创建。"""
+    parts = path.split(".")
+    cur = data
+    for part in parts[:-1]:
+        nxt = cur.get(part)
+        if not isinstance(nxt, dict):
+            nxt = {}
+            cur[part] = nxt
+        cur = nxt
+    cur[parts[-1]] = value
+
+
+def _cfg_get(raw_config: dict, path: str, default=None):
+    """按分组路径读取配置值，缺失时返回默认值。"""
+    val = _get_path(raw_config, path)
+    return default if val is None else val
+
+
+def migrate_legacy_config(raw_config) -> bool:
+    """把旧平铺路径的配置值迁移到新分组路径（原地修改）。
+
+    - 旧值非默认时：若新路径缺失或仍为默认，则复制旧值到新路径，避免升级丢值。
+    - 迁移后把旧路径重置为默认，确保此后新分组路径优先。
+    - 返回是否发生了改动（供调用方决定是否持久化）。
+    """
+    if not isinstance(raw_config, dict):
+        return False
+    changed = False
+    for old_path, new_path, default in LEGACY_KEY_MOVES:
+        old_val = _get_path(raw_config, old_path)
+        if old_val is None or old_val == default:
+            continue
+        new_val = _get_path(raw_config, new_path)
+        if new_val is None or new_val == default:
+            _set_path(raw_config, new_path, old_val)
+        _set_path(raw_config, old_path, default)
+        changed = True
+    return changed
+
+
 def parse_config(raw_config: dict) -> PluginConfig:
     """从原始字典解析并返回类型安全的 PluginConfig。"""
+    # 向后兼容：先把旧平铺配置迁移到新分组路径（原地修改，不丢值）。
+    migrate_legacy_config(raw_config)
     c = PluginConfig()
-    
+
     # ── 基础配置 ──
-    c.cache_max_rows = _safe_int(raw_config.get("cache_max_rows", 20), 20, label="cache_max_rows")
-    c.memory_max_chars = _safe_int(raw_config.get("memory_max_chars", 220), 220, label="memory_max_chars")
+    c.cache_max_rows = _safe_int(_cfg_get(raw_config, "basic.cache_max_rows", 20), 20, label="cache_max_rows")
+    c.memory_max_chars = _safe_int(_cfg_get(raw_config, "basic.memory_max_chars", 220), 220, label="memory_max_chars")
 
     # ── 自动采集 ──
-    c.enable_auto_capture = _safe_bool(raw_config.get("enable_auto_capture", True), True, label="enable_auto_capture")
-    c.capture_assistant_reply = _safe_bool(raw_config.get("capture_assistant_reply", True), True, label="capture_assistant_reply")
-    
-    _raw_prefixes = raw_config.get("capture_skip_prefixes", "")
+    c.enable_auto_capture = _safe_bool(_cfg_get(raw_config, "basic.enable_auto_capture", True), True, label="enable_auto_capture")
+    c.capture_assistant_reply = _safe_bool(_cfg_get(raw_config, "basic.capture_assistant_reply", True), True, label="capture_assistant_reply")
+
+    _raw_prefixes = _cfg_get(raw_config, "basic.capture_skip_prefixes", "")
     _user_prefixes = [p.strip() for p in str(_raw_prefixes).split(",") if p.strip()] if _raw_prefixes else []
     c.capture_skip_prefixes = ["提醒 #"] + _user_prefixes
-    
-    _raw_regex = raw_config.get("capture_skip_regex", "")
+
+    _raw_regex = _cfg_get(raw_config, "basic.capture_skip_regex", "")
     if _raw_regex:
         try:
             c.capture_skip_regex = re.compile(_raw_regex)
         except re.error as _e:
             logger.warning("[tmemory] invalid capture_skip_regex: %s", _e)
-            
-    c.capture_min_content_len = max(0, _safe_int(raw_config.get("capture_min_content_len", 5), 5, label="capture_min_content_len"))
-    c.capture_dedup_window = max(0, _safe_int(raw_config.get("capture_dedup_window", 10), 10, label="capture_dedup_window"))
+
+    c.capture_min_content_len = max(0, _safe_int(_cfg_get(raw_config, "basic.capture_min_content_len", 5), 5, label="capture_min_content_len"))
+    c.capture_dedup_window = max(0, _safe_int(_cfg_get(raw_config, "basic.capture_dedup_window", 10), 10, label="capture_dedup_window"))
 
     # ── 蒸馏调度 ──
-    c.distill_interval_sec = max(4 * 3600, _safe_int(raw_config.get("distill_interval_sec", 17280), 17280, label="distill_interval_sec"))
-    c.distill_min_batch_count = max(8, _safe_int(raw_config.get("distill_min_batch_count", 20), 20, label="distill_min_batch_count"))
-    c.distill_batch_limit = max(20, _safe_int(raw_config.get("distill_batch_limit", 80), 80, label="distill_batch_limit"))
-    c.distill_pause = _safe_bool(raw_config.get("distill_pause", False), False, label="distill_pause")
-    c.distill_user_throttle_sec = max(0, _safe_int(raw_config.get("distill_user_throttle_sec", 0), 0, label="distill_user_throttle_sec"))
+    c.distill_interval_sec = max(4 * 3600, _safe_int(_cfg_get(raw_config, "distill.distill_interval_sec", 17280), 17280, label="distill_interval_sec"))
+    c.distill_min_batch_count = max(8, _safe_int(_cfg_get(raw_config, "distill.distill_min_batch_count", 20), 20, label="distill_min_batch_count"))
+    c.distill_batch_limit = max(20, _safe_int(_cfg_get(raw_config, "distill.distill_batch_limit", 80), 80, label="distill_batch_limit"))
+    c.distill_pause = _safe_bool(_cfg_get(raw_config, "distill.distill_pause", False), False, label="distill_pause")
+    c.distill_user_throttle_sec = max(0, _safe_int(_cfg_get(raw_config, "distill.distill_user_throttle_sec", 0), 0, label="distill_user_throttle_sec"))
 
     distill_cfg = raw_config.get("distill_model_settings", {})
     c.use_independent_distill_model = _safe_bool(distill_cfg.get("use_independent_distill_model", False), False, label="use_independent_distill_model")
@@ -204,10 +312,10 @@ def parse_config(raw_config: dict) -> PluginConfig:
     c.distill_model_id = str(distill_cfg.get("distill_model_id", raw_config.get("distill_model_id", ""))).strip()
 
     # ── 蒸馏降本（Plan TMEAAA-379 B3 / BC-4）──
-    c.distill_rule_gating = _safe_bool(raw_config.get("distill_rule_gating", False), False, label="distill_rule_gating")
-    c.distill_rule_gate_min_chars = max(1, _safe_int(raw_config.get("distill_rule_gate_min_chars", 40), 40, label="distill_rule_gate_min_chars"))
-    c.distill_prompt_cache = _safe_bool(raw_config.get("distill_prompt_cache", True), True, label="distill_prompt_cache")
-    c.distill_prompt_cache_max_rows = max(0, _safe_int(raw_config.get("distill_prompt_cache_max_rows", 1000), 1000, label="distill_prompt_cache_max_rows"))
+    c.distill_rule_gating = _safe_bool(_cfg_get(raw_config, "distill.distill_rule_gating", False), False, label="distill_rule_gating")
+    c.distill_rule_gate_min_chars = max(1, _safe_int(_cfg_get(raw_config, "distill.distill_rule_gate_min_chars", 40), 40, label="distill_rule_gate_min_chars"))
+    c.distill_prompt_cache = _safe_bool(_cfg_get(raw_config, "distill.distill_prompt_cache", True), True, label="distill_prompt_cache")
+    c.distill_prompt_cache_max_rows = max(0, _safe_int(_cfg_get(raw_config, "distill.distill_prompt_cache_max_rows", 1000), 1000, label="distill_prompt_cache_max_rows"))
 
     # ── 提纯 ──
     c.purify_interval_days = max(0, _safe_int(raw_config.get("purify_interval_days", raw_config.get("refine_quality_interval_days", 0)), 0, label="purify_interval_days"))
@@ -225,10 +333,18 @@ def parse_config(raw_config: dict) -> PluginConfig:
     if not isinstance(vr, dict):
         vr = {}
     vr_merged = dict(vr)
-    for key in ("enable_vector_search", "embedding_source", "embedding_provider_id", "embedding_provider", "embedding_api_key", "embedding_model", "embedding_base_url", "vector_dim", "auto_rebuild_on_dim_change"):
+    # 展开子分组（standalone_embedding / local_embedding）为 VectorManager 需要的平铺键
+    for _sub in ("standalone_embedding", "local_embedding"):
+        _sub_cfg = vr.get(_sub)
+        if isinstance(_sub_cfg, dict):
+            for _k, _v in _sub_cfg.items():
+                # 子分组优先于同名的旧平铺键（迁移后旧键已重置为默认值）
+                vr_merged[_k] = _v
+    # 兼容更早期的顶层平铺键（例如直接构造 config 的调用方）
+    for key in ("enable_vector_search", "embedding_source", "embedding_provider_id", "embedding_provider", "embedding_api_key", "embedding_model", "embedding_base_url", "vector_dim", "auto_rebuild_on_dim_change", "local_embedding_path", "local_embedding_model_file", "local_embedding_max_length"):
         if key not in vr_merged and key in raw_config:
             vr_merged[key] = raw_config.get(key)
-            
+
     c.enable_vector_search = _safe_bool(vr_merged.get("enable_vector_search", False), False, label="enable_vector_search")
     c.embedding_source = str(vr_merged.get("embedding_source", "provider") or "provider").strip().lower()
     if c.embedding_source not in {"provider", "standalone", "local"}:
@@ -261,10 +377,10 @@ def parse_config(raw_config: dict) -> PluginConfig:
     c.rerank_base_url = str(raw_config.get("rerank_base_url", "")).strip()
 
     # ── Token Budget ──
-    c.daily_token_budget = max(0, _safe_int(raw_config.get("daily_token_budget", 0), 0, label="daily_token_budget"))
+    c.daily_token_budget = max(0, _safe_int(_cfg_get(raw_config, "distill.daily_token_budget", 0), 0, label="daily_token_budget"))
 
     # ── 主动工具模式 ──
-    c.memory_mode = str(raw_config.get("memory_mode", "hybrid")).strip().lower()
+    c.memory_mode = str(_cfg_get(raw_config, "session_identity.memory_mode", "hybrid")).strip().lower()
     if c.memory_mode not in {"distill_only", "active_only", "hybrid"}:
         c.memory_mode = "hybrid"
 
@@ -307,19 +423,20 @@ def parse_config(raw_config: dict) -> PluginConfig:
     c.consolidation_model_id = str(consolidation_cfg.get("consolidation_model_id", raw_config.get("consolidation_model_id", ""))).strip()
 
     # ── 注入与隔离 ──
-    c.enable_memory_injection = _safe_bool(raw_config.get("enable_memory_injection", True), True, label="enable_memory_injection")
-    c.inject_enable_vector_search = _safe_bool(raw_config.get("inject_enable_vector_search", False), False, label="inject_enable_vector_search")
-    c.memory_scope = str(raw_config.get("memory_scope", "user")).strip().lower()
+    c.enable_memory_injection = _safe_bool(_cfg_get(raw_config, "injection.enable_memory_injection", True), True, label="enable_memory_injection")
+    c.inject_enable_vector_search = _safe_bool(_cfg_get(raw_config, "injection.inject_enable_vector_search", False), False, label="inject_enable_vector_search")
+    c.memory_scope = str(_cfg_get(raw_config, "session_identity.memory_scope", "user")).strip().lower()
     if c.memory_scope not in {"user", "session"}:
         c.memory_scope = "user"
-    c.private_memory_in_group = _safe_bool(raw_config.get("private_memory_in_group", False), False, label="private_memory_in_group")
-    
-    c.inject_position = str(raw_config.get("inject_position", "system_prompt")).strip().lower()
+    c.private_memory_in_group = _safe_bool(_cfg_get(raw_config, "session_identity.private_memory_in_group", False), False, label="private_memory_in_group")
+
+    c.inject_position = str(_cfg_get(raw_config, "injection.inject_position", "system_prompt")).strip().lower()
     if c.inject_position not in {"system_prompt", "user_message_before", "user_message_after", "slot", "extra_user_temp"}:
         c.inject_position = "system_prompt"
-    c.inject_slot_marker = str(raw_config.get("inject_slot_marker", "{{tmemory}}")).strip()
-    c.inject_memory_limit = _safe_int(raw_config.get("inject_memory_limit", 5), 5, label="inject_memory_limit")
-    c.inject_max_chars = _safe_int(raw_config.get("inject_max_chars", 0), 0, label="inject_max_chars")
+    c.inject_slot_marker = str(_cfg_get(raw_config, "injection.inject_slot_marker", "{{tmemory}}")).strip()
+    c.inject_memory_limit = _safe_int(_cfg_get(raw_config, "injection.inject_memory_limit", 5), 5, label="inject_memory_limit")
+    c.inject_max_chars = _safe_int(_cfg_get(raw_config, "injection.inject_max_chars", 0), 0, label="inject_max_chars")
+    # 已废弃：保留旧键读取以保持行为/值不变（配置页不再展示）。
     c.enable_layered_injection = _safe_bool(raw_config.get("enable_layered_injection", False), False, label="enable_layered_injection")
     c.inject_working_turns = max(0, _safe_int(raw_config.get("inject_working_turns", 5), 5, label="inject_working_turns"))
     c.inject_episode_limit = max(0, _safe_int(raw_config.get("inject_episode_limit", 3), 3, label="inject_episode_limit"))
@@ -327,11 +444,11 @@ def parse_config(raw_config: dict) -> PluginConfig:
     c.inject_style_max_chars = max(0, _safe_int(raw_config.get("inject_style_max_chars", 400), 400, label="inject_style_max_chars"))
 
     # ── 会话生命周期 (/new /reset) ──
-    c.session_reset_policy = str(raw_config.get("session_reset_policy", "keep")).strip().lower()
+    c.session_reset_policy = str(_cfg_get(raw_config, "session_identity.session_reset_policy", "keep")).strip().lower()
     if c.session_reset_policy not in {"keep", "archive", "clear"}:
         logger.warning(
             "[tmemory] config session_reset_policy invalid (%r), using default keep",
-            raw_config.get("session_reset_policy"),
+            _cfg_get(raw_config, "session_identity.session_reset_policy"),
         )
         c.session_reset_policy = "keep"
 
@@ -377,4 +494,4 @@ def parse_config(raw_config: dict) -> PluginConfig:
 # Re-exported here so existing ``from .config import ...`` call sites keep working.
 from .lifecycle import PluginLifecycleMixin, apply_safe_defaults
 
-__all__ = ["PluginConfig", "PluginLifecycleMixin", "apply_safe_defaults", "parse_config"]
+__all__ = ["PluginConfig", "PluginLifecycleMixin", "apply_safe_defaults", "parse_config", "migrate_legacy_config", "LEGACY_KEY_MOVES"]

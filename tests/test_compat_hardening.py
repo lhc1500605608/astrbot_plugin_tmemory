@@ -414,11 +414,12 @@ def test_conf_schema_marks_sensitive_fields_secret():
         schema["webui_settings"]["items"]["webui_password"].get("secret") is True
     ), "WebUI 密码必须标记 secret:true 以防明文泄露"
     assert (
-        schema["vector_retrieval"]["items"]["embedding_api_key"].get("secret") is True
+        schema["vector_retrieval"]["items"]["standalone_embedding"]["items"]["embedding_api_key"].get("secret")
+        is True
     ), "Embedding API Key 必须标记 secret:true"
 
 
 def test_conf_schema_inject_position_hint_mentions_version_requirement():
     schema = json.loads((ROOT / "_conf_schema.json").read_text(encoding="utf-8"))
-    hint = schema["inject_position"]["hint"]
+    hint = schema["injection"]["items"]["inject_position"]["hint"]
     assert "4.28" in hint, "inject_position 的 UI 提示需说明 extra_user_temp 依赖 ≥4.28"

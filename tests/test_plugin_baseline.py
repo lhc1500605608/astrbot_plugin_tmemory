@@ -1356,7 +1356,8 @@ def test_cfg002_schema_exposes_all_consolidation_fields(plugin_module):
 
     assert cms_items["use_independent_consolidation_model"]["default"] is False
     assert cms_items["consolidation_provider_id"]["default"] == ""
-    assert cms_items["consolidation_provider_id"]["_special"] == "select_provider"
+    # 整合流水线已废弃：字段保留以防丢值，但不再在配置页展示（无 select_provider）。
+    assert cms_items["consolidation_provider_id"].get("invisible") is True
     assert cms_items["consolidation_model_id"]["default"] == ""
 
 

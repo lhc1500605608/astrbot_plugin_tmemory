@@ -5,7 +5,41 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [v0.11.4] - 2026-09-20
+## [v0.11.5] - 2026-09-21
+
+修复 [严重] 缺陷：蒸馏把助手说过的话误记为用户记忆，污染用户画像（TMEAAA-457）。
+无配置迁移，不改 schema，直接替换安装即可。
+
+### Fixed
+
+- **蒸馏 / 画像形成按 role 区分发言者**：
+  - LLM transcript 改为分区结构 `【用户发言】` / `【助手发言（仅上下文）】`，prompt 明确只从
+    用户区块提取（`core/distill.py`、`core/profile_extractor.py`、`core/distill_ops.py`、
+    `core/profile_extraction_runtime.py`）。
+  - 规则蒸馏回退（provider 缺失 / LLM 解析失败）只使用用户发言，不再把助手原文写入用户记忆。
+  - 新增确定性归因护栏 `core/attribution.py`：候选记忆若能溯源到 assistant 发言且 user 发言中
+    无依据，则在入库前丢弃；覆盖 flat distill（自动 / 手动）、profile 提取、consolidation
+    Stage C 三条链路。
+- 新增存量清理工具 `core/maintenance.py::audit_assistant_attributed_memories()`，可审计并
+  （可选）停用修复前误写的助手记忆。判据与在线护栏一致，保守不误伤；改写型错误记忆需人工复核。
+- **修正「Embedding Provider」配置项承诺与前端行为不符**（TMEAAA-463）：AstrBot 4.28 无
+  Embedding Provider 下拉，`_special: select_provider` 只会列出对话（`chat_completion`）
+  Provider。移除 `vector_retrieval.embedding_provider_id` 的 `_special`，改为手填 Embedding
+  Provider ID 的文本框，并同步修正 schema hint 与 README，避免用户误选对话 Provider 导致
+  解析失败、静默回退 standalone。
+
+### Added
+
+- 回归测试 `tests/test_role_attribution.py`：覆盖规则回退、LLM 蒸馏（自动）、`/tm_distill_now`、
+  WebUI `trigger_distill`、画像提取、prompt 分区与存量审计（10 项）。
+- 说明文档 `docs/TMEAAA-457-role-attribution.md`（根因 / 修复 / 识别与清理 / 验证）。
+
+### Notes
+
+- 验证：`pytest tests/test_role_attribution.py -q` → 10 passed；相关蒸馏 / 画像 / consolidation
+  测试全绿。修复场景：用户说 A、助手说 B → 蒸馏后记忆只含 A，B 不出现。
+
+
 
 技术债重构收尾（TMEAAA-424/433）。纯内部模块拆分，无行为 / 配置语义 / schema 变更，
 无配置迁移，直接替换安装即可。
