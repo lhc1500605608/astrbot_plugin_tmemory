@@ -1,6 +1,13 @@
 import asyncio
 from typing import Optional, Dict
 
+# SQLite 能力 shim 必须早于任何依赖 sqlite3 的 `.core.*` import（TMEAAA-475）：
+# stdlib 缺 load_extension/FTS5 时切换后端，否则 db.py 等已绑定不具备能力的 sqlite3。
+# ruff: noqa: E402
+from .core.sqlite_env import install_sqlite3_shim as _install_sqlite3_shim
+
+SQLITE_ENV_REPORT = _install_sqlite3_shim()
+
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.provider import LLMResponse, ProviderRequest
@@ -107,6 +114,9 @@ class TMemoryPlugin(
         self._vector_manager: Optional["VectorManager"] = None
         self._sqlite_vec = None
         self._vec_available = False
+        # SQLite 环境探测报告 + 最近一次维度变更结果（面板 /capabilities 用）
+        self._sqlite_env = None
+        self._last_dim_change_result: Optional[Dict[str, object]] = None
         self._sanitize_patterns = []
         self._distill_task: Optional[asyncio.Task] = None
         self._worker_running = False

@@ -6,7 +6,7 @@
 
 **MemoryForge** 是 [AstrBot](https://github.com/AstrBotDevs/AstrBot) 的长期记忆插件，通过自动采集对话、LLM 蒸馏和分层注入，让机器人在多轮、跨会话、跨平台场景下持续理解用户。
 
-> 当前版本：`v0.12.0`。v0.12.0 收敛 Embedding 配置为仅 provider 路径、新增 Embedding Provider 下拉选择、修复冷启动 provider 不生效（TMEAAA-465/472）；v0.11.5 修复 [严重] 蒸馏把助手发言误记为用户记忆：蒸馏/画像形成按 role 结构化分区，规则回退只用用户发言，并新增确定性归因护栏与存量审计清理工具（TMEAAA-457）；v0.11.4 为技术债重构收尾：按 ADR-009 500 行边界物理拆分 `core/config.py`、`core/db.py`、`core/memory_ops.py` 三个热点模块（原文件保留 facade re-export，import 路径不变），并清理死代码，纯重构无行为变更；v0.11.3 新增只读无副作用的记忆召回公共 API `recall_for_prompt`，供关联插件（kanjyou）主动消息注入真实记忆；v0.11.2 新增 SQLite 损坏自愈（损坏库自动备份为 `<db>.corrupt-<ts>` 并重建）；v0.11.1 修复线上四类故障：distill 解包崩溃、sqlite-vec vec0 逐连接加载、中文 FTS5 内置 tokenizer、维度迁移安全重建（详见 `CHANGELOG.md`）。
+> 当前版本：`v0.12.1`。v0.12.1 新增 SQLite 运行环境能力探测与回退、面板/日志清晰化、维度调和持久化与重建安全性（TMEAAA-474/478）；v0.12.0 收敛 Embedding 配置为仅 provider 路径、新增 Embedding Provider 下拉选择、修复冷启动 provider 不生效（TMEAAA-465/472）；v0.11.5 修复 [严重] 蒸馏把助手发言误记为用户记忆：蒸馏/画像形成按 role 结构化分区，规则回退只用用户发言，并新增确定性归因护栏与存量审计清理工具（TMEAAA-457）；v0.11.4 为技术债重构收尾：按 ADR-009 500 行边界物理拆分 `core/config.py`、`core/db.py`、`core/memory_ops.py` 三个热点模块（原文件保留 facade re-export，import 路径不变），并清理死代码，纯重构无行为变更；v0.11.3 新增只读无副作用的记忆召回公共 API `recall_for_prompt`，供关联插件（kanjyou）主动消息注入真实记忆；v0.11.2 新增 SQLite 损坏自愈（损坏库自动备份为 `<db>.corrupt-<ts>` 并重建）；v0.11.1 修复线上四类故障：distill 解包崩溃、sqlite-vec vec0 逐连接加载、中文 FTS5 内置 tokenizer、维度迁移安全重建（详见 `CHANGELOG.md`）。
 
 ## 功能概览
 
@@ -56,6 +56,42 @@ LLM 请求前按画像面结构化注入
 1. 在 AstrBot 插件市场安装，保持默认配置即可自动采集和注入记忆。
 2. 对话累计到阈值后后台 worker 自动蒸馏。
 3. 管理员可执行 `/tm_distill_now` 立即触发，`/tm_memory` 查看记忆，`/tm_context <问题>` 预览召回。
+
+## 环境要求
+
+向量检索（sqlite-vec）需要 AstrBot 运行的 Python 环境满足以下条件：
+
+| 要求 | 说明 |
+|------|------|
+| **loadable extensions** | Python 编译时启用 `--enable-loadable-sqlite-extensions`，使 `sqlite3.Connection.load_extension()` 可用 |
+| **FTS5** | SQLite 编译时启用 `ENABLE_FTS5`（大多数发行版默认包含） |
+| **sqlite-vec** | `pip install sqlite-vec` |
+
+> 面板「运行时能力」会自报当前解释器路径、Python/SQLite 版本及各能力状态，缺失时显示具体原因与修复命令。
+
+### 自检命令
+
+```bash
+# 在 AstrBot 运行的 Python 解释器中执行（非系统 python）
+python -c "import sqlite3,sys;print('python:',sys.version.split()[0],'sqlite:',sqlite3.sqlite_version,'load_extension:',hasattr(sqlite3.Connection,'load_extension'))"
+```
+
+### 缺 load_extension 或 FTS5 的回退
+
+若 AstrBot 的 Python sqlite3 缺 `load_extension` 或 FTS5，安装 `pysqlite3-binary` 后插件启动时会自动切换到 pysqlite3 后端：
+
+```bash
+# 替换 <astrbot-python> 为 AstrBot 实际运行的解释器路径（面板「运行解释器」可查看）
+<astrbot-python> -m pip install pysqlite3-binary sqlite-vec
+# 重启 AstrBot 生效
+```
+
+> `pysqlite3-binary` 仅有 **x86_64** 预编译包（PyPI 无 aarch64/arm64 wheel）。
+> 若面板「平台架构」显示 `aarch64`/`arm64`，安装会失败，此时请改用带
+> loadable extensions/FTS5 的 Python 构建（如 python.org 官方构建），面板会给出对应提示。
+> 因此 `pysqlite3-binary` **未**列入插件 `requirements.txt`（避免安装失败中断插件更新）。
+
+> 插件只做探测与提示，不会自动执行 `pip install`。修复命令需由管理员手动执行。
 
 ## 配置
 

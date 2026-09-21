@@ -2,6 +2,12 @@ aiohttp>=3.8.0
 # 可选：向量检索支持（enable_vector_search=true 时需要）
 # pip install sqlite-vec
 sqlite-vec>=0.1.6
+# 可选：SQLite 能力回退（运行解释器的 sqlite3 缺 load_extension 时自动切换后端，
+# 契约 TMEAAA-474 §9）。**不可设为硬依赖**：pysqlite3-binary 仅发布 x86_64
+# manylinux wheel，aarch64/arm64 主机（常见 NAS）安装会直接失败并中断插件更新。
+# 需要时按运行解释器手动安装：
+#   <AstrBot venv>/bin/python -m pip install pysqlite3-binary
+# pysqlite3-binary>=0.5.0
 jieba>=0.42.1
 numpy>=1.20.0
 # 可选：本地 embedding（embedding_source=local 时需要）

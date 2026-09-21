@@ -15,6 +15,13 @@ import os
 import secrets
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
 
+# SQLite 能力 shim（TMEAAA-475）：legacy 入口独立加载时同样需要在依赖 sqlite3
+# 的模块 import 之前切换后端。幂等，重复调用安全。
+# ruff: noqa: E402
+from ..core.sqlite_env import install_sqlite3_shim as _install_sqlite3_shim
+
+_install_sqlite3_shim()
+
 from aiohttp import web
 
 try:

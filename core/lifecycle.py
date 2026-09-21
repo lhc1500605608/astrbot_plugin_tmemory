@@ -14,6 +14,29 @@ from typing import Dict
 logger = logging.getLogger("astrbot")
 
 
+def record_dim_change_result(plugin, dim_result) -> None:
+    """缓存 provider 维度变更结果，并在「已变更但未重建」时显式告警原因。
+
+    TMEAAA-475：``dim_result`` 透出到 ``/capabilities.runtime.last_dim_change``，
+    让面板能展示具体「未重建原因」（如 ``vec0_unavailable``）。
+    """
+    plugin._last_dim_change_result = dim_result
+    if not isinstance(dim_result, dict) or not dim_result.get("changed"):
+        return
+    if dim_result.get("rebuilt"):
+        return
+    reason = (
+        dim_result.get("skipped_reason")
+        or dim_result.get("error")
+        or "unknown"
+    )
+    logger.warning(
+        "[tmemory] embedding 维度已变更但未重建向量索引，未重建原因: %s"
+        "（面板 /capabilities.runtime.last_dim_change 可见）",
+        reason,
+    )
+
+
 def apply_safe_defaults(plugin) -> None:
     """为 plugin 实例应用所有配置与运行时属性的安全默认值。
     
@@ -60,6 +83,8 @@ def apply_safe_defaults(plugin) -> None:
     plugin.min_vector_sim = 0.15
     plugin._sqlite_vec = None
     plugin._vec_available = False
+    plugin._sqlite_env = None
+    plugin._last_dim_change_result = None
     c.embed_base_url = ""
     c.embed_api_key = ""
     c.local_embedding_path = "data/bge-small-zh-v1.5"
@@ -362,6 +387,7 @@ class PluginLifecycleMixin:
             from . import vector as _vector
 
             dim_result = await _vector.apply_provider_dim_change(self)
+            record_dim_change_result(self, dim_result)
             if dim_result.get("changed"):
                 logger.warning(
                     "[tmemory] embedding dim reconciled after load: %s", dim_result
@@ -370,6 +396,14 @@ class PluginLifecycleMixin:
             logger.warning("[tmemory] provider dim reconcile after load failed: %s", e)
 
     async def initialize(self):
+        # 契约 §7：无条件自报运行解释器能力（即使 enable_vector_search=False）。
+        try:
+            from .sqlite_env import log_sqlite_env_self_report
+
+            log_sqlite_env_self_report(self)
+        except Exception as e:  # noqa: BLE001 - 自报绝不应阻断启动
+            logger.debug("[tmemory] sqlite env self-report skipped: %s", e)
+
         self._load_sqlite_vec()
         self._init_db()
         self._migrate_schema()
@@ -400,6 +434,7 @@ class PluginLifecycleMixin:
                 from . import vector as _vector
 
                 dim_result = await _vector.apply_provider_dim_change(self)
+                record_dim_change_result(self, dim_result)
                 if dim_result.get("changed"):
                     logger.warning("[tmemory] embedding dim reconciled: %s", dim_result)
             except Exception as e:

@@ -254,6 +254,25 @@ class CommandHandlersMixin:
         force = "force=true" in raw.lower() or "force" in raw.lower()
 
         if force:
+            # TMEAAA-478：先做 embedding + 向量表维度预检，任一不通过都不清空现有
+            # 索引，避免「清空 → 重建全部失败 → vector_index_rows=0」。
+            from . import vector as _vector
+
+            probe = await self._embed_text("tmemory vec rebuild preflight")
+            if probe is None:
+                yield event.plain_result(
+                    "全量重建已中止：Embedding 预检失败，现有向量索引保持不变。\n"
+                    f"原因：{getattr(self, '_embed_last_error', '') or 'unknown'}"
+                )
+                return
+            table_dim = _vector.vec_table_dim(self)
+            if table_dim and table_dim != len(probe):
+                yield event.plain_result(
+                    f"全量重建已中止：向量表维度 {table_dim} 与当前 Embedding 维度 "
+                    f"{len(probe)} 不一致，现有索引保持不变。\n"
+                    "请重启插件/容器触发维度自动调和后重试。"
+                )
+                return
             yield event.plain_result("\u5168\u91cf\u91cd\u5efa\u6a21\u5f0f:\u6e05\u7a7a\u73b0\u6709\u5411\u91cf\u540e\u91cd\u5efa\uff0c\u8bf7\u7a0d\u5019...")
             with self._db() as conn:
                 try:

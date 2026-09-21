@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v0.12.1] - 2026-09-21
+
+SQLite 运行环境能力探测与回退（TMEAAA-474）、面板/日志清晰化、维度调和持久化与重建安全性（TMEAAA-478）。
+无配置迁移，不改 schema，直接替换安装即可。
+
+### Added
+
+- **SQLite 运行环境能力探测与回退**（TMEAAA-474）：新增 `core/sqlite_env.py`（`SqliteEnvReport` + `probe_sqlite_environment()` + 幂等 `install_sqlite3_shim()`），原因码 `sqlite_vec_not_installed` / `load_extension_missing` / `fts5_missing` / `vec0_unavailable`；入口先 shim；报告落 `plugin._sqlite_env`。
+- **面板/日志清晰化**：`/capabilities` 新增 `capabilities.{vector_search,sqlite_vec,fts5,vector_index_rows}` + `sqlite_env`（含 `python_executable/in_venv/python_version/sqlite_version/platform_machine/pysqlite3_wheel_available/reasons/hint`）+ `runtime.last_dim_change`；面板展示运行解释器、具体原因、维度未重建提示、FTS5 真实状态、ARM 无 wheel 告警。
+- **维度调和持久化与重建安全性**（TMEAAA-478）：`core/vector.py` 新增 `effective_embed_dim/persist_embed_dim/vec_table_dim`；`/tm_vec_rebuild force=true` 增加 embedding+维度预检，失败不再先清空索引。
+- `requirements.txt`：`sqlite-vec>=0.1.6`；`pysqlite3-binary` 保持注释态（仅 x86_64 wheel，硬依赖会使 pip 失败→插件更新中断）。
+
 ## [v0.12.0] - 2026-09-21
 
 Embedding 配置收敛为仅 provider 路径，新增 Embedding Provider 下拉选择，修复冷启动 provider 不生效（TMEAAA-465/472）。
