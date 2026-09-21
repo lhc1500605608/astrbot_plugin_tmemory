@@ -61,11 +61,18 @@ class DatabaseManager(DbFtsMixin):
         # 否则会出现 "sqlite-vec loaded" 但 vec0 缺失（no such module: vec0）。
         self._vec_module = None
         self.vec_enabled = False
+        # 具体失败原因码（TMEAAA-475）：供上层透出到 /capabilities.sqlite_env.reasons。
+        self.vec_load_reasons: set[str] = set()
+
+    def record_vec_reason(self, code: str) -> None:
+        if code:
+            self.vec_load_reasons.add(str(code))
 
     def set_vec_extension(self, module) -> None:
         """注册 sqlite_vec 模块；连接建立时自动加载。"""
         self._vec_module = module
         self.vec_enabled = False
+        self.vec_load_reasons = set()
         if self._conn is not None:
             self._load_vec_extension(self._conn)
             self.vec_enabled = self.vec0_available(self._conn)
@@ -75,8 +82,18 @@ class DatabaseManager(DbFtsMixin):
             return
         try:
             conn.enable_load_extension(True)
-        except (AttributeError, sqlite3.Error):
-            pass
+        except AttributeError:
+            # stdlib sqlite3 未编译 loadable extensions：明确记录原因，不再静默吞掉。
+            self.record_vec_reason("load_extension_missing")
+            logger.warning(
+                "[tmemory] sqlite3.Connection 缺少 enable_load_extension；"
+                "sqlite-vec 无法加载，向量检索降级（run: pip install pysqlite3-binary）。"
+            )
+            return
+        except sqlite3.Error as e:
+            self.record_vec_reason("load_extension_missing")
+            logger.warning("[tmemory] enable_load_extension failed: %s", e)
+            return
         try:
             self._vec_module.load(conn)
         except Exception as e:  # noqa: BLE001 - 加载失败需清晰降级

@@ -158,24 +158,41 @@ class PluginHelpersMixin(DataAccessMixin):
         raise RuntimeError(f"[tmemory] \u65e0\u6cd5\u521b\u5efa\u6301\u4e45\u5316\u6570\u636e\u76ee\u5f55\u3002\u5df2\u5c1d\u8bd5: {candidates}")
 
     def _load_sqlite_vec(self):
-        """在启用向量检索时加载 sqlite-vec 扩展（缺失时禁用并告警）。
+        """在启用向量检索时加载 sqlite-vec 扩展（缺失时禁用并把具体原因记入
+        ``self._sqlite_env``，保留干净降级）。
 
         v0.10.0 回归修复：该加载逻辑在 TMEAAA-96 重构中丢失，导致
         ``_vec_available`` 恒为 False、向量索引路径完全失效。
+        TMEAAA-475：探测/回退统一走 ``core.sqlite_env``，对外透出稳定原因码。
         """
+        from .sqlite_env import probe_sqlite_environment
+
         self._sqlite_vec = None
         self._vec_available = False
         try:
             self._db_mgr.set_vec_extension(None)
         except Exception:
             pass
+
+        report = probe_sqlite_environment()
         if not self._cfg.enable_vector_search:
+            self._sqlite_env = report
+            return
+
+        if not report.sqlite_vec_installed:
+            self._sqlite_env = report
+            logger.warning(
+                "[tmemory] sqlite-vec not installed; vector search disabled "
+                "(reasons=%s). Run: pip install sqlite-vec",
+                list(report.reasons),
+            )
             return
         try:
             import sqlite_vec  # type: ignore[import-not-found]
         except ImportError:
+            self._sqlite_env = report.with_reason("sqlite_vec_not_installed")
             logger.warning(
-                "[tmemory] sqlite-vec not installed; vector search disabled. "
+                "[tmemory] sqlite-vec import failed; vector search disabled. "
                 "Run: pip install sqlite-vec"
             )
             return
@@ -185,6 +202,12 @@ class PluginHelpersMixin(DataAccessMixin):
         self._db_mgr.set_vec_extension(sqlite_vec)
         with self._db() as conn:
             vec_ok = self._db_mgr.vec0_available(conn)
+        report = report.with_vec0_available(vec_ok)
+        # 合并 db.py 记录的具体原因（如 load_extension_missing）。
+        for code in sorted(getattr(self._db_mgr, "vec_load_reasons", set()) or set()):
+            report = report.with_reason(code)
+        self._sqlite_env = report
+
         if vec_ok:
             self._vec_available = True
             logger.info("[tmemory] sqlite-vec loaded; vector search available")
@@ -192,7 +215,8 @@ class PluginHelpersMixin(DataAccessMixin):
             self._vec_available = False
             logger.warning(
                 "[tmemory] sqlite-vec imported but vec0 module is not available on "
-                "connection; vector search disabled (clean degradation)."
+                "connection; vector search disabled (clean degradation, reasons=%s).",
+                list(report.reasons),
             )
 
     def _init_db(self):

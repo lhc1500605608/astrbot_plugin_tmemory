@@ -1664,6 +1664,7 @@ async function loadEmbeddingInfo() {
     return;
   }
   var capsObj = caps && caps.capabilities || {};
+  var sqliteEnv = caps && caps.sqlite_env || null;
   var warnings = caps && caps.warnings || [];
   var runtime = caps && caps.runtime || {};
   var providers = ep.providers || [];
@@ -1719,13 +1720,58 @@ async function loadEmbeddingInfo() {
       selectHtml +
       fallbackInfo +
     '</div>' +
-    '<div class="embed-card">' +
-      '<h3>运行时能力</h3>' +
-      '<div class="embed-row"><span class="embed-key">向量索引行数</span><span class="embed-val">' + (capsObj.vector_index_rows != null ? capsObj.vector_index_rows : '-') + '</span></div>' +
-      '<div class="embed-row"><span class="embed-key">向量检索能力</span><span class="embed-val">' + (capsObj.vector_search ? '<span style="color:var(--accent2)">✓ 可用</span>' : '<span style="color:var(--text2)">不可用</span>') + '</span></div>' +
-      '<div class="embed-row"><span class="embed-key">sqlite-vec</span><span class="embed-val">' + (capsObj.sqlite_vec ? '<span style="color:var(--accent2)">✓ 已加载</span>' : '<span style="color:var(--text2)">未加载</span>') + '</span></div>' +
-      '<div class="embed-row"><span class="embed-key">FTS5 全文检索</span><span class="embed-val">' + (capsObj.fts5 ? '<span style="color:var(--accent2)">✓ 可用</span>' : '<span style="color:var(--text2)">不可用</span>') + '</span></div>' +
-    '</div>';
+    (function() {
+      var REASON_CN = {
+        sqlite_vec_not_installed: '未安装 sqlite-vec',
+        load_extension_missing: 'Python 缺 load_extension 支持',
+        fts5_missing: 'SQLite 缺 FTS5',
+        vec0_unavailable: 'vec0 不可用'
+      };
+      var reasons = sqliteEnv && sqliteEnv.reasons || [];
+      var hint = sqliteEnv && sqliteEnv.hint || '';
+      function capDetail(isOk, reasonCodes) {
+        if (isOk || !reasonCodes || reasonCodes.length === 0) return '';
+        var mapped = reasonCodes.map(function(r) { return REASON_CN[r] || r; });
+        return '<div style="font-size:12px;color:var(--warn);margin-top:4px">原因: ' + escHtml(mapped.join('；')) + '</div>' +
+          (hint ? '<div style="font-size:12px;color:var(--text2);margin-top:2px">修复: ' + escHtml(hint) + '</div>' : '');
+      }
+      var vsDetail = capDetail(capsObj.vector_search, reasons);
+      var svDetail = capDetail(capsObj.sqlite_vec, reasons);
+      var ftsDetail = capDetail(capsObj.fts5, reasons);
+      var interpHtml = '';
+      if (sqliteEnv) {
+        interpHtml += '<div class="embed-row"><span class="embed-key">运行解释器</span><span class="embed-val">' + escHtml(sqliteEnv.python_executable || '-') + (sqliteEnv.in_venv ? ' <span style="font-size:11px;color:var(--accent)">(venv)</span>' : '') + '</span></div>';
+        interpHtml += '<div class="embed-row"><span class="embed-key">Python / SQLite</span><span class="embed-val">' + escHtml(sqliteEnv.python_version || '-') + ' / ' + escHtml(sqliteEnv.sqlite_version || '-') + '</span></div>';
+        var backendLabel = sqliteEnv.backend === 'pysqlite3'
+          ? '<span style="color:var(--accent)">pysqlite3（已回退）</span>'
+          : escHtml(sqliteEnv.backend || '-');
+        interpHtml += '<div class="embed-row"><span class="embed-key">SQLite 后端</span><span class="embed-val">' + backendLabel + '</span></div>';
+        if (sqliteEnv.platform_machine) {
+          interpHtml += '<div class="embed-row"><span class="embed-key">平台架构</span><span class="embed-val">' + escHtml(sqliteEnv.platform_machine) + '</span></div>';
+        }
+      }
+      var armNoWheel = sqliteEnv && reasons.indexOf('load_extension_missing') >= 0 && sqliteEnv.pysqlite3_wheel_available === false;
+      if (armNoWheel && hint) {
+        interpHtml += '<div style="font-size:12px;color:var(--warn);margin-top:6px;padding:6px 10px;background:rgba(210,153,34,0.1);border-radius:4px">⚠ ARM 架构无 pysqlite3-binary wheel：' + escHtml(hint) + '</div>';
+      }
+      var dimChangeHtml = '';
+      var ldc = runtime && runtime.last_dim_change || null;
+      if (ldc && ldc.changed && ldc.skipped_reason) {
+        var skipMsg = ldc.skipped_reason === 'vec0_unavailable'
+          ? '未重建：vec0 不可用，旧索引已保留'
+          : '未重建: ' + escHtml(ldc.skipped_reason);
+        dimChangeHtml = '<div style="font-size:12px;color:var(--warn);margin-top:8px;padding:6px 10px;background:rgba(210,153,34,0.1);border-radius:4px">⚠ 维度切换 ' + ldc.old_dim + ' → ' + ldc.new_dim + '：' + skipMsg + '</div>';
+      }
+      return '<div class="embed-card">' +
+          '<h3>运行时能力</h3>' +
+          interpHtml +
+          '<div class="embed-row"><span class="embed-key">向量索引行数</span><span class="embed-val">' + (capsObj.vector_index_rows != null ? capsObj.vector_index_rows : '-') + '</span></div>' +
+          '<div class="embed-row"><span class="embed-key">向量检索能力</span><span class="embed-val">' + (capsObj.vector_search ? '<span style="color:var(--accent2)">✓ 可用</span>' : '<span style="color:var(--text2)">不可用</span>') + '</span></div>' + vsDetail +
+          '<div class="embed-row"><span class="embed-key">sqlite-vec</span><span class="embed-val">' + (capsObj.sqlite_vec ? '<span style="color:var(--accent2)">✓ 已加载</span>' : '<span style="color:var(--text2)">未加载</span>') + '</span></div>' + svDetail +
+          '<div class="embed-row"><span class="embed-key">FTS5 全文检索</span><span class="embed-val">' + (capsObj.fts5 ? '<span style="color:var(--accent2)">✓ 可用</span>' : '<span style="color:var(--text2)">不可用</span>') + '</span></div>' + ftsDetail +
+          dimChangeHtml +
+        '</div>';
+    })();
 }
 
 async function saveEmbeddingProvider() {

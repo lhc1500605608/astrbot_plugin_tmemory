@@ -6,10 +6,99 @@
 
 from __future__ import annotations
 
+import inspect
 import logging
+import re
 from typing import Dict, List, Optional, Tuple
 
 logger = logging.getLogger("astrbot")
+
+
+def effective_embed_dim(plugin) -> int:
+    """运行期权威 embedding 维度（TMEAAA-478）。
+
+    AstrBot Embedding Provider 已解析时以 ``VectorManager.provider_dim`` 为准：
+    distill / proactive worker 会周期性 ``parse_config`` 热加载配置，若只认
+    ``_cfg.embed_dim``，已调和的维度会被旧的 ``vector_retrieval.vector_dim`` 覆盖，
+    导致之后所有 embed（手动重建 / 新记忆写入 / 查询向量）被维度校验拒绝。
+    """
+    vm = getattr(plugin, "_vector_manager", None)
+    if vm is not None and getattr(vm, "source", "") == "provider":
+        try:
+            provider_dim = int(getattr(vm, "provider_dim", 0) or 0)
+        except (TypeError, ValueError):
+            provider_dim = 0
+        if provider_dim > 0:
+            return provider_dim
+    try:
+        return int(getattr(plugin._cfg, "embed_dim", 0) or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _sync_cfg_embed_dim(plugin, dim: int) -> None:
+    """把运行期权威维度同步回 ``_cfg``（仅内存），保证检索侧使用一致维度。"""
+    if dim <= 0:
+        return
+    try:
+        if int(getattr(plugin._cfg, "embed_dim", 0) or 0) != dim:
+            plugin._cfg.embed_dim = dim
+    except (TypeError, ValueError):
+        pass
+
+
+async def persist_embed_dim(plugin, new_dim: int) -> bool:
+    """把调和后的维度写回 ``vector_retrieval.vector_dim``（best-effort）。
+
+    只改内存不持久化时，配置热加载会把 ``embed_dim`` 回退到旧值，使 ``/config``
+    与实际 provider 维度长期不一致（TMEAAA-478）。返回是否成功持久化。
+    """
+    try:
+        config = getattr(plugin, "config", None)
+        if not isinstance(config, dict):
+            return False
+        vector_cfg = config.get("vector_retrieval")
+        if not isinstance(vector_cfg, dict):
+            vector_cfg = {}
+            config["vector_retrieval"] = vector_cfg
+        vector_cfg["vector_dim"] = int(new_dim)
+        save_async = getattr(config, "save_config_async", None)
+        if callable(save_async):
+            result = save_async()
+            if inspect.isawaitable(result):
+                await result
+            return True
+        save_sync = getattr(config, "save_config", None)
+        if callable(save_sync):
+            save_sync()
+            return True
+        return False
+    except Exception as e:
+        logger.warning("[tmemory] persist reconciled embed dim failed: %s", e)
+        return False
+
+
+def vec_table_dim(plugin, table: str = "memory_vectors") -> int:
+    """读取 sqlite-vec 向量表的声明维度（``float[N]``）；不可用返回 0。"""
+    try:
+        with plugin._db() as conn:
+            row = conn.execute(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name=?",
+                (table,),
+            ).fetchone()
+    except Exception:
+        return 0
+    if row is None:
+        return 0
+    try:
+        sql = str(row["sql"] or "")
+    except (TypeError, IndexError, KeyError):
+        try:
+            sql = str(row[0] or "")
+        except Exception:
+            return 0
+    match = re.search(r"float\[(\d+)\]", sql)
+    return int(match.group(1)) if match else 0
 
 
 async def get_http_session(plugin):
@@ -58,18 +147,22 @@ async def embed_text(plugin, text: str) -> Optional[List[float]]:
         plugin._embed_last_error = "provider returned empty embedding"
         return None
 
-    if len(vec) != plugin._cfg.embed_dim:
+    # TMEAAA-478：以运行期权威维度（provider_dim 优先）校验，避免配置热加载回退
+    # 出的旧 vector_dim 把合法向量误判为 mismatch。
+    expected_dim = effective_embed_dim(plugin)
+    if expected_dim and len(vec) != expected_dim:
         plugin._embed_fail_count += 1
         plugin._embed_last_error = (
-            f"provider dim mismatch {len(vec)} vs {plugin._cfg.embed_dim}"
+            f"provider dim mismatch {len(vec)} vs {expected_dim}"
         )
         logger.warning(
             "[tmemory] provider embed dim mismatch: got %d, expected %d",
             len(vec),
-            plugin._cfg.embed_dim,
+            expected_dim,
         )
         return None
 
+    _sync_cfg_embed_dim(plugin, expected_dim)
     plugin._embed_ok_count += 1
     plugin._embed_last_source = "provider"
     return vec
@@ -216,6 +309,7 @@ async def apply_provider_dim_change(plugin) -> Dict[str, object]:
         "new_dim": 0,
         "cache_cleared": False,
         "rebuilt": False,
+        "persisted": False,
     }
     vm = getattr(plugin, "_vector_manager", None)
     provider = getattr(vm, "embedding_provider", None) if vm is not None else None
@@ -241,6 +335,16 @@ async def apply_provider_dim_change(plugin) -> Dict[str, object]:
     )
     plugin._cfg.embed_dim = new_dim
     result["changed"] = True
+
+    # TMEAAA-478：把调和后的维度持久化到 vector_retrieval.vector_dim，否则后台
+    # worker 的配置热加载会把它回退成旧值，导致后续 embed/rebuild 全部失败。
+    result["persisted"] = await persist_embed_dim(plugin, new_dim)
+    if not result["persisted"]:
+        logger.warning(
+            "[tmemory] embedding dim %d 已调和但未能持久化到配置；"
+            "热加载后将以 VectorManager.provider_dim 为准继续工作",
+            new_dim,
+        )
 
     # Query embedding 缓存与维度绑定：变更后必须整体失效，避免旧维度向量污染检索。
     try:
@@ -313,7 +417,7 @@ async def get_cached_query_embedding(
                 return None
             blob = bytes(row["embedding"])
             dim = int(row["embed_dim"])
-            if dim != plugin._cfg.embed_dim:
+            if dim != effective_embed_dim(plugin):
                 conn.execute(
                     "DELETE FROM query_embedding_cache WHERE query_hash=?", (query_hash,)
                 )

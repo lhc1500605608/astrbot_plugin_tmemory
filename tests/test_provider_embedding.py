@@ -476,6 +476,118 @@ async def test_rerank_results_prefers_provider(plugin, vector_port):
     assert result[0]["rerank_score"] == pytest.approx(0.9)
 
 
+# ── TMEAAA-478: 维度调和后配置热加载回退 / force 重建清空索引 ─────────────
+
+
+class _FakeEvent:
+    def __init__(self, message_str):
+        self.message_str = message_str
+
+    def plain_result(self, text):
+        return text
+
+
+@pytest.mark.asyncio
+async def test_effective_embed_dim_prefers_provider_dim(plugin, vector_port):
+    """provider 激活时以 provider_dim 为权威，忽略回退的 _cfg.embed_dim。"""
+    plugin._cfg.embed_dim = 2048
+    plugin._vector_manager = FakeVM(provider=embedding_adapter(dim=1024), provider_dim=1024)
+    assert vector_port.effective_embed_dim(plugin) == 1024
+
+    plugin._vector_manager = FakeVM(provider=embedding_adapter(dim=1024), provider_dim=0)
+    assert vector_port.effective_embed_dim(plugin) == 2048
+
+
+@pytest.mark.asyncio
+async def test_embed_text_accepts_provider_dim_when_cfg_stale(plugin, vector_port):
+    """配置热加载把 embed_dim 回退成旧值后，embed 仍按 provider 维度成功并同步 _cfg。"""
+    plugin._cfg.embed_dim = 2048
+    plugin._vector_manager = FakeVM(provider=embedding_adapter(dim=1024), provider_dim=1024)
+
+    vec = await vector_port.embed_text(plugin, "hello")
+
+    assert vec is not None and len(vec) == 1024
+    assert plugin._cfg.embed_dim == 1024
+    assert plugin._embed_fail_count == 0
+
+
+@pytest.mark.asyncio
+async def test_apply_provider_dim_change_persists_to_config(plugin, vector_port):
+    """调和后写回 vector_retrieval.vector_dim，热加载不会回退。"""
+    plugin._cfg.embed_dim = 2048
+    plugin.config["vector_retrieval"] = {"vector_dim": 2048}
+    plugin._vector_manager = FakeVM(provider=FakeEmbeddingProvider(dim=1024), provider_dim=1024)
+
+    result = await vector_port.apply_provider_dim_change(plugin)
+
+    assert result["changed"] is True
+    assert plugin.config["vector_retrieval"]["vector_dim"] == 1024
+
+
+def test_vec_table_dim_reads_declared_dim(plugin, vector_port):
+    with plugin._db() as conn:
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS memory_vectors"
+            "(memory_id INTEGER PRIMARY KEY, embedding float[8])"
+        )
+    assert vector_port.vec_table_dim(plugin) == 8
+    assert vector_port.vec_table_dim(plugin, table="missing_table") == 0
+
+
+@pytest.mark.asyncio
+async def test_tm_vec_rebuild_force_aborts_on_embed_failure_without_clearing(plugin):
+    """预检 embed 失败时不清空现有索引（TMEAAA-478 现象 2）。"""
+    plugin._vec_available = True
+    plugin._vector_manager = FakeVM(
+        provider=FailingEmbeddingProvider(), source="provider", provider_dim=1024
+    )
+    with plugin._db() as conn:
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS memory_vectors"
+            "(memory_id INTEGER PRIMARY KEY, embedding float[8])"
+        )
+        conn.execute("INSERT INTO memory_vectors(memory_id, embedding) VALUES(1, x'00')")
+
+    outputs = [
+        msg
+        async for msg in plugin._handle_tm_vec_rebuild(
+            _FakeEvent("/tm_vec_rebuild force=true")
+        )
+    ]
+
+    assert any("已中止" in str(m) for m in outputs)
+    with plugin._db() as conn:
+        rows = conn.execute("SELECT COUNT(*) AS c FROM memory_vectors").fetchone()["c"]
+    assert rows == 1
+
+
+@pytest.mark.asyncio
+async def test_tm_vec_rebuild_force_aborts_on_table_dim_mismatch(plugin, vector_port):
+    """向量表维度与 embedding 维度不一致时不清空索引。"""
+    plugin._vec_available = True
+    plugin._vector_manager = FakeVM(
+        provider=embedding_adapter(dim=8), source="provider", provider_dim=8
+    )
+    with plugin._db() as conn:
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS memory_vectors"
+            "(memory_id INTEGER PRIMARY KEY, embedding float[4])"
+        )
+        conn.execute("INSERT INTO memory_vectors(memory_id, embedding) VALUES(1, x'00')")
+
+    outputs = [
+        msg
+        async for msg in plugin._handle_tm_vec_rebuild(
+            _FakeEvent("/tm_vec_rebuild force=true")
+        )
+    ]
+
+    assert any("已中止" in str(m) for m in outputs)
+    with plugin._db() as conn:
+        rows = conn.execute("SELECT COUNT(*) AS c FROM memory_vectors").fetchone()["c"]
+    assert rows == 1
+
+
 def provider_adapter():
     from astrbot_plugin_tmemory.adapters import provider
 

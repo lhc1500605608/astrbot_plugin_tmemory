@@ -382,9 +382,22 @@ class PluginPagesBridge:
 
     async def capabilities(self, request: Any) -> BridgeResult:
         from ..adapters import version as _version_adapter
+        from ..core.sqlite_env import (
+            collect_sqlite_capabilities,
+            last_dim_change_dict,
+            sqlite_env_dict,
+        )
+
+        try:
+            stats: Any = self.admin().get_global_stats()
+        except Exception:  # noqa: BLE001 - DB 异常不应让能力面板整体 500
+            stats = None
+        capabilities = _version_adapter.get_capabilities().to_dict()
+        capabilities.update(collect_sqlite_capabilities(self.plugin, stats))
 
         return {
-            "capabilities": _version_adapter.get_capabilities().to_dict(),
+            "capabilities": capabilities,
+            "sqlite_env": sqlite_env_dict(self.plugin),
             "warnings": _config_warnings(self.plugin._cfg),
             "runtime": {
                 "extra_user_temp_fallback_count": getattr(
@@ -393,6 +406,7 @@ class PluginPagesBridge:
                 "persona_private_fallback_count": getattr(
                     self.plugin, "_persona_private_fallback_count", 0
                 ),
+                "last_dim_change": last_dim_change_dict(self.plugin),
             },
         }, 200
 
