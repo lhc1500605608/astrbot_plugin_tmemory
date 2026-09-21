@@ -6,7 +6,7 @@
 
 **MemoryForge** 是 [AstrBot](https://github.com/AstrBotDevs/AstrBot) 的长期记忆插件，通过自动采集对话、LLM 蒸馏和分层注入，让机器人在多轮、跨会话、跨平台场景下持续理解用户。
 
-> 当前版本：`v0.11.4`。v0.11.4 为技术债重构收尾：按 ADR-009 500 行边界物理拆分 `core/config.py`、`core/db.py`、`core/memory_ops.py` 三个热点模块（原文件保留 facade re-export，import 路径不变），并清理死代码，纯重构无行为变更；v0.11.3 新增只读无副作用的记忆召回公共 API `recall_for_prompt`，供关联插件（kanjyou）主动消息注入真实记忆；v0.11.2 新增 SQLite 损坏自愈（损坏库自动备份为 `<db>.corrupt-<ts>` 并重建）；v0.11.1 修复线上四类故障：distill 解包崩溃、sqlite-vec vec0 逐连接加载、中文 FTS5 内置 tokenizer、维度迁移安全重建（详见 `CHANGELOG.md`）。
+> 当前版本：`v0.11.5`。v0.11.5 修复 [严重] 蒸馏把助手发言误记为用户记忆：蒸馏/画像形成按 role 结构化分区，规则回退只用用户发言，并新增确定性归因护栏与存量审计清理工具（TMEAAA-457）；v0.11.4 为技术债重构收尾：按 ADR-009 500 行边界物理拆分 `core/config.py`、`core/db.py`、`core/memory_ops.py` 三个热点模块（原文件保留 facade re-export，import 路径不变），并清理死代码，纯重构无行为变更；v0.11.3 新增只读无副作用的记忆召回公共 API `recall_for_prompt`，供关联插件（kanjyou）主动消息注入真实记忆；v0.11.2 新增 SQLite 损坏自愈（损坏库自动备份为 `<db>.corrupt-<ts>` 并重建）；v0.11.1 修复线上四类故障：distill 解包崩溃、sqlite-vec vec0 逐连接加载、中文 FTS5 内置 tokenizer、维度迁移安全重建（详见 `CHANGELOG.md`）。
 
 ## 功能概览
 
@@ -56,6 +56,26 @@ LLM 请求前按画像面结构化注入
 1. 在 AstrBot 插件市场安装，保持默认配置即可自动采集和注入记忆。
 2. 对话累计到阈值后后台 worker 自动蒸馏。
 3. 管理员可执行 `/tm_distill_now` 立即触发，`/tm_memory` 查看记忆，`/tm_context <问题>` 预览召回。
+
+## 配置
+
+插件配置页按相关性分组：**基础设置 / 向量检索 / 蒸馏调度与成本 / 蒸馏模型 / 记忆注入 / 会话与身份 / 用户画像 / 主动性记忆 / WebUI**。
+
+### Embedding：直接选择 AstrBot Provider（推荐）
+
+1. 先在 AstrBot 的「模型」中配置好 Embedding Provider；
+2. 在插件配置的「向量检索」分组中，把 **Embedding 来源** 设为 `provider`，再在 **Embedding Provider ID** 文本框中填写该 Embedding Provider 的 `id`（留空则自动选择第一个可用项）。**无需手填 API Key / 模型名 / Base URL**。
+
+> AstrBot 4.28 配置页没有「Embedding Provider」下拉框：Provider 下拉组件（`_special: select_provider`）只会列出对话（`chat_completion`）Provider，因此该字段为手填 ID。请不要填写对话 Provider 的 ID，否则解析失败会回退到 standalone。
+
+只有在无法使用 Provider 时，才需要展开「独立 / 高级模式（standalone）」手填参数，或改用「本地 ONNX 模式（local）」。
+
+### 向后兼容
+
+从旧版本升级时，插件会把旧的平铺配置项自动迁移到新的分组路径，**旧值不丢失**：
+
+- 迁移在插件加载时原地完成并写回配置文件，此后以新分组路径为准。
+- 已废弃的配置（分层注入、三层整合流水线等）不再在配置页展示，但键与值仍保留在配置文件中，确保升级后行为与取值不变。
 
 ## Smoke 验证
 

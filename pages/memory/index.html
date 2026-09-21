@@ -581,6 +581,24 @@ body { font-family: var(--font); background:var(--bg); color:var(--text); min-he
   </div>
 </div>
 
+<!-- Dialog Modal (confirm / prompt) — native window.confirm/prompt are blocked
+     inside the Dashboard's sandboxed plugin iframe (no allow-modals flag). -->
+<div class="modal-backdrop" id="dialogModal">
+  <div class="modal" style="width:400px">
+    <div class="modal-header"><h3 id="dialogTitle">确认操作</h3></div>
+    <div class="modal-body">
+      <p id="dialogMessage" style="font-size:13px;line-height:1.6;color:var(--text)"></p>
+      <div class="form-group" id="dialogInputWrap" style="display:none;margin:12px 0 0">
+        <input id="dialogInput" type="text">
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn" id="dialogCancelBtn">取消</button>
+      <button class="btn btn-danger" id="dialogOkBtn">确认</button>
+    </div>
+  </div>
+</div>
+
 <div class="toast-container" id="toastContainer"></div>
 
 <script>
@@ -647,6 +665,67 @@ function toast(msg, type) {
 
 function closeModal(id) { document.getElementById(id).classList.remove('show'); }
 
+/* Native window.confirm/alert/prompt are no-ops in the Dashboard's sandboxed
+   plugin iframe (sandbox="allow-scripts allow-forms allow-downloads" omits
+   allow-modals). Use this in-page dialog instead: it resolves to a boolean
+   for confirmDialog() and to a string/null for promptDialog(). */
+var _dialogResolve = null;
+var _dialogCancelValue = false;
+
+function _closeDialog(result) {
+  document.getElementById('dialogModal').classList.remove('show');
+  document.getElementById('dialogInputWrap').style.display = 'none';
+  var resolve = _dialogResolve;
+  _dialogResolve = null;
+  if (resolve) resolve(result);
+}
+
+function confirmDialog(message, opts) {
+  opts = opts || {};
+  return new Promise(function(resolve) {
+    _dialogResolve = resolve;
+    _dialogCancelValue = false;
+    document.getElementById('dialogTitle').textContent = opts.title || '确认操作';
+    document.getElementById('dialogMessage').textContent = message;
+    var ok = document.getElementById('dialogOkBtn');
+    var cancel = document.getElementById('dialogCancelBtn');
+    ok.textContent = opts.okText || '确认';
+    ok.className = 'btn ' + (opts.danger === false ? 'btn-primary' : 'btn-danger');
+    cancel.textContent = opts.cancelText || '取消';
+    document.getElementById('dialogInputWrap').style.display = 'none';
+    ok.onclick = function() { _closeDialog(true); };
+    cancel.onclick = function() { _closeDialog(false); };
+    document.getElementById('dialogModal').classList.add('show');
+    ok.focus();
+  });
+}
+
+function promptDialog(message, defaultValue, opts) {
+  opts = opts || {};
+  return new Promise(function(resolve) {
+    _dialogResolve = resolve;
+    _dialogCancelValue = null;
+    document.getElementById('dialogTitle').textContent = opts.title || '输入';
+    document.getElementById('dialogMessage').textContent = message;
+    var input = document.getElementById('dialogInput');
+    input.value = defaultValue == null ? '' : String(defaultValue);
+    var ok = document.getElementById('dialogOkBtn');
+    var cancel = document.getElementById('dialogCancelBtn');
+    ok.textContent = opts.okText || '确定';
+    ok.className = 'btn btn-primary';
+    cancel.textContent = opts.cancelText || '取消';
+    document.getElementById('dialogInputWrap').style.display = '';
+    ok.onclick = function() { _closeDialog(input.value); };
+    cancel.onclick = function() { _closeDialog(null); };
+    input.onkeydown = function(e) {
+      if (e.key === 'Enter') { e.preventDefault(); _closeDialog(input.value); }
+      if (e.key === 'Escape') { e.preventDefault(); _closeDialog(null); }
+    };
+    document.getElementById('dialogModal').classList.add('show');
+    setTimeout(function() { input.focus(); input.select(); }, 0);
+  });
+}
+
 function switchTab(tab, btn) {
   document.querySelectorAll('.tab-bar button').forEach(function(b) { b.classList.remove('active'); });
   btn.classList.add('active');
@@ -656,6 +735,7 @@ function switchTab(tab, btn) {
   var panelMap = { profile:'panelProfile', table:'panelTable', pending:'panelPending', events:'panelEvents', identity:'panelIdentity', health:'panelHealth', refine:'panelRefine', proactive:'panelProactive', importexport:'panelImportExport', embedding:'panelEmbedding', cost:'panelCost' };
   var panelId = panelMap[tab];
   if (!panelId) return;
+  activeTab = tab;
   document.getElementById(panelId).style.display = '';
   if (tab === 'profile' && currentUser) { loadProfileSummary(currentUser); loadProfileItems(currentUser); }
   if (tab === 'pending') loadPendingQueue();
@@ -695,6 +775,7 @@ function makeAvatar(userId, extraClass) {
 /* ── users.js ──────────────────────────────────────────────────── */
 var currentUser = null;
 var allUsers = [];
+var activeTab = 'profile';
 
 async function loadUsers() {
   var data = await api('/users');
@@ -833,10 +914,16 @@ async function saveMemory() {
 }
 
 async function deleteMemory(id) {
-  if (!confirm('确认删除记忆 #' + id + '？')) return;
+  var confirmed = await confirmDialog('确认删除记忆 #' + id + '？此操作不可撤销。', { title: '删除记忆', okText: '删除' });
+  if (!confirmed) return;
   var res = await api('/memory/delete', { method: 'POST', body: JSON.stringify({ id: id }) });
-  if (res && !res.error) { toast('记忆已删除', 'success'); loadUserData(currentUser); loadStats(); }
-  else { toast('删除失败', 'error'); }
+  if (res && res.ok) {
+    toast('记忆已删除', 'success');
+    await loadUserData(currentUser);
+    loadStats();
+  } else if (res) {
+    toast('删除失败：记忆不存在或已被删除', 'error');
+  }
 }
 
 async function togglePin(id, pinned) {
@@ -992,7 +1079,7 @@ async function saveProfileItem() {
 }
 
 async function archiveProfileItem(itemId) {
-  if (!confirm('确认归档此画像条目？')) return;
+  if (!(await confirmDialog('确认归档此画像条目？'))) return;
   var res = await api('/profile/item/archive', { method: 'POST', body: JSON.stringify({ id: itemId }) });
   if (res && res.ok) {
     await loadProfileItems(currentUser);
@@ -1007,7 +1094,7 @@ async function mergeSelectedProfileItems() {
   var selectedItems = profileItems.filter(function(item) { return checked.indexOf(item.id) >= 0; });
   var facetTypes = new Set(selectedItems.map(function(item) { return item.facet_type; }));
   if (facetTypes.size > 1) { toast('只能合并相同类型的画像条目', 'error'); return; }
-  if (!confirm('确认将 ' + checked.length + ' 条画像条目合并为一条？')) return;
+  if (!(await confirmDialog('确认将 ' + checked.length + ' 条画像条目合并为一条？'))) return;
   var res = await api('/profile/items/merge', { method: 'POST', body: JSON.stringify({ user: currentUser, ids: checked }) });
   if (res && res.ok) {
     await loadProfileItems(currentUser);
@@ -1070,7 +1157,7 @@ async function doMerge() {
   var to = document.getElementById('mergeTo').value.trim();
   if (!from || !to) { toast('请填写来源和目标用户 ID', 'error'); return; }
   if (from === to) { toast('两个 ID 相同', 'error'); return; }
-  if (!confirm('确认将 "' + from + '" 的所有数据合并到 "' + to + '"？此操作不可撤销。')) return;
+  if (!(await confirmDialog('确认将 "' + from + '" 的所有数据合并到 "' + to + '"？此操作不可撤销。', { title: '合并用户', okText: '合并' }))) return;
   var res = await api('/identity/merge', { method: 'POST', body: JSON.stringify({ from_user: from, to_user: to }) });
   if (res && res.ok) {
     toast('合并完成：' + res.from_user + ' \u2192 ' + res.to_user + '，迁移 ' + res.moved + ' 条记忆', 'success');
@@ -1252,7 +1339,7 @@ async function doMemMerge() {
   var ids = Array.from(select.selectedOptions).map(function(o) { return parseInt(o.value); });
   if (ids.length < 2) { toast('请至少选择两条记忆', 'error'); return; }
   var memory = document.getElementById('mergeMemText').value.trim();
-  if (!confirm('确认合并 ' + ids.length + ' 条记忆？保留第一条，删除其余。此操作不可撤销。')) return;
+  if (!(await confirmDialog('确认合并 ' + ids.length + ' 条记忆？保留第一条，删除其余。此操作不可撤销。', { title: '合并记忆', okText: '合并' }))) return;
   var res = await api('/memory/merge', { method: 'POST', body: JSON.stringify({ user: currentUser, ids: ids, memory: memory }) });
   if (res && res.ok) {
     toast('合并完成：保留 #' + res.keep_id + '，删除 ' + res.deleted + ' 条', 'success');
@@ -1386,8 +1473,8 @@ async function toggleProactive() {
   }
 }
 
-function editProactiveValue(key, currentVal, label) {
-  var newVal = prompt('设置 ' + label + '（当前值: ' + currentVal + '）', currentVal);
+async function editProactiveValue(key, currentVal, label) {
+  var newVal = await promptDialog('设置 ' + label + '（当前值: ' + currentVal + '）', currentVal, { title: '修改配置', okText: '保存' });
   if (newVal === null || newVal === '') return;
   var numVal = parseInt(newVal);
   if (isNaN(numVal) || numVal < 0) { toast('请输入有效正整数', 'error'); return; }
@@ -1548,7 +1635,7 @@ async function doImportDryRun() {
 
 async function doImportApply() {
   if (!ieImportData) { toast('请先选择文件', 'error'); return; }
-  if (!confirm('确认导入数据？将创建备份后写入。')) return;
+  if (!(await confirmDialog('确认导入数据？将创建备份后写入。', { title: '导入数据', okText: '导入', danger: false }))) return;
   var res = await api('/import', { method: 'POST', body: JSON.stringify({ payload: ieImportData, dry_run: false, on_conflict: ieConflictMode, backup: true }) });
   if (res && res.ok) {
     toast('导入成功：插入 ' + res.inserted + ' 条' + (res.backup_path ? '，备份: ' + res.backup_path : ''), 'success');
@@ -1752,6 +1839,12 @@ async function loadUserData(userId) {
   renderEvents(evtData && evtData.events || []);
   await loadProfileSummary(userId);
   await loadProfileItems(userId);
+  refreshUserScopedPanels();
+}
+
+function refreshUserScopedPanels() {
+  if (activeTab === 'refine') loadRefineMemoryOptions();
+  if (activeTab === 'importexport') renderImportExport();
 }
 
 async function refreshAll() {
@@ -1774,7 +1867,7 @@ async function exportCurrentUser() {
 
 async function purgeCurrentUser() {
   if (!currentUser) { toast('请先选择用户', 'error'); return; }
-  if (!confirm('确认清除 "' + currentUser + '" 的所有记忆和缓存？此操作不可撤销！')) return;
+  if (!(await confirmDialog('确认清除 "' + currentUser + '" 的所有记忆和缓存？此操作不可撤销！', { title: '清除用户数据', okText: '清除' }))) return;
   var res = await api('/user/purge', { method: 'POST', body: JSON.stringify({ user: currentUser }) });
   if (res && res.ok) {
     toast('已清除：' + res.memories + ' 条记忆，' + res.cache + ' 条缓存', 'success');
@@ -1796,8 +1889,15 @@ document.addEventListener('DOMContentLoaded', function() {
   });
 
   document.querySelectorAll('.modal-backdrop').forEach(function(el) {
+    if (el.id === 'dialogModal') return;
     el.addEventListener('click', function(e) { if (e.target === el) el.classList.remove('show'); });
   });
+  var dialogModal = document.getElementById('dialogModal');
+  if (dialogModal) {
+    dialogModal.addEventListener('click', function(e) {
+      if (e.target === dialogModal) _closeDialog(_dialogCancelValue);
+    });
+  }
 });
 </script>
 </body>

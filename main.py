@@ -6,7 +6,7 @@ from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.provider import LLMResponse, ProviderRequest
 from astrbot.api.star import Context, Star
 from .core.db import DatabaseManager
-from .core.config import PluginConfig, PluginLifecycleMixin, parse_config
+from .core.config import PluginConfig, PluginLifecycleMixin, parse_config, migrate_legacy_config
 from .core.capture import CaptureFilter
 from .core.distill import DistillManager, DistillRuntimeMixin
 from .core.consolidation import ConsolidationRuntimeMixin, ProfileExtractionRuntimeMixin
@@ -85,6 +85,18 @@ class TMemoryPlugin(
         self._db_mgr = DatabaseManager(self.db_path)
 
         # ── 配置解析 ─────────────────────────────────────────────────────
+        # 配置迁移（TMEAAA-460）：旧平铺键 → 新分组键，原地迁移并持久化，保证升级不丢值。
+        try:
+            if migrate_legacy_config(self.config):
+                _save = getattr(self.config, "save_config", None)
+                if callable(_save):
+                    try:
+                        _save()
+                        logger.info("[tmemory] 配置已迁移到分组结构并写回")
+                    except Exception as _e:
+                        logger.warning("[tmemory] 配置迁移持久化失败（内存中已生效）: %s", _e)
+        except Exception as e:
+            logger.warning("[tmemory] 配置迁移失败，回退旧键读取: %s", e)
         try:
             self._cfg = parse_config(self.config)
         except Exception as e:

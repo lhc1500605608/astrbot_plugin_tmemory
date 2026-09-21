@@ -179,20 +179,32 @@ class PluginLifecycleMixin:
         apply_safe_defaults(self)
 
     def _get_vector_retrieval_config(self) -> Dict:
-        """兼容旧平铺配置和新嵌套配置的向量检索配置读取。"""
+        """兼容旧平铺配置和新嵌套配置的向量检索配置读取（含 standalone/local 子分组）。"""
         vector_cfg = self.config.get("vector_retrieval", {})
         if not isinstance(vector_cfg, dict):
             vector_cfg = {}
 
         merged = dict(vector_cfg)
+        # 展开子分组为 VectorManager 需要的平铺键（子分组优先于同名的旧平铺键）
+        for sub in ("standalone_embedding", "local_embedding"):
+            sub_cfg = vector_cfg.get(sub)
+            if isinstance(sub_cfg, dict):
+                for key, value in sub_cfg.items():
+                    merged[key] = value
+        # 更早期的顶层平铺键回退
         legacy_keys = (
             "enable_vector_search",
+            "embedding_source",
+            "embedding_provider_id",
             "embedding_provider",
             "embedding_api_key",
             "embedding_model",
             "embedding_base_url",
             "vector_dim",
             "auto_rebuild_on_dim_change",
+            "local_embedding_path",
+            "local_embedding_model_file",
+            "local_embedding_max_length",
         )
         for key in legacy_keys:
             if key not in merged and key in self.config:

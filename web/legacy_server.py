@@ -120,11 +120,16 @@ class TMemoryWebServer(WebHandlersMixin):
         allowed_keys = {field.name for field in fields(type(self.plugin._cfg))}
         allowed_keys.update(
             {
-                "webui_settings",
+                "basic",
                 "vector_retrieval",
-                "profile_storage",
-                "consolidation_pipeline",
+                "distill",
                 "distill_model_settings",
+                "injection",
+                "session_identity",
+                "profile_storage",
+                "proactive",
+                "webui_settings",
+                "consolidation_pipeline",
                 "consolidation_model_settings",
             }
         )
@@ -136,11 +141,16 @@ class TMemoryWebServer(WebHandlersMixin):
             raise ValueError(f"unknown config keys: {', '.join(unknown)}")
 
         for nested_key in (
-            "webui_settings",
+            "basic",
             "vector_retrieval",
-            "profile_storage",
-            "consolidation_pipeline",
+            "distill",
             "distill_model_settings",
+            "injection",
+            "session_identity",
+            "profile_storage",
+            "proactive",
+            "webui_settings",
+            "consolidation_pipeline",
             "consolidation_model_settings",
         ):
             if nested_key in patch and not isinstance(patch[nested_key], dict):
