@@ -6,20 +6,19 @@
 
 **MemoryForge** 是 [AstrBot](https://github.com/AstrBotDevs/AstrBot) 的长期记忆插件，通过自动采集对话、LLM 蒸馏和分层注入，让机器人在多轮、跨会话、跨平台场景下持续理解用户。
 
-> 当前版本：`v0.12.1`。v0.12.1 新增 SQLite 运行环境能力探测与回退、面板/日志清晰化、维度调和持久化与重建安全性（TMEAAA-474/478）；v0.12.0 收敛 Embedding 配置为仅 provider 路径、新增 Embedding Provider 下拉选择、修复冷启动 provider 不生效（TMEAAA-465/472）；v0.11.5 修复 [严重] 蒸馏把助手发言误记为用户记忆：蒸馏/画像形成按 role 结构化分区，规则回退只用用户发言，并新增确定性归因护栏与存量审计清理工具（TMEAAA-457）；v0.11.4 为技术债重构收尾：按 ADR-009 500 行边界物理拆分 `core/config.py`、`core/db.py`、`core/memory_ops.py` 三个热点模块（原文件保留 facade re-export，import 路径不变），并清理死代码，纯重构无行为变更；v0.11.3 新增只读无副作用的记忆召回公共 API `recall_for_prompt`，供关联插件（kanjyou）主动消息注入真实记忆；v0.11.2 新增 SQLite 损坏自愈（损坏库自动备份为 `<db>.corrupt-<ts>` 并重建）；v0.11.1 修复线上四类故障：distill 解包崩溃、sqlite-vec vec0 逐连接加载、中文 FTS5 内置 tokenizer、维度迁移安全重建（详见 `CHANGELOG.md`）。
+> 当前版本：`v0.12.2`。完整变更历史见 [`CHANGELOG.md`](./CHANGELOG.md)。
 
 ## 功能概览
 
 - **用户画像架构**：以用户为中心的五维画像（偏好·事实·风格·限制·任务模式），结构化存储用户长期认知
 - **自动采集**：监听用户消息，可选采集助手回复
-- **画像形成**：后台 worker 从对话中提炼画像条目（profile_items），附带证据链溯源
-- **主动工具**：`remember` / `recall` LLM tool，支持模型主动保存和检索记忆
-- **画像注入**：在 LLM 请求前按画像面（facet）结构化注入上下文，零 LLM 热路径
-- **WebUI 安全加固**：写接口参数校验、HTTP 级错误码与负路径覆盖，`extra_user_temp` 回退兼容矩阵文档化
-- **混合召回升级**：`on_llm_request` 注入路径从纯 FTS5 升级为可选向量+混合召回，embedding 缓存可观测
-- **蒸馏预算控制**：新增 `distill_daily_token_budget` 配置项，超预算自动暂停+告警，`/tm_distill_history` 暴露消耗视图
-- **代码复杂度重切分**：`core/utils.py`、`core/admin_service.py`、`core/consolidation.py`、`web_server.py` 大文件拆分（各模块 <500行，无循环导入）
-- **自动化基线回归**：全量 510 测试（507 通过 / 3 跳过）
+- **画像形成**：后台自动从对话中提炼画像条目，并保留证据溯源
+- **主动工具**：`remember` / `recall` 工具，支持模型主动保存和检索记忆
+- **画像注入**：注入在请求前自动完成，无需额外模型调用
+- **WebUI 安全加固**：写接口参数校验与错误码处理
+- **混合召回**：支持关键词与向量混合召回，可提升召回相关性
+- **蒸馏预算控制**：可设置每日用量上限，超出自动降级，`/tm_distill_history` 查看消耗
+- **自动化测试**：覆盖采集、蒸馏、召回、注入、WebUI 等主要链路
 - **记忆维护**：强化、衰减、固定、提纯、合并、拆分、失活
 - **身份合并**：通过 `canonical_user_id` 合并同一用户跨平台记忆
 - **WebUI 管理面板**：可选画像工作台、审计日志和手动蒸馏
@@ -31,14 +30,14 @@
   ↓ 自动采集
 conversation_cache (原始证据)
   ↓ LLM 画像形成
-profile_items (用户画像条目)
+用户画像条目
   ├─ preference  偏好
   ├─ fact        事实
   ├─ style       风格
   ├─ restriction 限制
   └─ task_pattern 任务模式
-  ↓ FTS5 / 向量 / RRF 召回
-LLM 请求前按画像面结构化注入
+  ↓ 关键词 / 向量混合召回
+请求前自动注入相关画像
   ↓
 模型生成更个性化的回复
 ```
@@ -54,7 +53,7 @@ LLM 请求前按画像面结构化注入
 ## 快速开始
 
 1. 在 AstrBot 插件市场安装，保持默认配置即可自动采集和注入记忆。
-2. 对话累计到阈值后后台 worker 自动蒸馏。
+2. 对话累计到阈值后后台自动蒸馏。
 3. 管理员可执行 `/tm_distill_now` 立即触发，`/tm_memory` 查看记忆，`/tm_context <问题>` 预览召回。
 
 ## 环境要求
@@ -153,7 +152,7 @@ python3 tools/plugin_archive.py verify dist/astrbot_plugin_tmemory.zip
 | `/tm_memory` | 查看当前用户长期记忆 |
 | `/tm_context <问题>` | 预览记忆召回上下文 |
 | `/tm_distill_now` | 手动触发批量蒸馏 |
-| `/tm_worker` | 查看蒸馏 worker 状态 |
+| `/tm_worker` | 查看蒸馏后台状态 |
 | `/tm_stats` | 全局统计（含向量索引行数） |
 | `/tm_distill_history` | 蒸馏历史和 token 成本 |
 | `/tm_purify` | 全量记忆提纯 |
@@ -217,7 +216,7 @@ AstrBot ≥4.28 在 `/new` `/reset` 时会新建/重置会话，插件通过
 
 ## 常见问题
 
-**为什么没有立即生成长期记忆？** 默认需要单用户未蒸馏消息达到 `distill_min_batch_count`（默认 20），等待后台 worker。管理员可用 `/tm_distill_now` 手动触发。
+**为什么没有立即生成长期记忆？** 默认需要单用户未蒸馏消息达到 `distill_min_batch_count`（默认 20），等待后台处理。管理员可用 `/tm_distill_now` 手动触发。
 
 **群聊为什么不注入私聊记忆？** 这是默认隐私保护。需开启 `private_memory_in_group`（注意隐私风险）。
 
@@ -234,13 +233,13 @@ AstrBot ≥4.28 在 `/new` `/reset` 时会新建/重置会话，插件通过
 ### AstrBot 版本兼容
 
 - 插件声明 `astrbot_version: ">=4.16,<5"`（保守策略），在 AstrBot 4.16 及以上均可加载。
-- 注入位置 `inject_position=extra_user_temp` 依赖 `TextPart.mark_as_temp()`，**需 AstrBot ≥4.28**；在 4.16–4.27 上会自动回退为 `system_prompt`（能力探测见后续 Phase 1）。
+- 注入位置 `inject_position=extra_user_temp` 依赖 `TextPart.mark_as_temp()`，**需 AstrBot ≥4.28**；在 4.16–4.27 上会自动回退为 `system_prompt`。
 
-> **当前产品基线**：MemoryForge 的主产品模型是「用户画像」（`user_profiles` + `profile_items`），旧 `memories` 体系仅作为内部兼容层存在，不对外宣称为产品能力。
+> **当前产品基线**：MemoryForge 的主产品能力是「用户画像」，旧记忆体系仅作为内部兼容层存在，不对外宣称为产品能力。
 
 ### style_distill 剥离
 
-- 聊天风格蒸馏功能已于 v0.5.0 完全剥离至独立插件 `astrbot_plugin_tstyle_distill`，与主记忆管道零耦合。
+- 聊天风格蒸馏功能已完全剥离至独立插件 `astrbot_plugin_tstyle_distill`，与主记忆管道零耦合。
 - 主插件不再提供 `/style_distill` 命令，旧 Docker 拓扑文档中该命令的引用仅为历史记录。
 
 ### refine / purify 现状
@@ -251,7 +250,7 @@ AstrBot ≥4.28 在 `/new` `/reset` 时会新建/重置会话，插件通过
 
 ### 旧表停用声明
 
-以下表自 v0.8.3 起已退出主数据链路，仅保留 DDL 及只读兼容路径，不参与检索、注入或蒸馏：
+以下表已退出主数据链路，仅保留 DDL 及只读兼容路径，不参与检索、注入或蒸馏：
 
 | 表名 | 状态 | 说明 |
 |------|------|------|
@@ -261,4 +260,4 @@ AstrBot ≥4.28 在 `/new` `/reset` 时会新建/重置会话，插件通过
 
 **当前核心表**：`identity_bindings`、`conversation_cache`、`user_profiles`、`profile_items`、`profile_item_evidence`、`profile_relations`、`memory_vectors`、`memory_events`、`distill_history`。
 
-上述旧表尚未在 v0.10.0 移除，仍保留 DDL 与只读兼容路径；后续版本移除时将提供至少一个发布周期的只读过渡期。
+上述旧表尚未移除，仍保留 DDL 与只读兼容路径；后续移除时将提供至少一个发布周期的只读过渡期。
