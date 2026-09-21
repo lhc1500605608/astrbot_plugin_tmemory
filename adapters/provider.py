@@ -184,8 +184,8 @@ def provider_capabilities(source: Any) -> ProviderCapabilities:
 class ProviderEmbeddingAdapter:
     """把 AstrBot ``EmbeddingProvider`` 适配为插件内部 embedding 提供者接口。
 
-    暴露 ``embed_text`` / ``embed_batch``（与 ``embeddingProvider.BaseEmbeddingProvider``
-    对齐）以及 ``provider_id`` / ``model_name`` / ``get_dim()`` / ``source``。
+    暴露 ``embed_text`` / ``embed_batch``（对齐 VectorManager 消费的提供者接口）
+    以及 ``provider_id`` / ``model_name`` / ``get_dim()`` / ``source``。
     """
 
     source = SOURCE_PROVIDER
@@ -262,6 +262,37 @@ class ProviderRerankAdapter:
         return normalized
 
 
+def list_embedding_providers(source: Any) -> List[Dict[str, object]]:
+    """枚举 AstrBot 已配置的 Embedding Provider（能力缺失返回 []，绝不抛异常）。
+
+    返回 ``[{"id": str, "model": str, "dim": int}]``，供插件页下拉选择 /
+    bridge ``GET /embedding/providers`` 使用。
+    """
+    try:
+        manager = _get_manager(source)
+        if manager is None:
+            return []
+        providers: List[Dict[str, object]] = []
+        for item in _instances(manager, "embedding_provider_insts"):
+            if not _is_embedding_provider(item):
+                continue
+            try:
+                dim = int(item.get_dim())
+            except Exception:
+                dim = 0
+            providers.append(
+                {
+                    "id": provider_id_of(item),
+                    "model": provider_model_of(item),
+                    "dim": dim,
+                }
+            )
+        return providers
+    except Exception as e:  # noqa: BLE001 - 枚举失败绝不 500
+        logger.warning("[tmemory] list embedding providers failed: %s", e)
+        return []
+
+
 def resolve_embedding_provider(
     source: Any, provider_id: str = ""
 ) -> Optional[ProviderEmbeddingAdapter]:
@@ -303,6 +334,7 @@ __all__ = [
     "ProviderCapabilities",
     "ProviderEmbeddingAdapter",
     "ProviderRerankAdapter",
+    "list_embedding_providers",
     "provider_capabilities",
     "provider_id_of",
     "provider_model_of",

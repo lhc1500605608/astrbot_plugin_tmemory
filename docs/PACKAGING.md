@@ -37,7 +37,7 @@ tools/pack_plugin.sh --output /tmp/astrbot_plugin_tmemory.zip
 - 顶层结构固定为单目录 `astrbot_plugin_tmemory/`；
 - 采用**白名单**打包，仅包含运行时文件（`main.py`、`metadata.yaml`、
   `requirements.txt`、`_conf_schema.json`、`logo.png`、`README.md`、
-  `CHANGELOG.md`、`LICENSE`、`embeddingProvider.py`、`hybrid_search.py`、
+  `CHANGELOG.md`、`LICENSE`、`hybrid_search.py`、
   `vector_manager.py`、`core/`、`adapters/`、`search/`、`web/`、`pages/`、
   `templates/`、`skills/`、`.astrbot-plugin/`）；
 - 排除 `__MACOSX`、`.DS_Store`、`._*`、`__pycache__`、`*.pyc`、`.env`、

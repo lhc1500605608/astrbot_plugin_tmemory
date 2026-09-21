@@ -6,7 +6,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from typing import Dict, List, Optional, Tuple
 
@@ -24,102 +23,56 @@ async def get_http_session(plugin):
 
 
 async def embed_text(plugin, text: str) -> Optional[List[float]]:
-    """生成文本向量。优先使用 VectorManager 的 Provider/独立提供者，
-    提供者异常时回退到独立 HTTP 配置。
+    """生成文本向量，仅使用 VectorManager 的 AstrBot Embedding Provider。
 
-    包含:并发限流(semaphore)、429/5xx 重试(最多 2 次)、可观测计数。
+    Provider 缺失、调用异常或维度不匹配时返回 None（不再回退独立 HTTP 配置）。
+    包含可观测计数（``_embed_ok_count`` / ``_embed_fail_count``）。
     """
     vm = getattr(plugin, "_vector_manager", None)
     provider = getattr(vm, "embedding_provider", None) if vm is not None else None
-    if provider is not None:
-        try:
-            vec = await provider.embed_text(text)
-        except Exception as e:
-            plugin._embed_provider_fail_count = (
-                getattr(plugin, "_embed_provider_fail_count", 0) + 1
-            )
-            plugin._embed_last_error = f"provider_fail: {str(e)[:180]}"
-            logger.warning(
-                "[tmemory] provider embed_text failed, fallback to standalone: %s", e
-            )
-            vec = None
-        if vec:
-            if len(vec) != plugin._cfg.embed_dim:
-                plugin._embed_fail_count += 1
-                plugin._embed_last_error = (
-                    f"provider dim mismatch {len(vec)} vs {plugin._cfg.embed_dim}"
-                )
-                logger.warning(
-                    "[tmemory] provider embed dim mismatch: got %d, expected %d",
-                    len(vec),
-                    plugin._cfg.embed_dim,
-                )
-            else:
-                plugin._embed_ok_count += 1
-                plugin._embed_last_source = "provider"
-                return vec
-
-    if not plugin._vec_available or not plugin._cfg.embed_base_url:
+    if provider is None and vm is not None:
+        # TMEAAA-472：AstrBot 冷启动 provider 晚于插件 initialize；首次使用时
+        # 惰性补解析（30s 节流，避免 provider 长期缺失时反复探测/告警）。
+        refresh = getattr(vm, "refresh", None)
+        if callable(refresh):
+            try:
+                await refresh(min_interval_sec=30.0)
+            except Exception as e:
+                logger.debug("[tmemory] lazy embedding provider resolve failed: %s", e)
+            provider = getattr(vm, "embedding_provider", None)
+    if provider is None:
         return None
 
-    url = plugin._cfg.embed_base_url.rstrip("/") + "/v1/embeddings"
-    payload = {"model": plugin.embed_model, "input": text[:2000]}
-    headers: Dict[str, str] = {}
-    if plugin._cfg.embed_api_key:
-        headers["Authorization"] = f"Bearer {plugin._cfg.embed_api_key}"
+    try:
+        vec = await provider.embed_text(text)
+    except Exception as e:
+        plugin._embed_provider_fail_count = (
+            getattr(plugin, "_embed_provider_fail_count", 0) + 1
+        )
+        plugin._embed_last_error = f"provider_fail: {str(e)[:180]}"
+        logger.warning("[tmemory] provider embed_text failed: %s", e)
+        return None
 
-    max_retries = 2
-    if plugin._embed_semaphore is None:
-        plugin._embed_semaphore = asyncio.Semaphore(4)
-    async with plugin._embed_semaphore:
-        for attempt in range(1, max_retries + 1):
-            try:
-                session = await get_http_session(plugin)
-                async with session.post(url, json=payload, headers=headers) as resp:
-                    if resp.status == 429 or resp.status >= 500:
-                        if attempt < max_retries:
-                            wait = min(2.0 * attempt, 5.0)
-                            logger.debug(
-                                "[tmemory] embed API %d, retry %d after %.1fs",
-                                resp.status,
-                                attempt,
-                                wait,
-                            )
-                            await asyncio.sleep(wait)
-                            continue
-                        plugin._embed_fail_count += 1
-                        plugin._embed_last_error = f"HTTP {resp.status}"
-                        return None
-                    if resp.status != 200:
-                        plugin._embed_fail_count += 1
-                        plugin._embed_last_error = f"HTTP {resp.status}"
-                        logger.debug("[tmemory] embed API status=%s", resp.status)
-                        return None
-                    data = await resp.json()
-                    vec = data["data"][0]["embedding"]
-                    if len(vec) != plugin._cfg.embed_dim:
-                        logger.warning(
-                            "[tmemory] embed dim mismatch: got %d, expected %d",
-                            len(vec),
-                            plugin._cfg.embed_dim,
-                        )
-                        plugin._embed_fail_count += 1
-                        plugin._embed_last_error = (
-                            f"dim mismatch {len(vec)} vs {plugin._cfg.embed_dim}"
-                        )
-                        return None
-                    plugin._embed_ok_count += 1
-                    plugin._embed_last_source = "standalone"
-                    return vec
-            except Exception as e:
-                if attempt < max_retries:
-                    await asyncio.sleep(1.0 * attempt)
-                    continue
-                plugin._embed_fail_count += 1
-                plugin._embed_last_error = str(e)[:200]
-                logger.debug("[tmemory] _embed_text failed: %s", e)
-                return None
-    return None
+    if not vec:
+        plugin._embed_fail_count += 1
+        plugin._embed_last_error = "provider returned empty embedding"
+        return None
+
+    if len(vec) != plugin._cfg.embed_dim:
+        plugin._embed_fail_count += 1
+        plugin._embed_last_error = (
+            f"provider dim mismatch {len(vec)} vs {plugin._cfg.embed_dim}"
+        )
+        logger.warning(
+            "[tmemory] provider embed dim mismatch: got %d, expected %d",
+            len(vec),
+            plugin._cfg.embed_dim,
+        )
+        return None
+
+    plugin._embed_ok_count += 1
+    plugin._embed_last_source = "provider"
+    return vec
 
 
 async def upsert_vector(plugin, memory_id: int, text: str) -> bool:
@@ -243,9 +196,7 @@ def embedding_status(plugin) -> Dict[str, object]:
             logger.debug("[tmemory] vector status() failed: %s", e)
     provider = getattr(vm, "embedding_provider", None)
     return {
-        "active_source": "provider" if getattr(vm, "source", "") == "provider" else (
-            "standalone" if provider is not None else "none"
-        ),
+        "active_source": "provider" if provider is not None else "none",
         "embedding_source": getattr(vm, "embedding_source", ""),
         "provider_id": getattr(vm, "provider_id", ""),
         "provider_dim": getattr(vm, "provider_dim", 0),

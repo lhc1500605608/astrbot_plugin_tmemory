@@ -249,6 +249,18 @@ class PluginPagesBridge:
         BridgeRoute(
             ("POST", "PATCH"), "/config", "config_update", "更新插件配置"
         ),
+        BridgeRoute(
+            ("GET",),
+            "/embedding/providers",
+            "embedding_providers",
+            "AstrBot Embedding Provider 列表",
+        ),
+        BridgeRoute(
+            ("POST",),
+            "/embedding/provider",
+            "embedding_provider_set",
+            "选择 Embedding Provider",
+        ),
         BridgeRoute(("GET",), "/capabilities", "capabilities", "能力探测与降级打点"),
         BridgeRoute(
             ("POST",), "/test/conversation", "test_conversation", "写入测试对话"
@@ -643,6 +655,91 @@ class PluginPagesBridge:
         if warnings:
             payload["warnings"] = warnings
         return payload, 200
+
+    # ── Embedding Provider（bridge：SDK 无法直连核心 /api/v1/providers）──
+
+    def _embedding_providers_payload(self) -> Dict[str, Any]:
+        from ..adapters import provider as _provider_adapter
+
+        plugin = self.plugin
+        cfg = plugin._cfg
+        vm = getattr(plugin, "_vector_manager", None)
+        return {
+            "enabled": bool(getattr(cfg, "enable_vector_search", False)),
+            "configured_provider_id": str(
+                getattr(cfg, "embedding_provider_id", "") or ""
+            ),
+            "active_source": str(getattr(vm, "source", "none") or "none"),
+            "active_provider_id": str(getattr(vm, "provider_id", "") or ""),
+            "active_model": str(getattr(vm, "provider_model", "") or ""),
+            "active_dim": int(getattr(vm, "provider_dim", 0) or 0),
+            "fallback_reason": str(getattr(vm, "fallback_reason", "") or ""),
+            "providers": _provider_adapter.list_embedding_providers(
+                getattr(plugin, "context", None)
+            ),
+        }
+
+    async def embedding_providers(self, request: Any) -> BridgeResult:
+        """枚举 AstrBot 已配置的 Embedding Provider 供前端下拉选择。"""
+        return self._embedding_providers_payload(), 200
+
+    async def embedding_provider_set(self, request: Any) -> BridgeResult:
+        """写入 vector_retrieval.embedding_provider_id 并 best-effort 重初始化。"""
+        data = await _json_object(request)
+        provider_id = str(data.get("provider_id", "") or "").strip()
+
+        provider_ids = {
+            str(item.get("id", ""))
+            for item in self._embedding_providers_payload()["providers"]
+        }
+        if provider_id and provider_id not in provider_ids:
+            return {"error": f"embedding provider id not found: {provider_id}"}, 400
+
+        current_config = self.plugin.config
+        vector_cfg = current_config.get("vector_retrieval")
+        if not isinstance(vector_cfg, dict):
+            vector_cfg = {}
+            current_config["vector_retrieval"] = vector_cfg
+        vector_cfg["embedding_provider_id"] = provider_id
+        await _save_plugin_config(current_config)
+
+        from ..core.config import parse_config
+
+        self.plugin._cfg = parse_config(current_config)
+        await self._reinit_vector_manager()
+
+        payload = self._embedding_providers_payload()
+        payload["ok"] = True
+        return payload, 200
+
+    async def _reinit_vector_manager(self) -> None:
+        """best-effort：切换 Provider 后重建 VectorManager（失败仅告警）。"""
+        plugin = self.plugin
+        if not bool(getattr(plugin._cfg, "enable_vector_search", False)):
+            return
+        try:
+            from ..vector_manager import VectorManager
+
+            vm = VectorManager(
+                plugin.db_path, plugin._get_vector_retrieval_config_from_cfg()
+            )
+            vm.context = getattr(plugin, "context", None)
+            await vm.initialize()
+            previous = getattr(plugin, "_vector_manager", None)
+            plugin._vector_manager = vm
+            if previous is not None and previous is not vm:
+                try:
+                    await previous.close()
+                except Exception as close_exc:  # noqa: BLE001
+                    _astrbot_logger.warning(
+                        "[tmemory-pages] previous VectorManager close failed: %s",
+                        close_exc,
+                    )
+        except Exception as exc:  # noqa: BLE001 - 切换失败仅告警
+            _astrbot_logger.warning(
+                "[tmemory-pages] VectorManager re-init after provider change failed: %s",
+                exc,
+            )
 
     # ── 测试对话 ────────────────────────────────────────────────────────
 

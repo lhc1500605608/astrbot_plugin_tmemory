@@ -188,6 +188,18 @@ class TMemoryPlugin(
         return await self._handle_on_llm_request(event, req)
 
     # =========================================================================
+    # AstrBot 加载完成（provider 就绪后补解析 Embedding Provider）
+    # =========================================================================
+
+    @_optional_filter_hook("on_astrbot_loaded")
+    async def on_astrbot_loaded(self):
+        """AstrBot 冷启动：插件先于 provider 加载，此处补解析 Embedding Provider。"""
+        try:
+            await self._resume_vector_provider()
+        except Exception as e:
+            logger.warning("[tmemory] on_astrbot_loaded provider 补解析失败: %s", e)
+
+    # =========================================================================
     # 会话 / Agent 生命周期观测（/new /reset，AstrBot >= 4.28）
     # =========================================================================
 

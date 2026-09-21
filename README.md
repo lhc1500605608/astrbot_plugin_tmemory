@@ -6,7 +6,7 @@
 
 **MemoryForge** 是 [AstrBot](https://github.com/AstrBotDevs/AstrBot) 的长期记忆插件，通过自动采集对话、LLM 蒸馏和分层注入，让机器人在多轮、跨会话、跨平台场景下持续理解用户。
 
-> 当前版本：`v0.11.5`。v0.11.5 修复 [严重] 蒸馏把助手发言误记为用户记忆：蒸馏/画像形成按 role 结构化分区，规则回退只用用户发言，并新增确定性归因护栏与存量审计清理工具（TMEAAA-457）；v0.11.4 为技术债重构收尾：按 ADR-009 500 行边界物理拆分 `core/config.py`、`core/db.py`、`core/memory_ops.py` 三个热点模块（原文件保留 facade re-export，import 路径不变），并清理死代码，纯重构无行为变更；v0.11.3 新增只读无副作用的记忆召回公共 API `recall_for_prompt`，供关联插件（kanjyou）主动消息注入真实记忆；v0.11.2 新增 SQLite 损坏自愈（损坏库自动备份为 `<db>.corrupt-<ts>` 并重建）；v0.11.1 修复线上四类故障：distill 解包崩溃、sqlite-vec vec0 逐连接加载、中文 FTS5 内置 tokenizer、维度迁移安全重建（详见 `CHANGELOG.md`）。
+> 当前版本：`v0.12.0`。v0.12.0 收敛 Embedding 配置为仅 provider 路径、新增 Embedding Provider 下拉选择、修复冷启动 provider 不生效（TMEAAA-465/472）；v0.11.5 修复 [严重] 蒸馏把助手发言误记为用户记忆：蒸馏/画像形成按 role 结构化分区，规则回退只用用户发言，并新增确定性归因护栏与存量审计清理工具（TMEAAA-457）；v0.11.4 为技术债重构收尾：按 ADR-009 500 行边界物理拆分 `core/config.py`、`core/db.py`、`core/memory_ops.py` 三个热点模块（原文件保留 facade re-export，import 路径不变），并清理死代码，纯重构无行为变更；v0.11.3 新增只读无副作用的记忆召回公共 API `recall_for_prompt`，供关联插件（kanjyou）主动消息注入真实记忆；v0.11.2 新增 SQLite 损坏自愈（损坏库自动备份为 `<db>.corrupt-<ts>` 并重建）；v0.11.1 修复线上四类故障：distill 解包崩溃、sqlite-vec vec0 逐连接加载、中文 FTS5 内置 tokenizer、维度迁移安全重建（详见 `CHANGELOG.md`）。
 
 ## 功能概览
 
@@ -61,14 +61,12 @@ LLM 请求前按画像面结构化注入
 
 插件配置页按相关性分组：**基础设置 / 向量检索 / 蒸馏调度与成本 / 蒸馏模型 / 记忆注入 / 会话与身份 / 用户画像 / 主动性记忆 / WebUI**。
 
-### Embedding：直接选择 AstrBot Provider（推荐）
+### Embedding：只使用 AstrBot Provider
 
 1. 先在 AstrBot 的「模型」中配置好 Embedding Provider；
-2. 在插件配置的「向量检索」分组中，把 **Embedding 来源** 设为 `provider`，再在 **Embedding Provider ID** 文本框中填写该 Embedding Provider 的 `id`（留空则自动选择第一个可用项）。**无需手填 API Key / 模型名 / Base URL**。
+2. 打开插件「记忆面板 → 向量检索」，在下拉框中选择 AstrBot 已配置的 Embedding Provider（留空自动选第一个可用项）；配置页的 **Embedding Provider ID** 仍可查看/手填该 `id`。**无需手填 API Key / 模型名 / Base URL**。
 
-> AstrBot 4.28 配置页没有「Embedding Provider」下拉框：Provider 下拉组件（`_special: select_provider`）只会列出对话（`chat_completion`）Provider，因此该字段为手填 ID。请不要填写对话 Provider 的 ID，否则解析失败会回退到 standalone。
-
-只有在无法使用 Provider 时，才需要展开「独立 / 高级模式（standalone）」手填参数，或改用「本地 ONNX 模式（local）」。
+> Embedding 已收敛为 **仅 Provider 路径**：`embedding_source` 固定为 `provider`，不再支持 standalone / local。旧配置中的 `embedding_source=standalone|local` 与相关键仍保留在配置文件中（不丢值），但加载时会记录一条 warning 并按 provider 处理。
 
 ### 向后兼容
 

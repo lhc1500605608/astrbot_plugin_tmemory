@@ -255,9 +255,8 @@ async def test_initialize_passes_normalized_vector_config_to_manager(plugin_modu
         context=None,
         config={
             "enable_vector_search": True,
-            "embedding_provider": "openai",
-            "embedding_api_key": "test-key",
-            "embedding_model": "text-embedding-3-small",
+            "embedding_source": "local",
+            "embedding_provider_id": "emb-42",
             "vector_dim": 768,
         },
     )
@@ -267,11 +266,12 @@ async def test_initialize_passes_normalized_vector_config_to_manager(plugin_modu
 
     assert captured["initialized"] is True
     assert captured["closed"] is True
+    # TMEAAA-467: 传给 VectorManager 的配置收敛为 provider-only 键。
     assert captured["config"]["enable_vector_search"] is True
-    assert captured["config"]["embedding_provider"] == "openai"
-    assert captured["config"]["embedding_api_key"] == "test-key"
-    assert captured["config"]["embedding_model"] == "text-embedding-3-small"
-    assert captured["config"]["vector_dim"] == 768
+    assert captured["config"]["embedding_source"] == "provider"
+    assert captured["config"]["embedding_provider_id"] == "emb-42"
+    assert captured["config"]["rerank_provider_id"] == ""
+    assert "embedding_base_url" not in captured["config"]
 
 
 def test_parse_config_supports_nested_and_legacy_distill_settings(plugin_module, tmp_path, monkeypatch):

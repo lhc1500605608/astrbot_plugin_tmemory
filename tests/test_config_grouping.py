@@ -1,6 +1,14 @@
-"""TMEAAA-460: 配置分组重排 + Embedding Provider 选择 + 向后兼容迁移。"""
+"""TMEAAA-460/467: 配置分组重排 + Embedding Provider 选择 + 向后兼容迁移。
+
+TMEAAA-467：embedding 收敛为 provider-only——`embedding_source` 与
+`standalone_embedding` / `local_embedding` 分组仅保留（invisible，不丢值），
+旧值加载时不报错、不丢值。
+"""
 import json
+import logging
 from pathlib import Path
+
+import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -33,20 +41,67 @@ def test_embedding_provider_id_is_plain_text_id_input():
     # select_provider 下拉被前端硬编码为 chat_completion，会误导用户选错 Provider
     assert "_special" not in item
     assert "Embedding" in item["description"]
-    assert "ID" in item["hint"] and "Embedding" in item["hint"]
+    # TMEAAA-467: hint 指向记忆面板下拉选择 AstrBot Embedding Provider。
+    assert "Embedding Provider" in item["hint"]
+    assert "下拉" in item["hint"]
 
 
-def test_standalone_embedding_grouped_and_documented():
-    """standalone 相关项归入「独立 / 高级模式」分组并加说明。"""
+def test_embedding_source_invisible_provider_only():
+    """TMEAAA-467: embedding_source 收敛为 provider，仅保留 default 且不可见。"""
+    item = _schema()["vector_retrieval"]["items"]["embedding_source"]
+    assert item.get("invisible") is True
+    assert item["default"] == "provider"
+    assert "options" not in item
+    assert "hint" not in item
+
+
+def test_standalone_and_local_groups_hidden_but_items_kept():
+    """TMEAAA-467: standalone/local 分组 invisible，但 items 必须保留（不丢值）。"""
     vr = _schema()["vector_retrieval"]["items"]
-    group = vr["standalone_embedding"]
-    assert group["type"] == "object"
-    assert "高级" in group["description"] or "独立" in group["description"]
+    standalone = vr["standalone_embedding"]
+    assert standalone.get("invisible") is True
+    assert standalone["type"] == "object"
     for key in ("embedding_provider", "embedding_api_key", "embedding_model", "embedding_base_url"):
-        assert key in group["items"]
+        assert key in standalone["items"]
     local = vr["local_embedding"]
+    assert local.get("invisible") is True
     for key in ("local_embedding_path", "local_embedding_model_file", "local_embedding_max_length"):
         assert key in local["items"]
+
+
+@pytest.mark.parametrize("legacy_source", ["standalone", "local"])
+def test_legacy_embedding_source_reads_as_provider_and_preserves_values(
+    plugin_module, caplog, legacy_source
+):
+    """旧 embedding_source=standalone/local：归一化为 provider，告警且不丢值。"""
+    from astrbot_plugin_tmemory.core.config import parse_config
+
+    raw = {
+        "enable_vector_search": True,
+        "vector_retrieval": {
+            "embedding_source": legacy_source,
+            "standalone_embedding": {
+                "embedding_api_key": "legacy-key",
+                "embedding_model": "legacy-model",
+            },
+            "local_embedding": {"local_embedding_path": "data/custom-bge"},
+        },
+    }
+    with caplog.at_level(logging.WARNING, logger="astrbot"):
+        cfg = parse_config(raw)
+
+    assert cfg.embedding_source == "provider"
+    # 旧值仍完整保留在 raw config（不丢值、不报错）
+    assert raw["vector_retrieval"]["embedding_source"] == legacy_source
+    assert raw["vector_retrieval"]["standalone_embedding"]["embedding_api_key"] == "legacy-key"
+    assert raw["vector_retrieval"]["local_embedding"]["local_embedding_path"] == "data/custom-bge"
+    assert cfg.embed_api_key == "legacy-key"
+    assert cfg.embed_model_id == "legacy-model"
+    assert cfg.local_embedding_path == "data/custom-bge"
+    assert any(
+        "embedding_source" in record.getMessage() and legacy_source in record.getMessage()
+        for record in caplog.records
+    )
 
 
 def test_deprecated_items_are_invisible():

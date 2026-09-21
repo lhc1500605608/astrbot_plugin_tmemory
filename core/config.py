@@ -48,7 +48,7 @@ class PluginConfig:
     
     # Vector
     enable_vector_search: bool = False
-    embedding_source: str = "provider"  # provider | standalone | local（默认 provider 优先）
+    embedding_source: str = "provider"  # 收敛为 provider；旧值仅告警不改行为
     embedding_provider_id: str = ""     # AstrBot Embedding Provider ID（留空自动选）
     embed_provider_id: str = ""
     embed_model_id: str = ""
@@ -346,9 +346,23 @@ def parse_config(raw_config: dict) -> PluginConfig:
             vr_merged[key] = raw_config.get(key)
 
     c.enable_vector_search = _safe_bool(vr_merged.get("enable_vector_search", False), False, label="enable_vector_search")
-    c.embedding_source = str(vr_merged.get("embedding_source", "provider") or "provider").strip().lower()
-    if c.embedding_source not in {"provider", "standalone", "local"}:
-        c.embedding_source = "provider"
+    # embedding 收敛为 AstrBot Provider 路径：旧值 standalone/local 不再生效，
+    # 仅记录一条 warning（不报错、不丢值——旧键仍保留在 raw config / schema 中）。
+    _raw_embedding_source = str(
+        vr_merged.get("embedding_source", "provider") or "provider"
+    ).strip().lower()
+    if _raw_embedding_source in {"standalone", "local"}:
+        logger.warning(
+            "[tmemory] config embedding_source=%s 已废弃并收敛为 provider；"
+            "请改用 vector_retrieval.embedding_provider_id 选择 AstrBot Embedding Provider",
+            _raw_embedding_source,
+        )
+    elif _raw_embedding_source != "provider":
+        logger.warning(
+            "[tmemory] config embedding_source invalid (%r), using provider",
+            _raw_embedding_source,
+        )
+    c.embedding_source = "provider"
     c.embedding_provider_id = str(vr_merged.get("embedding_provider_id", "")).strip()
     c.embed_provider_id = str(vr_merged.get("embedding_provider", "")).strip()
     c.embed_model_id = str(vr_merged.get("embedding_model", "")).strip()

@@ -77,11 +77,14 @@ def test_route_table_covers_every_legacy_capability(bridge_module):
 
     assert legacy_sigs <= bridge_without_session
     # 唯一新增：bridge SDK 只有 apiGet/apiPost，配置更新需额外暴露 POST；
-    # B6 数据集导入/导出为新增 API（legacy 无对应能力）。
+    # B6 数据集导入/导出为新增 API（legacy 无对应能力）；
+    # TMEAAA-467 Embedding Provider 枚举/选择为新增 bridge（SDK 无法直连核心 API）。
     assert bridge_without_session - legacy_sigs == {
         ("POST", "/config"),
         ("POST", "/export"),
         ("POST", "/import"),
+        ("GET", "/embedding/providers"),
+        ("POST", "/embedding/provider"),
     }
     assert ("GET", "/session") in bridge_sigs
     assert ("POST", "/login") not in bridge_sigs
@@ -404,6 +407,116 @@ def test_test_conversation_contract(bridge_module, plugin):
         )
     )
     assert good_status == 200 and good["ok"] is True
+
+
+# ── Embedding Provider bridge（TMEAAA-467）─────────────────────────────────
+
+
+class _FakeEmbeddingProvider:
+    def __init__(self, provider_id, dim):
+        self.model_name = f"model-{provider_id}"
+        self.provider_config = {"id": provider_id}
+        self._dim = dim
+
+    async def get_embedding(self, text):
+        return [0.0] * self._dim
+
+    async def get_embeddings(self, texts):
+        return [[0.0] * self._dim for _ in texts]
+
+    def get_dim(self):
+        return self._dim
+
+
+class _FakeProviderManager:
+    def __init__(self, providers=()):
+        self.embedding_provider_insts = list(providers)
+        self.rerank_provider_insts = []
+        self.inst_map = {p.provider_config["id"]: p for p in providers}
+
+
+class _FakeProviderContext:
+    def __init__(self, manager):
+        self.provider_manager = manager
+
+
+def test_embedding_providers_frozen_contract(bridge_module, plugin):
+    bridge = bridge_module.PluginPagesBridge(plugin)
+    payload, status = run(bridge.embedding_providers(FakeRequest()))
+
+    assert status == 200
+    assert set(payload) == {
+        "enabled",
+        "configured_provider_id",
+        "active_source",
+        "active_provider_id",
+        "active_model",
+        "active_dim",
+        "fallback_reason",
+        "providers",
+    }
+    assert payload["active_source"] in {"provider", "none"}
+    assert payload["providers"] == []
+
+
+def test_embedding_providers_lists_context_providers(bridge_module, plugin):
+    plugin.context = _FakeProviderContext(
+        _FakeProviderManager(
+            [_FakeEmbeddingProvider("emb-1", 8), _FakeEmbeddingProvider("emb-2", 16)]
+        )
+    )
+    bridge = bridge_module.PluginPagesBridge(plugin)
+    payload, status = run(bridge.embedding_providers(FakeRequest()))
+
+    assert status == 200
+    assert payload["providers"] == [
+        {"id": "emb-1", "model": "model-emb-1", "dim": 8},
+        {"id": "emb-2", "model": "model-emb-2", "dim": 16},
+    ]
+
+
+def test_embedding_provider_set_persists_selection(bridge_module, plugin):
+    plugin.context = _FakeProviderContext(
+        _FakeProviderManager([_FakeEmbeddingProvider("emb-1", 8), _FakeEmbeddingProvider("emb-2", 16)])
+    )
+    bridge = bridge_module.PluginPagesBridge(plugin)
+
+    payload, status = run(
+        bridge.embedding_provider_set(FakeRequest(json_body={"provider_id": "emb-2"}))
+    )
+
+    assert status == 200 and payload["ok"] is True
+    assert payload["configured_provider_id"] == "emb-2"
+    assert plugin.config["vector_retrieval"]["embedding_provider_id"] == "emb-2"
+    assert plugin._cfg.embedding_provider_id == "emb-2"
+
+
+def test_embedding_provider_set_empty_means_auto(bridge_module, plugin):
+    plugin.context = _FakeProviderContext(
+        _FakeProviderManager([_FakeEmbeddingProvider("emb-1", 8)])
+    )
+    bridge = bridge_module.PluginPagesBridge(plugin)
+
+    payload, status = run(
+        bridge.embedding_provider_set(FakeRequest(json_body={"provider_id": ""}))
+    )
+
+    assert status == 200 and payload["ok"] is True
+    assert plugin.config["vector_retrieval"]["embedding_provider_id"] == ""
+
+
+def test_embedding_provider_set_rejects_unknown_id(bridge_module, plugin):
+    plugin.context = _FakeProviderContext(
+        _FakeProviderManager([_FakeEmbeddingProvider("emb-1", 8)])
+    )
+    bridge = bridge_module.PluginPagesBridge(plugin)
+
+    payload, status = run(
+        bridge.embedding_provider_set(FakeRequest(json_body={"provider_id": "nope"}))
+    )
+
+    assert status == 400 and "error" in payload
+    assert "vector_retrieval" not in plugin.config
 
 
 # ── legacy 回滚开关 ─────────────────────────────────────────────────────────

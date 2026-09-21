@@ -1,10 +1,10 @@
 """TMEAAA-380 (T1/B1) — AstrBot Provider embedding/rerank 接入测试。
 
 覆盖：
-- adapters/provider.py 能力探测与 Provider 解析（自动 / 指定 id / 缺失）
+- adapters/provider.py 能力探测、Provider 解析（自动 / 指定 id / 缺失）、枚举
 - Provider 适配器（embed_text / embed_batch / dim / rerank 归一化）
-- VectorManager provider 优先、缺失/异常回退 standalone、standalone 强制
-- core/vector.embed_text provider 失败回退、维度校验
+- VectorManager provider-only（旧 standalone/local 配置被忽略）
+- core/vector.embed_text provider 失败返回 None、维度校验
 - core/vector.apply_provider_dim_change 维度变更 → 缓存失效 + 重建
 - core/vector.rerank_results provider 优先
 
@@ -162,6 +162,35 @@ def test_resolve_embedding_provider_missing_returns_none(provider_port):
     assert provider_port.resolve_embedding_provider(FakeContext(FakeManager())) is None
 
 
+def test_list_embedding_providers_enumerates(provider_port):
+    p1 = FakeEmbeddingProvider("emb-1", dim=4)
+    p2 = FakeEmbeddingProvider("emb-2", dim=8)
+    ctx = FakeContext(
+        FakeManager(embeddings=[p1, p2], reranks=[FakeRerankProvider("rr-1")])
+    )
+    assert provider_port.list_embedding_providers(ctx) == [
+        {"id": "emb-1", "model": "fake-embed-model", "dim": 4},
+        {"id": "emb-2", "model": "fake-embed-model", "dim": 8},
+    ]
+
+
+def test_list_embedding_providers_capability_missing_returns_empty(provider_port):
+    assert provider_port.list_embedding_providers(None) == []
+    assert provider_port.list_embedding_providers(FakeContext(FakeManager())) == []
+    assert provider_port.list_embedding_providers(object()) == []
+
+
+def test_list_embedding_providers_broken_dim_is_zero(provider_port):
+    class BrokenDimProvider(FakeEmbeddingProvider):
+        def get_dim(self):
+            raise RuntimeError("dim unavailable")
+
+    ctx = FakeContext(FakeManager(embeddings=[BrokenDimProvider("emb-x", dim=8)]))
+    assert provider_port.list_embedding_providers(ctx) == [
+        {"id": "emb-x", "model": "fake-embed-model", "dim": 0}
+    ]
+
+
 @pytest.mark.asyncio
 async def test_embedding_adapter_contract(provider_port):
     adapter = provider_port.ProviderEmbeddingAdapter(FakeEmbeddingProvider(dim=3))
@@ -204,37 +233,40 @@ async def test_vector_manager_prefers_provider(vm_module):
 
 
 @pytest.mark.asyncio
-async def test_vector_manager_falls_back_to_standalone(vm_module):
+async def test_vector_manager_provider_only_ignores_standalone_config(vm_module):
+    """embedding 收敛为 provider-only：不再回退 standalone/local 配置。"""
     cfg = {
-        "embedding_source": "provider",
+        "embedding_source": "standalone",
         "embedding_provider": "openai",
         "embedding_api_key": "test-key",
         "embedding_model": "text-embedding-3-small",
     }
     vm = vm_module.VectorManager(":memory:", cfg, context=None)
     await vm.initialize()
-    assert vm.source == "standalone"
+    assert vm.embedding_provider is None
+    assert vm.source == "none"
+    assert vm.embedding_source == "provider"
     assert vm.fallback_reason
-    from astrbot_plugin_tmemory.embeddingProvider import OpenAIEmbeddingProvider
-
-    assert isinstance(vm.embedding_provider, OpenAIEmbeddingProvider)
+    assert vm.status()["active_source"] == "none"
 
 
 @pytest.mark.asyncio
-async def test_vector_manager_standalone_mode_skips_provider(vm_module):
+async def test_vector_manager_legacy_local_source_still_uses_provider(vm_module):
+    """旧配置 embedding_source=local 不再启用本地模型，仍走 Provider。"""
     ctx = FakeContext(FakeManager(embeddings=[FakeEmbeddingProvider("emb-1")]))
     cfg = {
-        "embedding_source": "standalone",
-        "embedding_provider": "openai",
-        "embedding_api_key": "test-key",
+        "embedding_source": "local",
+        "local_embedding_path": "/nonexistent/bge-model",
     }
     vm = vm_module.VectorManager(":memory:", cfg, context=ctx)
     await vm.initialize()
-    assert vm.source == "standalone"
+    assert vm.embedding_source == "provider"
+    assert vm.source == "provider"
+    assert vm.provider_id == "emb-1"
 
 
 @pytest.mark.asyncio
-async def test_vector_manager_missing_provider_no_standalone_is_none(vm_module):
+async def test_vector_manager_missing_provider_is_none(vm_module):
     vm = vm_module.VectorManager(":memory:", {"embedding_source": "provider"}, context=None)
     await vm.initialize()
     assert vm.embedding_provider is None
@@ -252,6 +284,92 @@ async def test_vector_manager_rerank_provider(vm_module):
     assert vm.status()["rerank_source"] == "provider"
 
 
+# ── TMEAAA-472：冷启动 provider 晚于插件 initialize 的补解析 ──────────────
+
+
+@pytest.mark.asyncio
+async def test_vector_manager_refresh_recovers_after_provider_ready(vm_module):
+    """init 时 provider 列表为空、就绪后 refresh 恢复 provider。"""
+    manager = FakeManager()  # AstrBot 冷启动：provider 尚未实例化
+    ctx = FakeContext(manager)
+    vm = vm_module.VectorManager(
+        ":memory:", {"embedding_provider_id": "emb-1"}, context=ctx
+    )
+    await vm.initialize()
+    assert vm.source == "none"
+    assert vm.status()["active_source"] == "none"
+    assert vm.fallback_reason
+
+    provider = FakeEmbeddingProvider("emb-1", dim=1024)
+    manager.embedding_provider_insts = [provider]
+    manager.inst_map = {"emb-1": provider}
+
+    await vm.refresh()
+
+    assert vm.source == "provider"
+    assert vm.provider_id == "emb-1"
+    assert vm.provider_dim == 1024
+    assert vm.status()["active_source"] == "provider"
+    assert vm.fallback_reason == ""
+
+
+@pytest.mark.asyncio
+async def test_embed_text_lazily_recovers_provider_after_ready(plugin, vector_port, vm_module):
+    """provider 缺失时首次 embed 惰性补解析（不依赖 on_astrbot_loaded 时序）。"""
+    manager = FakeManager()
+    ctx = FakeContext(manager)
+    vm = vm_module.VectorManager(
+        ":memory:", {"embedding_provider_id": "emb-1"}, context=ctx
+    )
+    await vm.initialize()
+    plugin._vector_manager = vm
+    plugin._cfg.embed_dim = 1024
+
+    provider = FakeEmbeddingProvider("emb-1", dim=1024)
+    manager.embedding_provider_insts = [provider]
+    manager.inst_map = {"emb-1": provider}
+
+    vec = await vector_port.embed_text(plugin, "hello")
+    assert vec is not None and len(vec) == 1024
+    assert vm.source == "provider"
+
+
+@pytest.mark.asyncio
+async def test_resume_vector_provider_after_astrbot_loaded(plugin, vm_module):
+    """OnAstrBotLoadedEvent 补解析：重启后无需再保存即可 active_source=provider。"""
+    manager = FakeManager()
+    ctx = FakeContext(manager)
+    plugin._cfg.enable_vector_search = True
+    plugin._cfg.embedding_provider_id = "emb-1"
+    plugin._cfg.embed_dim = 1024
+    plugin.context = ctx
+    vm = vm_module.VectorManager(
+        plugin.db_path, {"embedding_provider_id": "emb-1"}, context=ctx
+    )
+    await vm.initialize()
+    plugin._vector_manager = vm
+    assert vm.source == "none"
+
+    provider = FakeEmbeddingProvider("emb-1", dim=1024)
+    manager.embedding_provider_insts = [provider]
+    manager.inst_map = {"emb-1": provider}
+
+    await plugin._resume_vector_provider()
+
+    assert vm.source == "provider"
+    assert vm.provider_id == "emb-1"
+    assert vm.provider_dim == 1024
+    assert vm.status()["active_source"] == "provider"
+
+
+@pytest.mark.asyncio
+async def test_resume_vector_provider_noop_when_vector_search_disabled(plugin):
+    plugin._cfg.enable_vector_search = False
+    plugin._vector_manager = None
+    await plugin._resume_vector_provider()
+    assert plugin._vector_manager is None
+
+
 # ── core/vector.py ───────────────────────────────────────────────────────
 
 
@@ -266,9 +384,9 @@ async def test_embed_text_provider_success(plugin, vector_port):
 
 
 @pytest.mark.asyncio
-async def test_embed_text_provider_failure_falls_back(plugin, vector_port):
+async def test_embed_text_provider_failure_returns_none(plugin, vector_port):
     plugin._vec_available = False
-    plugin._cfg.embed_base_url = ""
+    plugin._cfg.embed_base_url = "https://example.invalid/v1"
     plugin._vector_manager = FakeVM(provider=FailingEmbeddingProvider())
     vec = await vector_port.embed_text(plugin, "hello")
     assert vec is None

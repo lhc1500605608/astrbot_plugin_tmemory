@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v0.12.0] - 2026-09-21
+
+Embedding 配置收敛为仅 provider 路径，新增 Embedding Provider 下拉选择，修复冷启动 provider 不生效（TMEAAA-465/472）。
+无破坏性变更，`embedding_source` 固定为 `provider`，旧 standalone/local 配置保留（invisible）不丢值。
+
+### Changed
+
+- **Embedding 配置收敛**：`embedding_source` 固定为 `provider`，standalone/local 选项改为 `invisible`
+  保留旧值（不丢配置、不报错），删除 `embeddingProvider.py`（`core/config.py`、`vector_manager.py`）。
+- **新增 Embedding Provider API**（`web/bridge.py`）：`GET /embedding/providers` 列出可用 provider，
+  `POST /embedding/provider` 切换当前 provider；记忆面板新增 Embedding Provider 下拉（`pages/memory/index.html`）。
+
+### Fixed
+
+- **冷启动 provider 不生效**（TMEAAA-472）：`main.py` 新增 `@filter.on_astrbot_loaded` →
+  `core/lifecycle.py::_resume_vector_provider()`，插件先于 provider 加载时延迟恢复所选
+  embedding provider，修复冷启动后 fallback 到 standalone 的问题。
+
 ## [v0.11.5] - 2026-09-21
 
 修复 [严重] 缺陷：蒸馏把助手说过的话误记为用户记忆，污染用户画像（TMEAAA-457）。

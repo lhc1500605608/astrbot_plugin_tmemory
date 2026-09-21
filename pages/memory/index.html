@@ -1654,33 +1654,34 @@ async function loadEmbeddingInfo() {
   var el = document.getElementById('embeddingContent');
   el.innerHTML = '<p style="color:var(--text2)">加载中...</p>';
   var results = await Promise.all([
-    api('/config?keys=vector_retrieval'),
+    api('/embedding/providers'),
     api('/capabilities')
   ]);
-  var cfg = results[0];
+  var ep = results[0];
   var caps = results[1];
-  if (!cfg || !cfg.vector_retrieval) {
-    el.innerHTML = '<p style="color:var(--danger)">加载配置失败</p>';
+  if (!ep) {
+    el.innerHTML = '<p style="color:var(--danger)">加载 Embedding 配置失败</p>';
     return;
   }
-  var vr = cfg.vector_retrieval;
   var capsObj = caps && caps.capabilities || {};
   var warnings = caps && caps.warnings || [];
   var runtime = caps && caps.runtime || {};
+  var providers = ep.providers || [];
 
-  var isEnabled = !!vr.enable_vector_search;
-  var sourceMap = { provider: 'AstrBot Provider', standalone: '独立配置', local: '本地 ONNX' };
-  var sourceLabel = sourceMap[vr.embedding_source] || vr.embedding_source;
-  var providerMap = { volc: '火山方舟', openai: 'OpenAI / 兼容' };
-  var providerLabel = providerMap[vr.embedding_provider] || vr.embedding_provider;
-
-  var statusBadge = isEnabled
+  var statusBadge = ep.enabled
     ? '<span class="embed-badge embed-badge-ok">✓ 已启用</span>'
     : '<span class="embed-badge embed-badge-off">○ 未启用</span>';
 
+  var providerDisplay = ep.active_provider_id ? escHtml(ep.active_provider_id) : '自动选择';
+  var modelDisplay = ep.active_model ? escHtml(ep.active_model) : '-';
+  var dimDisplay = ep.active_dim != null ? ep.active_dim : '-';
+
   var fallbackInfo = '';
+  if (ep.fallback_reason) {
+    fallbackInfo += '<div style="font-size:12px;color:var(--warn);margin-top:8px">⚠ 回退原因: ' + escHtml(ep.fallback_reason) + '</div>';
+  }
   if (runtime.extra_user_temp_fallback_count > 0) {
-    fallbackInfo += '<div style="font-size:12px;color:var(--warn);margin-top:8px">⚠ extra_user_temp 回退次数: ' + runtime.extra_user_temp_fallback_count + '</div>';
+    fallbackInfo += '<div style="font-size:12px;color:var(--warn);margin-top:4px">⚠ extra_user_temp 回退次数: ' + runtime.extra_user_temp_fallback_count + '</div>';
   }
   if (runtime.persona_private_fallback_count > 0) {
     fallbackInfo += '<div style="font-size:12px;color:var(--warn);margin-top:4px">⚠ persona_private 回退次数: ' + runtime.persona_private_fallback_count + '</div>';
@@ -1689,25 +1690,33 @@ async function loadEmbeddingInfo() {
     fallbackInfo += warnings.map(function(w) { return '<div style="font-size:12px;color:var(--warn);margin-top:4px">⚠ ' + escHtml(w) + '</div>'; }).join('');
   }
 
-  var dimInfo = '';
-  if (vr.vector_dim) {
-    dimInfo = '<div class="embed-row"><span class="embed-key">向量维度</span><span class="embed-val">' + vr.vector_dim + '</span></div>';
+  var selectHtml;
+  if (providers.length === 0) {
+    selectHtml = '<div style="font-size:12px;color:var(--warn);margin-top:8px">未检测到 AstrBot Embedding Provider，请先在 AstrBot「模型」页添加 embedding 类型的 Provider</div>';
+  } else {
+    var options = '<option value="">（自动选择第一个可用 Provider）</option>';
+    for (var i = 0; i < providers.length; i++) {
+      var p = providers[i];
+      var selected = ep.configured_provider_id === p.id ? ' selected' : '';
+      options += '<option value="' + escHtml(p.id) + '"' + selected + '>' + escHtml(p.model) + '（' + escHtml(p.id) + '）</option>';
+    }
+    selectHtml =
+      '<div style="margin-top:10px;display:flex;align-items:center;gap:8px">' +
+        '<select id="embeddingProviderSelect" style="flex:1;padding:4px 8px;border-radius:4px;border:1px solid var(--border);background:var(--bg);color:var(--text)">' +
+          options +
+        '</select>' +
+        '<button id="embeddingProviderSaveBtn" onclick="saveEmbeddingProvider()" style="padding:4px 12px;border-radius:4px;border:1px solid var(--accent);background:var(--accent);color:#fff;cursor:pointer">保存</button>' +
+      '</div>';
   }
 
   el.innerHTML =
     '<div class="embed-card">' +
-      '<h3>向量检索状态 ' + statusBadge + '</h3>' +
-      '<div class="embed-row"><span class="embed-key">Embedding 来源</span><span class="embed-val">' + escHtml(sourceLabel) + '</span></div>' +
-      (vr.embedding_source === 'provider' ? '<div class="embed-row"><span class="embed-key">Provider ID</span><span class="embed-val">' + escHtml(vr.embedding_provider_id || '(自动选择)') + '</span></div>' : '') +
-      (vr.embedding_source === 'standalone' ? '<div class="embed-row"><span class="embed-key">API 提供商</span><span class="embed-val">' + escHtml(providerLabel) + '</span></div>' : '') +
-      (vr.embedding_source === 'standalone' ? '<div class="embed-row"><span class="embed-key">模型名称</span><span class="embed-val">' + escHtml(vr.embedding_model) + '</span></div>' : '') +
-      (vr.embedding_source === 'standalone' && vr.embedding_base_url ? '<div class="embed-row"><span class="embed-key">API Base URL</span><span class="embed-val">' + escHtml(vr.embedding_base_url) + '</span></div>' : '') +
-      (vr.embedding_source === 'standalone' ? '<div class="embed-row"><span class="embed-key">API Key</span><span class="embed-val">' + (vr.embedding_api_key ? '••••••••' : '<span style="color:var(--danger)">未设置</span>') + '</span></div>' : '') +
-      (vr.embedding_source === 'local' ? '<div class="embed-row"><span class="embed-key">模型目录</span><span class="embed-val">' + escHtml(vr.local_embedding_path) + '</span></div>' : '') +
-      (vr.embedding_source === 'local' ? '<div class="embed-row"><span class="embed-key">ONNX 文件</span><span class="embed-val">' + escHtml(vr.local_embedding_model_file) + '</span></div>' : '') +
-      (vr.embedding_source === 'local' ? '<div class="embed-row"><span class="embed-key">最大 Token</span><span class="embed-val">' + vr.local_embedding_max_length + '</span></div>' : '') +
-      dimInfo +
-      '<div class="embed-row"><span class="embed-key">维度变更自动重建</span><span class="embed-val">' + (vr.auto_rebuild_on_dim_change ? '✓ 启用' : '✗ 关闭') + '</span></div>' +
+      '<h3>Embedding Provider ' + statusBadge + '</h3>' +
+      '<div class="embed-row"><span class="embed-key">当前生效来源</span><span class="embed-val">' + escHtml(ep.active_source || '-') + '</span></div>' +
+      '<div class="embed-row"><span class="embed-key">Provider</span><span class="embed-val">' + providerDisplay + '</span></div>' +
+      '<div class="embed-row"><span class="embed-key">模型</span><span class="embed-val">' + modelDisplay + '</span></div>' +
+      '<div class="embed-row"><span class="embed-key">维度</span><span class="embed-val">' + dimDisplay + '</span></div>' +
+      selectHtml +
       fallbackInfo +
     '</div>' +
     '<div class="embed-card">' +
@@ -1717,6 +1726,21 @@ async function loadEmbeddingInfo() {
       '<div class="embed-row"><span class="embed-key">sqlite-vec</span><span class="embed-val">' + (capsObj.sqlite_vec ? '<span style="color:var(--accent2)">✓ 已加载</span>' : '<span style="color:var(--text2)">未加载</span>') + '</span></div>' +
       '<div class="embed-row"><span class="embed-key">FTS5 全文检索</span><span class="embed-val">' + (capsObj.fts5 ? '<span style="color:var(--accent2)">✓ 可用</span>' : '<span style="color:var(--text2)">不可用</span>') + '</span></div>' +
     '</div>';
+}
+
+async function saveEmbeddingProvider() {
+  var sel = document.getElementById('embeddingProviderSelect');
+  if (!sel) return;
+  var btn = document.getElementById('embeddingProviderSaveBtn');
+  if (btn) { btn.disabled = true; btn.textContent = '保存中...'; }
+  var res = await api('/embedding/provider', { method: 'POST', body: JSON.stringify({ provider_id: sel.value }) });
+  if (res && res.ok) {
+    toast('Embedding Provider 已保存', 'success');
+    await loadEmbeddingInfo();
+  } else {
+    toast('保存失败: ' + (res && (res.error || res.message) || 'unknown'), 'error');
+    if (btn) { btn.disabled = false; btn.textContent = '保存'; }
+  }
 }
 
 /* ── cost.js ──────────────────────────────────────────────────────── */
