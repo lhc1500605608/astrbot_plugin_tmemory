@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v0.12.2] - 2026-09-21
+
+配置/UI 文案整顿（TMEAAA-487）：去除配置页与 README 中的内部术语与版本行为史，精简过长的 `description`/`hint`。
+仅文案与测试变更，不改键名/默认值/行为；无配置迁移，直接替换安装即可。
+
+### Changed
+
+- `_conf_schema.json`：清理配置页 `description`/`hint` 中的内部术语（阶段/管线/profile items 等）与版本行为史；所有可见 `hint` 精简为一句；清除 standalone/local embedding 残留文案（键保留以兼容旧值，废弃本地路径默认值置空）。
+- `README.md`：移除版本行为史与内部实现术语（`on_llm_request`、`profile_items`、worker、Phase 等）。
+- 测试：修正品牌 logo 资产尺寸断言（logo 允许高分辨率，仅要求正方形）。
+
 ## [v0.12.1] - 2026-09-21
 
 SQLite 运行环境能力探测与回退（TMEAAA-474）、面板/日志清晰化、维度调和持久化与重建安全性（TMEAAA-478）。

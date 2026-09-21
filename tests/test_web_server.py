@@ -270,8 +270,13 @@ def test_dashboard_memoryforge_brand_assets_are_consistent_and_lightweight():
     hero_icon = icons_dir / "tmemory-icon.png"
     assert hero_icon.stat().st_size <= 200_000
 
+    # 品牌 logo 允许任意分辨率（README/插件市场展示用），但必须是正方形
+    logo = Path("logo.png")
+    assert logo.exists(), "missing brand asset: logo.png"
+    logo_w, logo_h = _png_size(logo)
+    assert logo_w == logo_h, "品牌 logo 应为正方形"
+
     expected_assets = {
-        Path("logo.png"): (192, 192),
         icons_dir / "tmemory-icon.png": (192, 192),
         icons_dir / "favicon-16.png": (16, 16),
         icons_dir / "favicon-32.png": (32, 32),
