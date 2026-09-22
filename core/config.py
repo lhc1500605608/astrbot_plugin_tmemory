@@ -5,6 +5,9 @@ from dataclasses import dataclass, field
 
 logger = logging.getLogger("astrbot")
 
+# 代码版本常量：与 metadata.yaml / README「当前版本」保持一致（TMEAAA-522）。
+PLUGIN_VERSION = "v0.14.0"
+
 @dataclass
 class PluginConfig:
     # Base
