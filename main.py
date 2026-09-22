@@ -130,6 +130,8 @@ class TMemoryPlugin(
         self._embed_last_error = ""
         self._vec_query_count = 0
         self._vec_hit_count = 0
+        self._embed_cache_hit_count = 0
+        self._embed_cache_miss_count = 0
         self._embed_semaphore = None
         self._http_session = None
         self._distill_skipped_rows: int = 0

@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v0.13.1] - 2026-09-22
+
+修复嵌入缓存计数属性未初始化导致的 `AttributeError`（TMEAAA-517）。
+无配置迁移，直接替换安装即可。
+
+### Fixed
+
+- **嵌入缓存计数属性未初始化**（TMEAAA-517）：`_embed_cache_hit_count`/`_embed_cache_miss_count` 原先仅在 `apply_safe_defaults` 初始化，插件重载或热路径（`on_llm_request` 语义召回）先于 `initialize` 时抛 `AttributeError`，被外层捕获后记录为 `query embedding cache lookup failed`。现于构造函数中初始化，且缓存路径改为 `getattr` 安全自增，彻底消除该竞态。
+
 ## [v0.13.0] - 2026-09-22
 
 蒸馏失败默认不降级（TMEAAA-513），记忆列表新增「重新蒸馏」按钮（TMEAAA-516）。
