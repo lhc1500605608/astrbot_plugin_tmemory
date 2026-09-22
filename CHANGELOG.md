@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v0.14.1] - 2026-09-23
+
+修复「添加/编辑记忆」弹窗「类型」下拉显示英文裸值的问题（TMEAAA-535）。无配置迁移，直接替换安装即可。
+
+### Fixed
+
+- **记忆类型下拉显示不一致**（TMEAAA-535）：编辑弹窗的类型选项原先直接显示内部英文值（`preference`/`fact`/`task`/`restriction`），现与同页画像编辑弹窗统一为「英文值（中文说明）」（如 `preference（偏好）`），选项 `value` 不变、行为不变。
+
 ## [v0.13.2] - 2026-09-22
 
 修复嵌入 Provider 连接被外部关闭后无法自愈的问题（TMEAAA-519）。
