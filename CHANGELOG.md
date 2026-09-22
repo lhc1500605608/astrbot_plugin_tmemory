@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v0.13.0] - 2026-09-22
+
+蒸馏失败默认不降级（TMEAAA-513），记忆列表新增「重新蒸馏」按钮（TMEAAA-516）。
+无配置迁移，直接替换安装即可。
+
+### Added
+
+- **蒸馏失败不降级**（TMEAAA-513）：蒸馏失败时默认保留原始缓存，不再自动降级为写入记忆；新增配置 `rule_fallback_on_distill_fail` 开启可选的规则回退（默认关闭）。
+- **记忆列表「重新蒸馏」按钮**（TMEAAA-516）：WebUI 记忆列表每条显示重新蒸馏按钮，点击可对单条记忆重新触发蒸馏。
+
 ## [v0.12.3] - 2026-09-22
 
 修复安全拦截误拦正常记忆（TMEAAA-510），并让插件重载后的向量嵌入自动恢复。
