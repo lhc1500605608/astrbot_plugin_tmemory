@@ -95,6 +95,28 @@ class FailingEmbeddingProvider:
         raise RuntimeError("upstream provider down")
 
 
+class ClosedClientEmbeddingProvider:
+    """模拟插件重载后 httpx client 已关闭的 provider。"""
+
+    async def embed_text(self, text):
+        raise RuntimeError("Cannot send a request, as the client has been closed.")
+
+
+class RecoveringVM(FakeVM):
+    """TMEAAA-510：force refresh 后换上新 provider 的鸭子类型 VectorManager。"""
+
+    def __init__(self, provider, recovered_provider, **kwargs):
+        super().__init__(provider=provider, **kwargs)
+        self._recovered = recovered_provider
+        self.refresh_calls = []
+
+    async def refresh(self, min_interval_sec=0.0, force=False):
+        self.refresh_calls.append(force)
+        if force:
+            self.embedding_provider = self._recovered
+        return self.embedding_provider is not None
+
+
 @pytest.fixture()
 def provider_port(plugin_module):
     from astrbot_plugin_tmemory.adapters import provider
@@ -314,6 +336,26 @@ async def test_vector_manager_refresh_recovers_after_provider_ready(vm_module):
 
 
 @pytest.mark.asyncio
+async def test_vector_manager_force_refresh_replaces_stale_provider(vm_module):
+    """TMEAAA-510：force=True 丢弃已关闭的旧实例，重新解析到新 provider。"""
+    old = FakeEmbeddingProvider("emb-1", dim=8)
+    ctx = FakeContext(FakeManager(embeddings=[old]))
+    vm = vm_module.VectorManager(
+        ":memory:", {"embedding_provider_id": "emb-1"}, context=ctx
+    )
+    await vm.initialize()
+    assert vm.embedding_provider is not None
+    assert vm.embedding_provider._provider is old
+
+    new = FakeEmbeddingProvider("emb-1", dim=8)
+    ctx.provider_manager.embedding_provider_insts = [new]
+    ctx.provider_manager.inst_map = {"emb-1": new}
+
+    assert await vm.refresh(force=True) is True
+    assert vm.embedding_provider._provider is new
+
+
+@pytest.mark.asyncio
 async def test_embed_text_lazily_recovers_provider_after_ready(plugin, vector_port, vm_module):
     """provider 缺失时首次 embed 惰性补解析（不依赖 on_astrbot_loaded 时序）。"""
     manager = FakeManager()
@@ -399,6 +441,61 @@ async def test_embed_text_provider_dim_mismatch_rejected(plugin, vector_port):
     vec = await vector_port.embed_text(plugin, "hello")
     assert vec is None
     assert plugin._embed_fail_count == 1
+
+
+# ── TMEAAA-510：插件重载后 provider client 已关闭 → 强制刷新 + 重试一次 ──────
+
+
+@pytest.mark.asyncio
+async def test_embed_text_refreshes_and_retries_after_client_closed(plugin, vector_port):
+    plugin._cfg.embed_dim = 1024
+    vm = RecoveringVM(
+        provider=ClosedClientEmbeddingProvider(),
+        recovered_provider=embedding_adapter(dim=1024),
+        provider_dim=1024,
+    )
+    plugin._vector_manager = vm
+
+    vec = await vector_port.embed_text(plugin, "hello")
+
+    assert vec is not None and len(vec) == 1024
+    assert vm.refresh_calls == [True]
+    assert plugin._embed_provider_fail_count == 0
+    assert plugin._embed_ok_count == 1
+
+
+@pytest.mark.asyncio
+async def test_embed_text_returns_none_when_retry_also_fails(plugin, vector_port):
+    plugin._cfg.embed_dim = 1024
+    vm = RecoveringVM(
+        provider=ClosedClientEmbeddingProvider(),
+        recovered_provider=ClosedClientEmbeddingProvider(),
+        provider_dim=1024,
+    )
+    plugin._vector_manager = vm
+
+    vec = await vector_port.embed_text(plugin, "hello")
+
+    assert vec is None
+    assert vm.refresh_calls == [True]
+    assert plugin._embed_provider_fail_count == 1
+
+
+@pytest.mark.asyncio
+async def test_embed_text_does_not_refresh_on_unrelated_error(plugin, vector_port):
+    plugin._cfg.embed_dim = 1024
+    vm = RecoveringVM(
+        provider=FailingEmbeddingProvider(),
+        recovered_provider=embedding_adapter(dim=1024),
+        provider_dim=1024,
+    )
+    plugin._vector_manager = vm
+
+    vec = await vector_port.embed_text(plugin, "hello")
+
+    assert vec is None
+    assert vm.refresh_calls == []
+    assert plugin._embed_provider_fail_count == 1
 
 
 @pytest.mark.asyncio

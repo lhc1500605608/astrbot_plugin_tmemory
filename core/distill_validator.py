@@ -22,8 +22,19 @@ JUNK_PATTERNS = [
     re.compile(r"^(用户说|用户问|用户发送|assistant|AI|助手)", re.IGNORECASE),
     re.compile(r"^.{0,5}$"),  # 太短
 ]
+# 真实凭据「值形态」：只匹配密钥/令牌本身，而不是 password/token/key 等裸词，
+# 否则「token 消耗」「token plan」「API key 轮换流程」等正常记忆会被误拦。
+CREDENTIAL_PATTERNS = [
+    re.compile(r"\b(?:sk|tp|abk)-[A-Za-z0-9_-]{16,}"),  # 常见 API Key 前缀
+    re.compile(r"\bBearer\s+[A-Za-z0-9._-]{16,}", re.IGNORECASE),
+    re.compile(
+        r"(?:api[_-]?key|apikey|secret[_-]?key|access[_-]?token|auth[_-]?token"
+        r"|password|passwd|密码|密钥)\s*(?:[:：=]|是|为)\s*\S{8,}",
+        re.IGNORECASE,
+    ),
+]
 UNSAFE_PATTERNS = [
-    re.compile(r"(password|passwd|密码|secret|token|api.?key|bearer)", re.IGNORECASE),
+    *CREDENTIAL_PATTERNS,
     re.compile(r"(杀|死|炸|毒|枪|赌博|色情|porn)", re.IGNORECASE),
     re.compile(
         r"(ignore.*(previous|above)|忽略.*(之前|以上)|system.?prompt|越狱|jailbreak)",
