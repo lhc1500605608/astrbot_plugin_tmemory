@@ -39,6 +39,8 @@ class VectorManager:
         self.fallback_reason: str = ""
         # 上次解析尝试时刻（monotonic）；0.0 表示允许立即再次尝试。
         self._last_resolve_ts: float = 0.0
+        # 兜底重建次数（client 被外部关闭后自愈，TMEAAA-519）。
+        self.rebuilt_count: int = 0
 
     async def initialize(self):
         """初始化 Embedding / Rerank 提供者"""
@@ -49,7 +51,10 @@ class VectorManager:
             self._last_resolve_ts = time.monotonic()
 
     async def refresh(
-        self, min_interval_sec: float = 0.0, force: bool = False
+        self,
+        min_interval_sec: float = 0.0,
+        force: bool = False,
+        exclude: Optional[set] = None,
     ) -> bool:
         """provider 就绪后补解析（幂等）；返回 embedding provider 是否可用。
 
@@ -60,6 +65,8 @@ class VectorManager:
         避免 provider 长期缺失时每次 embed 都重复探测并重复告警。
         ``force=True`` 时忽略节流并丢弃当前实例重新解析（TMEAAA-510：插件重载后
         旧 provider 的 httpx client 已关闭，必须重新拿到新实例）。
+        ``exclude`` 为重解析时需跳过的实例 id() 集合（TMEAAA-519：跳过刚被判定
+        已关闭的实例，避免再次解析到同一个失效对象）。
         """
         now = time.monotonic()
         if (
@@ -73,17 +80,50 @@ class VectorManager:
             if force:
                 self.embedding_provider = None
             self.fallback_reason = ""
-            await self._init_embedding_provider(self.config)
+            await self._init_embedding_provider(self.config, exclude=exclude)
         if self.rerank_provider is None:
             self._init_rerank_provider(self.config)
         return self.embedding_provider is not None
 
-    async def _init_embedding_provider(self, config: dict):
+    async def rebuild_embedding_provider(self, provider=None) -> bool:
+        """按原配置重建插件自有的 Embedding Provider（TMEAAA-519 兜底自愈）。
+
+        AstrBot 关闭 provider client 后不会从 ``embedding_provider_insts`` 移除
+        旧实例，重新解析只会拿到同一个已关闭实例；此时用原配置新建实例与 client。
+        ``provider`` 可显式传入刚失效的适配器（刷新后当前实例可能已被置空）。
+        """
+        current = provider if provider is not None else self.embedding_provider
+        raw = getattr(current, "_provider", None)
+        if raw is None:
+            return False
+        try:
+            rebuilt = await _adapters.provider.rebuild_embedding_provider(raw)
+        except Exception as e:
+            logger.warning("[VectorManager] embedding provider rebuild failed: %s", e)
+            return False
+        if rebuilt is None:
+            return False
+        self.embedding_provider = rebuilt
+        self.source = "provider"
+        self.fallback_reason = ""
+        self.provider_id = rebuilt.provider_id or self.provider_id
+        try:
+            dim = int(rebuilt.get_dim())
+        except Exception:
+            dim = 0
+        if dim > 0:
+            self.provider_dim = dim
+        self.rebuilt_count = getattr(self, "rebuilt_count", 0) + 1
+        return True
+
+    async def _init_embedding_provider(self, config: dict, exclude: Optional[set] = None):
         """初始化 Embedding 提供者：仅解析 AstrBot Provider，缺失则降级为 none。"""
         self.embedding_source = "provider"
         try:
             provider = _adapters.provider.resolve_embedding_provider(
-                self.context, str(config.get("embedding_provider_id", "") or "")
+                self.context,
+                str(config.get("embedding_provider_id", "") or ""),
+                exclude=exclude,
             )
         except Exception as e:  # 探测/解析绝不应阻断启动
             provider = None

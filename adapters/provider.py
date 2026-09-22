@@ -23,6 +23,7 @@ Provider 以 duck-typing 处理，便于在无 AstrBot 的单元测试环境中�
 
 from __future__ import annotations
 
+import inspect
 import logging
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Sequence
@@ -136,22 +137,78 @@ def _find_by_id(manager: Any, provider_id: str, predicate) -> Optional[Any]:
     return None
 
 
+def instance_is_closed(obj: Any) -> bool:
+    """尽力判断 provider 底层 httpx/asyncio 客户端是否已关闭。
+
+    AstrBot 在 terminate/reload 时关闭 provider 的 client（``is_closed``），
+    但不会把它从 ``embedding_provider_insts`` 移除，列表里会保留已关闭的
+    旧实例（TMEAAA-519）。检测不到客户端时返回 False（视为可用）。
+    """
+    if obj is None:
+        return False
+    seen = set()
+    current = obj
+    for _ in range(4):
+        if current is None or id(current) in seen:
+            break
+        seen.add(id(current))
+        try:
+            probe = getattr(current, "is_closed", None)
+            if callable(probe):
+                if bool(probe()):
+                    return True
+            elif isinstance(probe, bool) and probe:
+                return True
+            else:
+                # aiohttp.ClientSession 用 .closed 布尔属性。
+                flag = getattr(current, "closed", None)
+                if isinstance(flag, bool) and flag:
+                    return True
+        except Exception:
+            pass
+        try:
+            current = getattr(current, "client", None) or getattr(
+                current, "_client", None
+            )
+        except Exception:
+            break
+    return False
+
+
+def _pick_live(pool: List[Any]) -> Optional[Any]:
+    """在候选池中优先取未关闭实例；全关闭则退回第一个（保持旧语义）。"""
+    for candidate in pool:
+        if not instance_is_closed(candidate):
+            return candidate
+    return pool[0] if pool else None
+
+
 def _resolve(
     source: Any,
     provider_id: str,
     attr: str,
     predicate,
+    exclude: Optional[set] = None,
 ) -> Optional[Any]:
     manager = _get_manager(source)
     if manager is None:
         return None
-    candidates = _instances(manager, attr)
+    candidates = [
+        c
+        for c in _instances(manager, attr)
+        if predicate(c) and (exclude is None or id(c) not in exclude)
+    ]
     if provider_id:
         found = _find_by_id(manager, provider_id, predicate)
+        if found is not None and exclude is not None and id(found) in exclude:
+            found = None
+        matches = [c for c in candidates if provider_id_of(c) == provider_id]
+        if found is not None and instance_is_closed(found):
+            live = next((c for c in matches if not instance_is_closed(c)), None)
+            if live is not None:
+                found = live
         if found is None:
-            found = next(
-                (c for c in candidates if provider_id_of(c) == provider_id), None
-            )
+            found = _pick_live(matches)
         if found is None:
             logger.warning(
                 "[tmemory] AstrBot provider id=%s not found among %s",
@@ -160,9 +217,7 @@ def _resolve(
             )
             return None
         return found if predicate(found) else None
-    if candidates:
-        return candidates[0]
-    return None
+    return _pick_live(candidates)
 
 
 def provider_capabilities(source: Any) -> ProviderCapabilities:
@@ -190,9 +245,12 @@ class ProviderEmbeddingAdapter:
 
     source = SOURCE_PROVIDER
 
-    def __init__(self, provider: Any, provider_id: str = "") -> None:
+    def __init__(self, provider: Any, provider_id: str = "", owned: bool = False) -> None:
         self._provider = provider
         self.provider_id = provider_id or provider_id_of(provider)
+        # owned=True：实例由插件自建（平台实例 client 已被外部关闭时的兜底
+        # 重建），插件负责卸载时关闭它；平台实例则交给平台管理。
+        self._owned = bool(owned)
 
     @property
     def model_name(self) -> str:
@@ -221,8 +279,17 @@ class ProviderEmbeddingAdapter:
             return [await self.embed_text(t) for t in items]
 
     async def close(self) -> None:
-        """AstrBot Provider 生命周期由平台管理，无需插件释放。"""
-        return None
+        """关闭插件自建的 provider 实例；平台实例由平台管理。"""
+        if not getattr(self, "_owned", False):
+            return
+        terminate = getattr(self._provider, "terminate", None)
+        if callable(terminate):
+            try:
+                result = terminate()
+                if inspect.isawaitable(result):
+                    await result
+            except Exception as e:
+                logger.warning("[tmemory] close rebuilt embedding provider failed: %s", e)
 
 
 class ProviderRerankAdapter:
@@ -294,13 +361,17 @@ def list_embedding_providers(source: Any) -> List[Dict[str, object]]:
 
 
 def resolve_embedding_provider(
-    source: Any, provider_id: str = ""
+    source: Any, provider_id: str = "", exclude: Optional[set] = None
 ) -> Optional[ProviderEmbeddingAdapter]:
-    """解析 AstrBot Embedding Provider；不可用返回 None（不抛异常）。"""
+    """解析 AstrBot Embedding Provider；不可用返回 None（不抛异常）。
+
+    ``exclude`` 为需要跳过的 provider 实例 id() 集合（如刚因 client 已关闭
+    而失败的实例），用于重解析时避免再次拿到同一个失效实例（TMEAAA-519）。
+    """
     try:
         provider = _resolve(
             source, str(provider_id or "").strip(), "embedding_provider_insts",
-            _is_embedding_provider,
+            _is_embedding_provider, exclude,
         )
     except Exception as e:
         logger.warning("[tmemory] resolve embedding provider failed: %s", e)
@@ -308,6 +379,46 @@ def resolve_embedding_provider(
     if provider is None:
         return None
     return ProviderEmbeddingAdapter(provider)
+
+
+async def rebuild_embedding_provider(
+    provider: Any,
+) -> Optional[ProviderEmbeddingAdapter]:
+    """用平台实例的配置重建一个插件自有的 Embedding Provider（TMEAAA-519）。
+
+    AstrBot 关闭 provider 的 httpx client 时不会从 ``embedding_provider_insts``
+    移除该实例，仅靠重新解析会一直拿到同一个已关闭实例；此处在 adapter 层
+    按原配置新建实例与 client，作为兜底自愈路径。
+    """
+    raw = getattr(provider, "_provider", None) or provider
+    config = getattr(raw, "provider_config", None)
+    if not isinstance(config, dict) or not config:
+        logger.warning("[tmemory] rebuild embedding provider skipped: no provider_config")
+        return None
+    settings = getattr(raw, "provider_settings", None) or {}
+    try:
+        rebuilt = type(raw)(dict(config), settings)
+    except Exception as e:
+        logger.warning("[tmemory] rebuild embedding provider failed: %s", e)
+        return None
+    try:
+        init = getattr(rebuilt, "initialize", None)
+        if callable(init):
+            result = init()
+            if inspect.isawaitable(result):
+                await result
+    except Exception as e:
+        logger.warning("[tmemory] rebuilt embedding provider init failed: %s", e)
+    try:
+        dim = int(rebuilt.get_dim())
+    except Exception:
+        dim = 0
+    logger.info(
+        "[tmemory] embedding provider client rebuilt: id=%s dim=%s",
+        provider_id_of(raw) or "<auto>",
+        dim or "?",
+    )
+    return ProviderEmbeddingAdapter(rebuilt, provider_id_of(raw), owned=True)
 
 
 def resolve_rerank_provider(
@@ -338,6 +449,8 @@ __all__ = [
     "provider_capabilities",
     "provider_id_of",
     "provider_model_of",
+    "instance_is_closed",
+    "rebuild_embedding_provider",
     "resolve_embedding_provider",
     "resolve_rerank_provider",
 ]

@@ -748,3 +748,195 @@ def embedding_adapter(dim=8):
     from astrbot_plugin_tmemory.adapters import provider
 
     return provider.ProviderEmbeddingAdapter(FakeEmbeddingProvider(dim=dim))
+
+
+# ── TMEAAA-519：平台 provider client 被外部关闭 → 自愈必须拿到可用 client ──
+
+
+class _FakeHttpClient:
+    """模拟 provider 底层 httpx client 的关闭状态。"""
+
+    def __init__(self):
+        self.is_closed = False
+
+
+class FakePlatformEmbeddingProvider:
+    """模拟 AstrBot EmbeddingProvider：``client`` 可被外部关闭。"""
+
+    def __init__(self, provider_config, provider_settings=None):
+        self.provider_config = provider_config
+        self.provider_settings = provider_settings or {}
+        self.model_name = "fake-platform"
+        self.client = _FakeHttpClient()
+        self._dim = int(provider_config.get("embedding_dimensions", 4) or 4)
+
+    async def get_embedding(self, text):
+        if self.client.is_closed:
+            raise RuntimeError(
+                "Cannot send a request, as the client has been closed."
+            )
+        return [0.5] * self._dim
+
+    async def get_embeddings(self, texts):
+        return [await self.get_embedding(t) for t in texts]
+
+    def get_dim(self):
+        return self._dim
+
+
+def platform_provider(provider_id="emb-1", dim=4, closed=False):
+    p = FakePlatformEmbeddingProvider(
+        {"id": provider_id, "embedding_dimensions": dim}
+    )
+    p.client.is_closed = closed
+    return p
+
+
+def test_instance_is_closed_detects_client_state(provider_port):
+    assert provider_port.instance_is_closed(platform_provider(closed=True)) is True
+    assert provider_port.instance_is_closed(platform_provider(closed=False)) is False
+    assert provider_port.instance_is_closed(FakeEmbeddingProvider()) is False
+
+
+def test_resolve_prefers_live_duplicate_over_closed_instance(provider_port):
+    """AstrBot 不在 terminate 时清理 embedding_provider_insts → 列表里旧实例已关闭。"""
+    stale = platform_provider(closed=True)
+    live = platform_provider(closed=False)
+    ctx = FakeContext(FakeManager(embeddings=[stale, live]))
+
+    auto = provider_port.resolve_embedding_provider(ctx)
+    assert auto is not None and auto._provider is live
+
+    by_id = provider_port.resolve_embedding_provider(ctx, "emb-1")
+    assert by_id is not None and by_id._provider is live
+
+
+def test_resolve_honours_exclude(provider_port):
+    only = platform_provider()
+    ctx = FakeContext(FakeManager(embeddings=[only]))
+    assert provider_port.resolve_embedding_provider(ctx, "emb-1") is not None
+    assert (
+        provider_port.resolve_embedding_provider(
+            ctx, "emb-1", exclude={id(only)}
+        )
+        is None
+    )
+
+
+@pytest.mark.asyncio
+async def test_vector_manager_refresh_skips_failed_instance(vm_module):
+    stale = platform_provider(closed=True)
+    manager = FakeManager(embeddings=[stale])
+    vm = vm_module.VectorManager(
+        ":memory:", {"embedding_provider_id": "emb-1"}, context=FakeContext(manager)
+    )
+    await vm.initialize()
+    assert vm.embedding_provider._provider is stale
+
+    live = platform_provider(closed=False)
+    manager.embedding_provider_insts = [stale, live]
+    manager.inst_map = {"emb-1": stale}
+
+    await vm.refresh(force=True, exclude={id(stale)})
+    assert vm.embedding_provider._provider is live
+
+
+@pytest.mark.asyncio
+async def test_vector_manager_rebuilds_client_when_only_closed_instance(vm_module):
+    stale = platform_provider(closed=True)
+    manager = FakeManager(embeddings=[stale])
+    vm = vm_module.VectorManager(
+        ":memory:", {"embedding_provider_id": "emb-1"}, context=FakeContext(manager)
+    )
+    await vm.initialize()
+    failed = vm.embedding_provider
+
+    await vm.refresh(force=True, exclude={id(stale)})
+    assert vm.embedding_provider is None
+
+    assert await vm.rebuild_embedding_provider(failed) is True
+    assert vm.embedding_provider is not None
+    assert vm.embedding_provider._provider is not stale
+    assert vm.embedding_provider._provider.client.is_closed is False
+    assert vm.rebuilt_count == 1
+
+
+@pytest.mark.asyncio
+async def test_embed_text_recovers_by_rebuilding_closed_client(
+    plugin, vector_port, vm_module
+):
+    """生产复现场景：仅有一个已被关闭的平台实例，重解析无效 → 重建 client 恢复。"""
+    stale = platform_provider(closed=True)
+    manager = FakeManager(embeddings=[stale])
+    vm = vm_module.VectorManager(
+        ":memory:", {"embedding_provider_id": "emb-1"}, context=FakeContext(manager)
+    )
+    await vm.initialize()
+    plugin._vector_manager = vm
+    plugin._cfg.embed_dim = 4
+
+    vec = await vector_port.embed_text(plugin, "hello")
+
+    assert vec is not None and len(vec) == 4
+    assert plugin._embed_ok_count == 1
+    assert plugin._embed_provider_fail_count == 0
+    assert vm.rebuilt_count == 1
+    assert vm.embedding_provider._provider is not stale
+    assert vm.embedding_provider._provider.client.is_closed is False
+
+
+@pytest.mark.asyncio
+async def test_embed_text_recovery_uses_duplicate_without_rebuild(
+    plugin, vector_port, vm_module
+):
+    """列表中存在可用重复实例时，重解析换实例即可，无需重建。"""
+    stale = platform_provider(closed=True)
+    live = platform_provider(closed=False)
+    manager = FakeManager(embeddings=[stale])
+    vm = vm_module.VectorManager(
+        ":memory:", {"embedding_provider_id": "emb-1"}, context=FakeContext(manager)
+    )
+    await vm.initialize()
+    plugin._vector_manager = vm
+    plugin._cfg.embed_dim = 4
+
+    manager.embedding_provider_insts = [stale, live]
+    manager.inst_map = {"emb-1": stale}
+
+    vec = await vector_port.embed_text(plugin, "hello")
+
+    assert vec is not None and len(vec) == 4
+    assert vm.embedding_provider._provider is live
+    assert vm.rebuilt_count == 0
+    assert plugin._embed_provider_fail_count == 0
+
+
+class WrappedConnectionErrorProvider(FakePlatformEmbeddingProvider):
+    """部分 openai 版本把已关闭 client 包装成 “Connection error.”。"""
+
+    async def get_embedding(self, text):
+        if self.client.is_closed:
+            raise RuntimeError("Connection error.")
+        return await super().get_embedding(text)
+
+
+@pytest.mark.asyncio
+async def test_embed_text_recovers_when_error_message_wrapped(
+    plugin, vector_port, vm_module
+):
+    """异常文案不含 closed 时，靠实例 client 关闭状态仍能触发自愈。"""
+    stale = WrappedConnectionErrorProvider({"id": "emb-1", "embedding_dimensions": 4})
+    stale.client.is_closed = True
+    manager = FakeManager(embeddings=[stale])
+    vm = vm_module.VectorManager(
+        ":memory:", {"embedding_provider_id": "emb-1"}, context=FakeContext(manager)
+    )
+    await vm.initialize()
+    plugin._vector_manager = vm
+    plugin._cfg.embed_dim = 4
+
+    vec = await vector_port.embed_text(plugin, "hello")
+
+    assert vec is not None and len(vec) == 4
+    assert vm.rebuilt_count == 1
+    assert plugin._embed_provider_fail_count == 0

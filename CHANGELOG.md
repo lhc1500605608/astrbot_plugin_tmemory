@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v0.13.2] - 2026-09-22
+
+修复嵌入 Provider 连接被外部关闭后无法自愈的问题（TMEAAA-519）。
+无配置迁移，直接替换安装即可。
+
+### Fixed
+
+- **嵌入 Provider「客户端已关闭」自愈无效**（TMEAAA-519）：平台关闭 Provider 的 httpx client 后不会将其从 `embedding_provider_insts` 移除，仅重新解析会一直拿到同一个已关闭实例，导致 `provider embed_text failed: ... client has been closed` 规律复现且从不恢复。现在自愈按两步走：重解析时跳过已关闭实例并优先选用可用实例；若列表中已无可用实例，则按原配置在适配层重建 Provider 与 client。恢复成功会打印 `embedding provider recovered after closed-client error`。
+
 ## [v0.13.1] - 2026-09-22
 
 修复嵌入缓存计数属性未初始化导致的 `AttributeError`（TMEAAA-517）。
