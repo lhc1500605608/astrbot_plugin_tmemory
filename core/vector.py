@@ -459,7 +459,9 @@ async def get_cached_query_embedding(
                 (query_hash,),
             ).fetchone()
             if row is None:
-                plugin._embed_cache_miss_count += 1
+                plugin._embed_cache_miss_count = (
+                    getattr(plugin, "_embed_cache_miss_count", 0) + 1
+                )
                 return None
             blob = bytes(row["embedding"])
             dim = int(row["embed_dim"])
@@ -467,13 +469,17 @@ async def get_cached_query_embedding(
                 conn.execute(
                     "DELETE FROM query_embedding_cache WHERE query_hash=?", (query_hash,)
                 )
-                plugin._embed_cache_miss_count += 1
+                plugin._embed_cache_miss_count = (
+                    getattr(plugin, "_embed_cache_miss_count", 0) + 1
+                )
                 return None
             conn.execute(
                 "UPDATE query_embedding_cache SET hit_count=hit_count+1, last_hit_at=? WHERE query_hash=?",
                 (plugin._now(), query_hash),
             )
-            plugin._embed_cache_hit_count += 1
+            plugin._embed_cache_hit_count = (
+                getattr(plugin, "_embed_cache_hit_count", 0) + 1
+            )
             return plugin._sqlite_vec.deserialize_float32(blob)
     except Exception as e:
         logger.debug("[tmemory] query embedding cache lookup failed: %s", e)

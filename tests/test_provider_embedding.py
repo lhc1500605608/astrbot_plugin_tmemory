@@ -685,6 +685,59 @@ async def test_tm_vec_rebuild_force_aborts_on_table_dim_mismatch(plugin, vector_
     assert rows == 1
 
 
+# ── TMEAAA-517：嵌入缓存计数属性未初始化 → AttributeError（热路径/重载竞态）──
+
+
+class _FakeSqliteVec:
+    @staticmethod
+    def serialize_float32(vec):
+        import struct
+
+        return struct.pack(f"{len(vec)}f", *vec)
+
+    @staticmethod
+    def deserialize_float32(blob):
+        import struct
+
+        return list(struct.unpack(f"{len(blob) // 4}f", blob))
+
+
+def test_plugin_constructor_initializes_embed_cache_counters(plugin):
+    """构造期即初始化缓存计数，杜绝热路径先于 initialize 的 AttributeError。"""
+    assert plugin._embed_cache_hit_count == 0
+    assert plugin._embed_cache_miss_count == 0
+
+
+@pytest.mark.asyncio
+async def test_query_embedding_cache_miss_without_counter_attrs(plugin, vector_port):
+    """计数属性缺失的实例走缓存未命中路径：不抛错且计数正确。"""
+    plugin._vec_available = True
+    for attr in ("_embed_cache_hit_count", "_embed_cache_miss_count"):
+        if hasattr(plugin, attr):
+            delattr(plugin, attr)
+
+    assert await vector_port.get_cached_query_embedding(plugin, "unseen query") is None
+    assert plugin._embed_cache_miss_count == 1
+
+
+@pytest.mark.asyncio
+async def test_query_embedding_cache_hit_without_counter_attrs(plugin, vector_port):
+    """计数属性缺失的实例走缓存命中路径：不抛错且计数正确。"""
+    plugin._vec_available = True
+    plugin._cfg.embed_dim = 4
+    plugin._sqlite_vec = _FakeSqliteVec()
+    await vector_port.store_query_embedding(plugin, "hello", [1.0, 2.0, 3.0, 4.0])
+    for attr in ("_embed_cache_hit_count", "_embed_cache_miss_count"):
+        if hasattr(plugin, attr):
+            delattr(plugin, attr)
+
+    vec = await vector_port.get_cached_query_embedding(plugin, "hello")
+
+    assert vec is not None and len(vec) == 4
+    assert plugin._embed_cache_hit_count == 1
+    assert getattr(plugin, "_embed_cache_miss_count", 0) == 0
+
+
 def provider_adapter():
     from astrbot_plugin_tmemory.adapters import provider
 
