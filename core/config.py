@@ -37,6 +37,8 @@ class PluginConfig:
     # 蒸馏 prompt/结果缓存：相同 transcript 复用上次 LLM 产出，缓存命中不计 token。
     distill_prompt_cache: bool = True
     distill_prompt_cache_max_rows: int = 1000
+    # 蒸馏失败时是否回退规则记忆（默认关闭：失败即报错、不生成记忆）。
+    distill_fallback_to_rules: bool = False
     
     # Purify / Refine
     purify_interval_days: int = 0
@@ -193,6 +195,7 @@ LEGACY_KEY_MOVES = [
     ("distill_rule_gate_min_chars", "distill.distill_rule_gate_min_chars", 40),
     ("distill_prompt_cache", "distill.distill_prompt_cache", True),
     ("distill_prompt_cache_max_rows", "distill.distill_prompt_cache_max_rows", 1000),
+    ("distill_fallback_to_rules", "distill.distill_fallback_to_rules", False),
     ("enable_memory_injection", "injection.enable_memory_injection", True),
     ("inject_enable_vector_search", "injection.inject_enable_vector_search", False),
     ("inject_memory_limit", "injection.inject_memory_limit", 5),
@@ -316,6 +319,7 @@ def parse_config(raw_config: dict) -> PluginConfig:
     c.distill_rule_gate_min_chars = max(1, _safe_int(_cfg_get(raw_config, "distill.distill_rule_gate_min_chars", 40), 40, label="distill_rule_gate_min_chars"))
     c.distill_prompt_cache = _safe_bool(_cfg_get(raw_config, "distill.distill_prompt_cache", True), True, label="distill_prompt_cache")
     c.distill_prompt_cache_max_rows = max(0, _safe_int(_cfg_get(raw_config, "distill.distill_prompt_cache_max_rows", 1000), 1000, label="distill_prompt_cache_max_rows"))
+    c.distill_fallback_to_rules = _safe_bool(_cfg_get(raw_config, "distill.distill_fallback_to_rules", False), False, label="distill_fallback_to_rules")
 
     # ── 提纯 ──
     c.purify_interval_days = max(0, _safe_int(raw_config.get("purify_interval_days", raw_config.get("refine_quality_interval_days", 0)), 0, label="purify_interval_days"))

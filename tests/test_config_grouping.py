@@ -217,3 +217,22 @@ def test_grouped_config_reads_new_format(plugin_module):
     assert cfg.inject_position == "slot"
     assert cfg.memory_scope == "session"
     assert cfg.daily_token_budget == 123
+
+
+def test_distill_fallback_to_rules_defaults_false_and_reads_grouped(plugin_module):
+    """TMEAAA-513: 蒸馏失败回退规则记忆默认关闭，可从 distill 分组读取。"""
+    from astrbot_plugin_tmemory.core.config import parse_config
+
+    assert parse_config({}).distill_fallback_to_rules is False
+    assert parse_config({"distill": {"distill_fallback_to_rules": True}}).distill_fallback_to_rules is True
+
+
+def test_distill_fallback_to_rules_schema_visible_in_distill_group():
+    schema = _schema()
+    item = schema["distill"]["items"]["distill_fallback_to_rules"]
+    assert item["type"] == "bool"
+    assert item["default"] is False
+    assert item["description"] == "蒸馏失败时回退规则记忆"
+    assert "默认关闭" in item["hint"]
+    # 旧平铺键保留（invisible）以免完整性检查删值
+    assert schema["distill_fallback_to_rules"].get("invisible") is True

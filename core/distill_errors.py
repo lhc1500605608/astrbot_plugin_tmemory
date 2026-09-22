@@ -25,6 +25,10 @@ class DistillErrorCategory(str, enum.Enum):
     TIMEOUT = "timeout"                     # 异步调用超时
     VALIDATION_FAILURE = "validation_failure"  # 解析成功但所有条目被校验器裁剪
     UNKNOWN = "unknown"                     # 未分类异常
+    # ── 默认不降级路径的失败分类（TMEAAA-513）──
+    NO_PROVIDER = "no_provider"             # 无法解析出可用的 LLM provider
+    LLM_ERROR = "llm_error"                 # LLM 调用抛异常（code 记录异常类名/HTTP 状态码）
+    UNPARSEABLE = "unparseable"             # LLM 返回无法解析或为空
 
 
 class DistillErrorRecord:
@@ -33,7 +37,7 @@ class DistillErrorRecord:
     设计为轻量数据载体，可序列化存入 distill_history.errors JSON 字段。
     """
 
-    __slots__ = ("category", "pipeline", "user_id", "message", "detail")
+    __slots__ = ("category", "pipeline", "user_id", "message", "detail", "code")
 
     def __init__(
         self,
@@ -42,12 +46,20 @@ class DistillErrorRecord:
         user_id: str = "",
         message: str = "",
         detail: str = "",
+        code: str = "",
     ):
         self.category = category
         self.pipeline = pipeline   # "profile_extraction" | "consolidation" | "flat_distill"
         self.user_id = user_id
         self.message = message     # 人类可读摘要
         self.detail = detail       # 原始异常信息（截断）
+        self.code = code           # llm_error 的细分码（异常类名 / HTTP 状态码）
+
+    def category_label(self) -> str:
+        """日志/展示用的分类标签；llm_error 附带 code，如 ``llm_error(RuntimeError)``。"""
+        if self.category == DistillErrorCategory.LLM_ERROR and self.code:
+            return f"llm_error({self.code})"
+        return self.category.value
 
     def to_dict(self) -> Dict[str, str]:
         return {
@@ -56,14 +68,21 @@ class DistillErrorRecord:
             "user_id": self.user_id,
             "message": self.message,
             "detail": self.detail[:500],
+            "code": self.code,
         }
 
     def log(self) -> None:
         """根据严重级别写入日志。"""
-        if self.category in (DistillErrorCategory.PROVIDER_FAILURE, DistillErrorCategory.FALLBACK):
+        if self.category in (
+            DistillErrorCategory.PROVIDER_FAILURE,
+            DistillErrorCategory.FALLBACK,
+            DistillErrorCategory.NO_PROVIDER,
+            DistillErrorCategory.LLM_ERROR,
+            DistillErrorCategory.UNPARSEABLE,
+        ):
             logger.warning(
                 "[tmemory] distill error: category=%s pipeline=%s user=%s — %s | %s",
-                self.category.value, self.pipeline, self.user_id,
+                self.category_label(), self.pipeline, self.user_id,
                 self.message, self.detail,
             )
         elif self.category == DistillErrorCategory.PARSE_FAILURE:
@@ -184,19 +203,87 @@ def make_validation_failure_record(
     )
 
 
+def exception_code(exception: Exception) -> str:
+    """提取异常的细分码：优先 HTTP 状态码，其次异常类名。"""
+    for attr in ("status_code", "status", "code"):
+        val = getattr(exception, attr, None)
+        if isinstance(val, int) and not isinstance(val, bool):
+            return str(val)
+    response = getattr(exception, "response", None)
+    status = getattr(response, "status_code", None)
+    if isinstance(status, int) and not isinstance(status, bool):
+        return str(status)
+    return type(exception).__name__
+
+
+def make_no_provider_record(
+    pipeline: str,
+    user_id: str = "",
+    reason: str = "",
+) -> DistillErrorRecord:
+    """无法解析出可用 LLM provider 的错误记录（默认不降级）。"""
+    return DistillErrorRecord(
+        category=DistillErrorCategory.NO_PROVIDER,
+        pipeline=pipeline,
+        user_id=user_id,
+        message=reason or "无法确定 LLM provider",
+    )
+
+
+def make_llm_error_record(
+    exception: Exception,
+    pipeline: str,
+    user_id: str = "",
+    reason: str = "",
+) -> DistillErrorRecord:
+    """LLM 调用抛异常的错误记录，携带细分 code。"""
+    code = exception_code(exception)
+    exc_name = type(exception).__name__
+    return DistillErrorRecord(
+        category=DistillErrorCategory.LLM_ERROR,
+        pipeline=pipeline,
+        user_id=user_id,
+        message=reason or f"LLM 调用异常: {exc_name}",
+        detail=f"{exc_name}: {str(exception)[:300]}",
+        code=code,
+    )
+
+
+def make_unparseable_record(
+    pipeline: str,
+    user_id: str = "",
+    reason: str = "",
+) -> DistillErrorRecord:
+    """LLM 返回无法解析或为空时的错误记录（默认不降级）。"""
+    return DistillErrorRecord(
+        category=DistillErrorCategory.UNPARSEABLE,
+        pipeline=pipeline,
+        user_id=user_id,
+        message=reason or "LLM 返回无法解析或为空",
+    )
+
+
 def errors_to_json(errors: List[DistillErrorRecord]) -> List[Dict[str, str]]:
     """将错误记录列表序列化为 JSON 兼容列表。"""
     return [e.to_dict() for e in errors]
 
 
 def errors_from_json(data: list) -> List[DistillErrorRecord]:
-    """从 JSON 反序列化错误记录列表。"""
+    """从 JSON 反序列化错误记录列表。
+
+    兼容旧值：``category`` 可能带细分码（如 ``llm_error(RuntimeError)``）或
+    历史遗留的未知分类，统一降级为枚举基类，不抛异常。
+    """
     result = []
     for d in data:
         if isinstance(d, dict):
-            cat = d.get("category", "unknown")
+            raw_cat = str(d.get("category", "unknown"))
+            code = str(d.get("code", "") or "")
+            base_cat = raw_cat.split("(", 1)[0]
+            if not code and "(" in raw_cat and raw_cat.endswith(")"):
+                code = raw_cat[raw_cat.index("(") + 1 : -1]
             try:
-                category = DistillErrorCategory(cat)
+                category = DistillErrorCategory(base_cat)
             except ValueError:
                 category = DistillErrorCategory.UNKNOWN
             result.append(
@@ -206,6 +293,7 @@ def errors_from_json(data: list) -> List[DistillErrorRecord]:
                     user_id=str(d.get("user_id", "")),
                     message=str(d.get("message", "")),
                     detail=str(d.get("detail", "")),
+                    code=code,
                 )
             )
     return result

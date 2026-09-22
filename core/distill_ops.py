@@ -13,8 +13,10 @@ from .distill_errors import (
     DistillErrorRecord,
     classify_llm_error,
     errors_to_json,
-    make_empty_result_record,
     make_fallback_record,
+    make_llm_error_record,
+    make_no_provider_record,
+    make_unparseable_record,
 )
 from .style_analyzer import get_style_analyzer
 
@@ -25,7 +27,11 @@ class DistillOpsMixin:
     async def distill_rows_with_llm(
         self, rows: list
     ) -> Tuple[List[Dict[str, object]], int, int, List[DistillErrorRecord]]:
-        """用 LLM 对一批对话行进行结构化蒸馏，失败时回退到规则蒸馏。
+        """用 LLM 对一批对话行进行结构化蒸馏。
+
+        默认（``distill_fallback_to_rules=false``）失败时**不生成任何记忆**，
+        返回 ``([], -1, -1, [err])`` 并记录结构化错误；仅当显式开启
+        ``distill_fallback_to_rules`` 时才回退到旧版规则蒸馏（质量较低）。
 
         B3 降本：相同 transcript + 模型命中 ``distill_prompt_cache`` 时直接复用产出，
         不再调用 LLM、token 记为 0（缓存只影响成本，不改变对外结果）。
@@ -68,30 +74,13 @@ class DistillOpsMixin:
         chat_provider_id = await self.plugin._distill_mgr.resolve_distill_provider_id(rows, self.plugin.context)
         chat_model_id = await self.plugin._distill_mgr.resolve_distill_model_id(rows)
         if not chat_provider_id:
-            # 无法确定 provider 时，回退到规则蒸馏（结构化记录，不再静默）。
-            fallback_err = make_fallback_record(
+            err = make_no_provider_record(
                 pipeline="flat_distill",
                 user_id=username,
-                reason="无法确定 LLM provider，回退到规则蒸馏",
+                reason="无法确定 LLM provider",
             )
-            fallback_err.log()
-            return (
-                filter_assistant_attributed(
-                    [
-                        {
-                            "memory": self.plugin._distill_mgr.distill_text(user_transcript),
-                            "memory_type": "fact",
-                            "importance": 0.55,
-                            "confidence": 0.50,
-                            "score": 0.60,
-                        }
-                    ],
-                    rows,
-                ),
-                -1,
-                -1,
-                [fallback_err],
-            )
+            err.log()
+            return self._distill_failure_result(rows, user_transcript, err)
 
         cache_enabled = bool(getattr(self.plugin._cfg, "distill_prompt_cache", True))
         cache_key = _prompt_cache.compute_cache_key(transcript, chat_model_id or chat_provider_id)
@@ -138,28 +127,54 @@ class DistillOpsMixin:
                         self.plugin, cache_key, transcript, parsed, chat_model_id
                     )
                 return parsed, tok_in, tok_out, []
-            else:
-                # LLM 返回了内容但无法解析为有效记忆
-                empty_err = make_empty_result_record(
-                    pipeline="flat_distill",
-                    user_id=username,
-                )
-                empty_err.log()
         except Exception as e:
-            # 结构化分类替代裸 except Exception
-            err = classify_llm_error(
+            # 结构化分类替代裸 except Exception；默认不降级。
+            err = make_llm_error_record(
                 e,
                 pipeline="flat_distill",
                 user_id=username,
-                context_message="LLM 蒸馏调用失败，回退到规则蒸馏",
+                reason="LLM 蒸馏调用失败",
             )
             err.log()
+            return self._distill_failure_result(rows, user_transcript, err)
 
-        # 规则蒸馏回退（新增：记录回退原因）
-        fallback_err = make_fallback_record(
+        # LLM 返回了内容但无法解析为有效记忆
+        err = make_unparseable_record(
             pipeline="flat_distill",
             user_id=username,
-            reason="LLM 蒸馏未产生有效结果，使用规则回退",
+            reason="LLM 蒸馏未产生有效结果",
+        )
+        err.log()
+        return self._distill_failure_result(rows, user_transcript, err)
+
+    def _distill_failure_result(
+        self,
+        rows: list,
+        user_transcript: str,
+        err: DistillErrorRecord,
+    ) -> tuple[list[dict[str, object]], int, int, list[DistillErrorRecord]]:
+        """蒸馏失败后的统一出口。
+
+        默认不生成任何记忆；仅当 ``distill_fallback_to_rules=true`` 时回退规则蒸馏
+        （行为与旧版一致，错误分类记为 ``fallback``）。
+        """
+        if bool(getattr(self.plugin._cfg, "distill_fallback_to_rules", False)):
+            return self._rule_fallback_result(rows, user_transcript, err.message)
+        return [], -1, -1, [err]
+
+    def _rule_fallback_result(
+        self,
+        rows: list,
+        user_transcript: str,
+        reason: str = "",
+    ) -> tuple[list[dict[str, object]], int, int, list[DistillErrorRecord]]:
+        """旧版规则兜底：生成一条规则记忆并标记来源，供入库时区分。"""
+        from .attribution import filter_assistant_attributed
+
+        fallback_err = make_fallback_record(
+            pipeline="flat_distill",
+            user_id=str(rows[0].get("canonical_user_id", "")) if rows else "",
+            reason=reason or "LLM 蒸馏未产生有效结果，使用规则回退",
         )
         fallback_err.log()
         return (
@@ -171,6 +186,7 @@ class DistillOpsMixin:
                         "importance": 0.55,
                         "confidence": 0.50,
                         "score": 0.60,
+                        "source": "rule_fallback",
                     }
                 ],
                 rows,
@@ -289,7 +305,13 @@ class DistillOpsMixin:
                 if distill_errors:
                     all_errors.extend(distill_errors)
                     if any(
-                        e.category in (DistillErrorCategory.PROVIDER_FAILURE, DistillErrorCategory.PARSE_FAILURE)
+                        e.category in (
+                            DistillErrorCategory.PROVIDER_FAILURE,
+                            DistillErrorCategory.PARSE_FAILURE,
+                            DistillErrorCategory.NO_PROVIDER,
+                            DistillErrorCategory.LLM_ERROR,
+                            DistillErrorCategory.UNPARSEABLE,
+                        )
                         for e in distill_errors
                     ):
                         failed_users += 1
@@ -330,6 +352,13 @@ class DistillOpsMixin:
                         continue
                     row_scope = str(rows[0].get("scope", "user"))
                     row_persona = str(rows[0].get("persona_id", ""))
+                    # 规则兜底项标记 source=rule_fallback，入库时以独立来源区分。
+                    item_source = str(item.get("source", ""))
+                    insert_channel = (
+                        "rule_fallback"
+                        if item_source == "rule_fallback"
+                        else "scheduled_distill"
+                    )
                     new_id = self.plugin._insert_memory(
                         canonical_id=canonical_id,
                         adapter=str(rows[0]["source_adapter"]),
@@ -339,7 +368,7 @@ class DistillOpsMixin:
                         memory_type=memory_type,
                         importance=self.plugin._clamp01(item.get("importance", 0.6)),
                         confidence=self.plugin._clamp01(item.get("confidence", 0.7)),
-                        source_channel="scheduled_distill",
+                        source_channel=insert_channel,
                         scope=row_scope,
                         persona_id=row_persona,
                     )

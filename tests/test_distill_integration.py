@@ -49,8 +49,9 @@ class _MockLLMContext:
 
 @pytest.mark.asyncio
 async def test_rule_distill_cycle_creates_memories_from_cache(plugin):
-    """T1: 插入对话缓存 → 规则蒸馏 → 生成记忆 + 标记已蒸馏。"""
+    """T1: 插入对话缓存 → 规则蒸馏（开关开启）→ 生成记忆 + 标记已蒸馏。"""
     plugin.context = _MockContextNoProvider()
+    plugin._cfg.distill_fallback_to_rules = True
     await plugin._insert_conversation("u1", "user", "我喜欢吃火锅每周都去", "qq", "42", "")
     await plugin._insert_conversation("u1", "assistant", "火锅确实很棒", "qq", "42", "")
     assert plugin._count_pending_rows() == 2
@@ -64,6 +65,7 @@ async def test_rule_distill_cycle_creates_memories_from_cache(plugin):
 async def test_rule_distill_cycle_multiple_users(plugin):
     """T1: 多个用户各有待蒸馏消息 → 全部处理。"""
     plugin.context = _MockContextNoProvider()
+    plugin._cfg.distill_fallback_to_rules = True
     for uid in ("ua", "ub", "uc"):
         for i in range(5):
             await plugin._insert_conversation(uid, "user", "msg%d:like%d" % (i, i), "qq", uid, "")
@@ -182,17 +184,38 @@ async def test_mock_llm_distill_records_token_usage(plugin):
 
 
 @pytest.mark.asyncio
-async def test_mock_llm_distill_fallback_on_llm_error(plugin):
-    """T2: LLM 调用抛出异常 → 回退到规则蒸馏，不崩溃。"""
+async def test_mock_llm_distill_no_fallback_on_llm_error(plugin):
+    """T2: LLM 调用抛出异常 → 默认不降级，不生成记忆、不崩溃。"""
     class EC:
         def get_using_provider(self, **kw): return None
         async def get_current_chat_provider_id(self, **kw): return "err"
         async def llm_generate(self, **kw): raise ConnectionError("down")
     plugin.context = EC()
+    plugin._cfg.distill_provider_id = "err"
+    plugin._cfg.use_independent_distill_model = True
+    assert plugin._cfg.distill_fallback_to_rules is False
     await plugin._insert_conversation("uerr", "user", "数据科学家", "qq", "1", "group:1")
     p, c, _errs = await plugin._run_distill_cycle(force=True)
-    assert p >= 1 and c >= 1
+    assert p >= 1 and c == 0
+    assert len(plugin._list_memories("uerr", 10)) == 0
     assert len(plugin._fetch_pending_rows("uerr", 10)) == 0
+
+
+@pytest.mark.asyncio
+async def test_mock_llm_distill_fallback_on_llm_error_when_enabled(plugin):
+    """T2: 开关开启时 LLM 异常 → 回退规则蒸馏，生成记忆。"""
+    class EC:
+        def get_using_provider(self, **kw): return None
+        async def get_current_chat_provider_id(self, **kw): return "err"
+        async def llm_generate(self, **kw): raise ConnectionError("down")
+    plugin.context = EC()
+    plugin._cfg.distill_provider_id = "err"
+    plugin._cfg.use_independent_distill_model = True
+    plugin._cfg.distill_fallback_to_rules = True
+    await plugin._insert_conversation("uerr2", "user", "数据科学家", "qq", "1", "group:1")
+    p, c, _errs = await plugin._run_distill_cycle(force=True)
+    assert p >= 1 and c >= 1
+    assert len(plugin._fetch_pending_rows("uerr2", 10)) == 0
 
 
 @pytest.mark.asyncio
@@ -231,6 +254,7 @@ async def test_distill_assistant_only_conversation_skipped(plugin):
 async def test_distill_to_inject_chain(plugin):
     """端到端: capture → distill → memories → 缓存清理 → 历史记录。"""
     plugin.context = _MockContextNoProvider()
+    plugin._cfg.distill_fallback_to_rules = True
     for i in range(5):
         await plugin._insert_conversation("uchain", "user", "like%d:川菜" % i,
                                            "qq", "42", "group:1")
@@ -247,6 +271,7 @@ async def test_distill_to_inject_chain(plugin):
 async def test_distill_preserves_source_metadata(plugin):
     """蒸馏后 DB 中 memories 的 source_adapter / source_user_id 正确。"""
     plugin.context = _MockContextNoProvider()
+    plugin._cfg.distill_fallback_to_rules = True
     await plugin._insert_conversation("usrc", "user", "我在微信上用这个机器人",
                                        "wechat", "wx-123", "group:test")
     await plugin._run_distill_cycle(force=True)
@@ -264,6 +289,7 @@ async def test_distill_preserves_source_metadata(plugin):
 async def test_distill_multiple_cycles_incremental(plugin):
     """连续多次蒸馏：第二批新消息也能独立蒸馏并追加记忆。"""
     plugin.context = _MockContextNoProvider()
+    plugin._cfg.distill_fallback_to_rules = True
     for i in range(3):
         await plugin._insert_conversation("uinc", "user", "r1:跑步%d" % i, "qq", "42", "")
     p1, c1, _errs = await plugin._run_distill_cycle(force=True)

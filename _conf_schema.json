@@ -247,6 +247,12 @@
         "default": 1000,
         "description": "蒸馏缓存条目上限",
         "hint": "缓存最多保留的条目数，超出后按最近最少使用淘汰。默认 1000。"
+      },
+      "distill_fallback_to_rules": {
+        "type": "bool",
+        "default": false,
+        "description": "蒸馏失败时回退规则记忆",
+        "hint": "关闭时蒸馏失败直接报错、不生成记忆；开启则生成规则兜底记忆（质量较低）。默认关闭。"
       }
     }
   },
@@ -674,6 +680,12 @@
   "distill_prompt_cache_max_rows": {
     "type": "int",
     "default": 1000,
+    "description": "",
+    "invisible": true
+  },
+  "distill_fallback_to_rules": {
+    "type": "bool",
+    "default": false,
     "description": "",
     "invisible": true
   },

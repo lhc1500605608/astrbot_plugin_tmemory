@@ -85,6 +85,7 @@ def test_route_table_covers_every_legacy_capability(bridge_module):
         ("POST", "/import"),
         ("GET", "/embedding/providers"),
         ("POST", "/embedding/provider"),
+        ("POST", "/memory/redistill"),
     }
     assert ("GET", "/session") in bridge_sigs
     assert ("POST", "/login") not in bridge_sigs
@@ -300,6 +301,121 @@ def test_memory_merge_requires_two_ids(bridge_module, plugin):
         bridge.memory_merge(FakeRequest(json_body={"user": "u1", "ids": [1]}))
     )
     assert status == 400 and "error" in payload
+
+
+# ── 重新蒸馏（TMEAAA-513）────────────────────────────────────────────────────
+
+
+class _RedistillLLMContext:
+    def __init__(self, text):
+        self._text = text
+
+    def get_using_provider(self, **kw):
+        return None
+
+    async def get_current_chat_provider_id(self, **kw):
+        return "mock"
+
+    async def llm_generate(self, **kw):
+        return types.SimpleNamespace(completion_text=self._text, usage=None)
+
+
+class _RedistillBoomContext:
+    def get_using_provider(self, **kw):
+        return None
+
+    async def get_current_chat_provider_id(self, **kw):
+        return "mock"
+
+    async def llm_generate(self, **kw):
+        raise RuntimeError("boom")
+
+
+def test_memory_redistill_replaces_text_on_success(bridge_module, plugin):
+    bridge = bridge_module.PluginPagesBridge(plugin)
+    add, _ = run(
+        bridge.memory_add(FakeRequest(json_body={"user": "u1", "memory": "用户可能喜欢喝咖啡"}))
+    )
+    mem_id = add["memory_id"]
+    plugin._cfg.distill_provider_id = "mock-provider"
+    plugin.context = _RedistillLLMContext(
+        '{"memories":[{"memory":"用户偏好手冲咖啡，每天早晨一杯",'
+        '"memory_type":"preference","importance":0.9,"confidence":0.9,"score":0.8}]}'
+    )
+
+    payload, status = run(
+        bridge.memory_redistill(FakeRequest(json_body={"user": "u1", "id": mem_id}))
+    )
+    assert status == 200 and payload["ok"] is True
+    assert payload["source_channel"] == "redistill"
+
+    listed, _ = run(bridge.memories(FakeRequest(query={"user": "u1"})))
+    row = next(m for m in listed["memories"] if m["id"] == mem_id)
+    assert "手冲咖啡" in row["memory"]
+    assert row["source_channel"] == "redistill"
+
+
+def test_memory_redistill_not_found(bridge_module, plugin):
+    bridge = bridge_module.PluginPagesBridge(plugin)
+    payload, status = run(
+        bridge.memory_redistill(FakeRequest(json_body={"user": "u1", "id": 9999}))
+    )
+    assert status == 404 and payload["category"] == "not_found"
+
+
+def test_memory_redistill_no_provider(bridge_module, plugin):
+    bridge = bridge_module.PluginPagesBridge(plugin)
+    add, _ = run(
+        bridge.memory_add(FakeRequest(json_body={"user": "u1", "memory": "用户喜欢登山"}))
+    )
+    plugin._cfg.distill_provider_id = ""
+    plugin._cfg.distill_model_id = ""
+    plugin._cfg.use_independent_distill_model = False
+    plugin.context = None
+
+    payload, status = run(
+        bridge.memory_redistill(FakeRequest(json_body={"user": "u1", "id": add["memory_id"]}))
+    )
+    assert status == 400 and payload["category"] == "no_provider"
+
+
+def test_memory_redistill_llm_error_does_not_downgrade(bridge_module, plugin):
+    bridge = bridge_module.PluginPagesBridge(plugin)
+    add, _ = run(
+        bridge.memory_add(FakeRequest(json_body={"user": "u1", "memory": "用户喜欢登山"}))
+    )
+    mem_id = add["memory_id"]
+    plugin._cfg.distill_provider_id = "mock-provider"
+    plugin.context = _RedistillBoomContext()
+
+    payload, status = run(
+        bridge.memory_redistill(FakeRequest(json_body={"user": "u1", "id": mem_id}))
+    )
+    assert status == 502 and payload["category"] == "llm_error"
+
+    listed, _ = run(bridge.memories(FakeRequest(query={"user": "u1"})))
+    row = next(m for m in listed["memories"] if m["id"] == mem_id)
+    assert row["memory"] == "用户喜欢登山"
+    assert row["source_channel"] == "webui"
+
+
+def test_memory_redistill_unparseable_does_not_downgrade(bridge_module, plugin):
+    bridge = bridge_module.PluginPagesBridge(plugin)
+    add, _ = run(
+        bridge.memory_add(FakeRequest(json_body={"user": "u1", "memory": "用户喜欢登山"}))
+    )
+    mem_id = add["memory_id"]
+    plugin._cfg.distill_provider_id = "mock-provider"
+    plugin.context = _RedistillLLMContext("完全不是 JSON 的内容")
+
+    payload, status = run(
+        bridge.memory_redistill(FakeRequest(json_body={"user": "u1", "id": mem_id}))
+    )
+    assert status == 502 and payload["category"] == "unparseable"
+
+    listed, _ = run(bridge.memories(FakeRequest(query={"user": "u1"})))
+    row = next(m for m in listed["memories"] if m["id"] == mem_id)
+    assert row["memory"] == "用户喜欢登山"
 
 
 # ── 画像 ────────────────────────────────────────────────────────────────────

@@ -197,8 +197,23 @@ def build_bridge_payload(payload: Any, status: int) -> Tuple[Any, int]:
             message = payload.get("error") or payload.get("message")
         else:
             message = str(payload)
-        return {"status": "error", "message": str(message or "request failed")}, status
+        body: dict[str, Any] = {
+            "status": "error",
+            "message": str(message or "request failed"),
+        }
+        if isinstance(payload, dict) and payload.get("category"):
+            body["category"] = str(payload["category"])
+        return body, status
     return payload, status
+
+
+def _redistill_error_status(category: str) -> int:
+    """重新蒸馏失败分类 → HTTP 状态码：not_found=404, 配置缺失=400, 上游失败=502。"""
+    if category == "not_found":
+        return 404
+    if category == "no_provider":
+        return 400
+    return 502
 
 
 # ── bridge 实现 ─────────────────────────────────────────────────────────────
@@ -222,6 +237,7 @@ class PluginPagesBridge:
         BridgeRoute(("POST",), "/memory/delete", "memory_delete", "删除记忆"),
         BridgeRoute(("POST",), "/memory/pin", "memory_pin", "常驻/取消常驻记忆"),
         BridgeRoute(("POST",), "/memory/refine", "memory_refine", "记忆提纯"),
+        BridgeRoute(("POST",), "/memory/redistill", "memory_redistill", "重新蒸馏单条记忆"),
         BridgeRoute(("POST",), "/memory/merge", "memory_merge", "合并记忆"),
         BridgeRoute(("POST",), "/memory/split", "memory_split", "拆分记忆"),
         BridgeRoute(("POST",), "/distill", "distill_trigger", "触发蒸馏"),
@@ -335,6 +351,9 @@ class PluginPagesBridge:
 
             if final_status >= 400:
                 message = body.get("message") if isinstance(body, dict) else None
+                # 保留结构化错误字段（如 category），避免只回 message 丢失语义。
+                if isinstance(body, dict) and set(body) - {"status", "message"}:
+                    return json_response(body, status_code=final_status)
                 return error_response(str(message or "request failed"), status_code=final_status)
             return json_response(body, status_code=final_status)
 
@@ -460,6 +479,24 @@ class PluginPagesBridge:
             unified_msg_origin=str(data.get("unified_msg_origin", "")),
         )
         return {"ok": True, **result}, 200
+
+    async def memory_redistill(self, request: Any) -> BridgeResult:
+        data = await _json_object(request)
+        user = str(data.get("user", "") or "").strip()
+        if not user:
+            return {"error": "user is required"}, 400
+        memory_id = _require_positive_int(data.get("id"), field="id")
+        try:
+            result = await self.admin().redistill_memory(
+                user=user,
+                memory_id=memory_id,
+                unified_msg_origin=str(data.get("unified_msg_origin", "") or ""),
+            )
+        except LookupError as exc:
+            return {"error": str(exc), "category": "not_found"}, 404
+        if not result.get("ok"):
+            return result, _redistill_error_status(str(result.get("category", "")))
+        return result, 200
 
     async def memory_merge(self, request: Any) -> BridgeResult:
         data = await _json_object(request)
