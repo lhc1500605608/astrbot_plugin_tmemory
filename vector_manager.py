@@ -48,7 +48,9 @@ class VectorManager:
         if self.embedding_provider is not None:
             self._last_resolve_ts = time.monotonic()
 
-    async def refresh(self, min_interval_sec: float = 0.0) -> bool:
+    async def refresh(
+        self, min_interval_sec: float = 0.0, force: bool = False
+    ) -> bool:
         """provider 就绪后补解析（幂等）；返回 embedding provider 是否可用。
 
         AstrBot 4.28 冷启动会先加载插件、后实例化 provider，``initialize`` 时
@@ -56,12 +58,20 @@ class VectorManager:
 
         ``min_interval_sec`` 用于热路径节流：距上次尝试不足该间隔时直接跳过，
         避免 provider 长期缺失时每次 embed 都重复探测并重复告警。
+        ``force=True`` 时忽略节流并丢弃当前实例重新解析（TMEAAA-510：插件重载后
+        旧 provider 的 httpx client 已关闭，必须重新拿到新实例）。
         """
         now = time.monotonic()
-        if min_interval_sec > 0 and (now - self._last_resolve_ts) < min_interval_sec:
+        if (
+            not force
+            and min_interval_sec > 0
+            and (now - self._last_resolve_ts) < min_interval_sec
+        ):
             return self.embedding_provider is not None
         self._last_resolve_ts = now
-        if self.embedding_provider is None:
+        if force or self.embedding_provider is None:
+            if force:
+                self.embedding_provider = None
             self.fallback_reason = ""
             await self._init_embedding_provider(self.config)
         if self.rerank_provider is None:

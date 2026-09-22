@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v0.12.3] - 2026-09-22
+
+修复安全拦截误拦正常记忆（TMEAAA-510），并让插件重载后的向量嵌入自动恢复。
+无配置迁移，直接替换安装即可。
+
+### Fixed
+
+- **安全拦截误拦**（TMEAAA-510）：蒸馏输出安全审计不再用裸关键词（`password`/`secret`/`token`/`api key`/`bearer`）匹配，改为只拦真实凭据「值形态」（`sk-`/`tp-`/`abk-` 前缀、`Bearer <token>`、`key/password/密码` 赋值式值）与注入/越狱内容；「token 消耗」「token plan」「API key 轮换流程」等正常记忆不再被拦截。
+- **嵌入 provider 失效自愈**（TMEAAA-510）：插件重载后旧 Embedding Provider 的 httpx client 已关闭时，`embed` 失败会强制重新解析 provider 并重试一次，向量检索自动恢复；`VectorManager.refresh(force=True)` 支持丢弃陈旧实例重新解析。
+
 ## [v0.12.2] - 2026-09-21
 
 配置/UI 文案整顿（TMEAAA-487）：去除配置页与 README 中的内部术语与版本行为史，精简过长的 `description`/`hint`。

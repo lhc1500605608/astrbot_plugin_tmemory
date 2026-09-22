@@ -111,6 +111,42 @@ async def get_http_session(plugin):
     return plugin._http_session
 
 
+def _record_provider_failure(plugin, error: Exception) -> None:
+    """记录一次 provider 调用失败（计数 + 最近错误 + 告警）。"""
+    plugin._embed_provider_fail_count = (
+        getattr(plugin, "_embed_provider_fail_count", 0) + 1
+    )
+    plugin._embed_last_error = f"provider_fail: {str(error)[:180]}"
+    logger.warning("[tmemory] provider embed_text failed: %s", error)
+
+
+def _is_closed_provider_error(error: Exception) -> bool:
+    """判断异常是否由「客户端已关闭」引起（插件重载后的典型症状）。"""
+    return "closed" in str(error).lower()
+
+
+async def _refresh_after_closed(vm) -> bool:
+    """强制重新解析 provider（丢弃已关闭的旧实例）；返回是否拿到可用 provider。"""
+    if vm is None:
+        return False
+    refresh = getattr(vm, "refresh", None)
+    if not callable(refresh):
+        return False
+    try:
+        await refresh(force=True)
+    except TypeError:
+        # 兼容未实现 force 参数的 VectorManager 鸭子类型。
+        try:
+            await refresh()
+        except Exception as e:
+            logger.debug("[tmemory] embedding provider refresh failed: %s", e)
+            return False
+    except Exception as e:
+        logger.debug("[tmemory] embedding provider refresh failed: %s", e)
+        return False
+    return getattr(vm, "embedding_provider", None) is not None
+
+
 async def embed_text(plugin, text: str) -> Optional[List[float]]:
     """生成文本向量，仅使用 VectorManager 的 AstrBot Embedding Provider。
 
@@ -135,12 +171,22 @@ async def embed_text(plugin, text: str) -> Optional[List[float]]:
     try:
         vec = await provider.embed_text(text)
     except Exception as e:
-        plugin._embed_provider_fail_count = (
-            getattr(plugin, "_embed_provider_fail_count", 0) + 1
-        )
-        plugin._embed_last_error = f"provider_fail: {str(e)[:180]}"
-        logger.warning("[tmemory] provider embed_text failed: %s", e)
-        return None
+        # TMEAAA-510：插件重载后旧 provider 的 httpx client 已被关闭，仅靠
+        # provider 为 None 才刷新会漏掉这种「存在但已失效」的实例 → 强制重新
+        # 解析并重试一次，重载后自动恢复向量能力。
+        if _is_closed_provider_error(e) and await _refresh_after_closed(vm):
+            provider = getattr(vm, "embedding_provider", None)
+            try:
+                vec = await provider.embed_text(text)
+                logger.info(
+                    "[tmemory] embedding provider recovered after closed-client error"
+                )
+            except Exception as retry_error:
+                _record_provider_failure(plugin, retry_error)
+                return None
+        else:
+            _record_provider_failure(plugin, e)
+            return None
 
     if not vec:
         plugin._embed_fail_count += 1
