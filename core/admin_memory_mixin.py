@@ -41,6 +41,7 @@ class AdminMemoryMixin:
                 SELECT id, memory_type, memory, score, importance, confidence,
                        reinforce_count, is_active,
                        COALESCE(is_pinned, 0) AS is_pinned,
+                       source_channel,
                        last_seen_at, created_at, updated_at
                 FROM memories WHERE canonical_user_id = ? AND is_active = 1
                 ORDER BY importance DESC, score DESC, updated_at DESC LIMIT 200
@@ -58,6 +59,7 @@ class AdminMemoryMixin:
                 "reinforce_count": int(r["reinforce_count"]),
                 "is_active": int(r["is_active"]),
                 "is_pinned": int(r["is_pinned"]),
+                "source_channel": str(r["source_channel"]),
                 "last_seen_at": str(r["last_seen_at"]),
                 "created_at": str(r["created_at"]),
                 "updated_at": str(r["updated_at"]),
@@ -378,7 +380,7 @@ class AdminMemoryMixin:
         with self._db() as conn:
             row = conn.execute(
                 "SELECT id, canonical_user_id, source_adapter, source_user_id, "
-                "memory, memory_type, score, importance, confidence "
+                "memory, memory_type, score, importance, confidence, episode_id "
                 "FROM memories WHERE id=? AND canonical_user_id=?",
                 (memory_id, canonical_id),
             ).fetchone()

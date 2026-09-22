@@ -64,6 +64,7 @@ def test_attribution_keeps_everything_without_assistant_rows(plugin_module):
 @pytest.mark.asyncio
 async def test_auto_distill_fallback_excludes_assistant_content(plugin):
     plugin.context = _MockContextNoProvider()
+    plugin._cfg.distill_fallback_to_rules = True
     await _seed(plugin, "auto-fallback")
 
     await plugin._run_distill_cycle(force=True, trigger="auto")
@@ -116,12 +117,14 @@ class _PlainEvent:
 @pytest.mark.asyncio
 async def test_manual_command_distill_excludes_assistant_content(plugin):
     plugin.context = _MockContextNoProvider()
+    plugin._cfg.distill_fallback_to_rules = True
     await _seed(plugin, "manual-cmd")
 
     async for _ in plugin._handle_tm_distill_now(_PlainEvent()):
         pass
 
     mems = _memories(plugin, "manual-cmd")
+    assert mems
     assert all("牛排" not in m and "攀岩" not in m for m in mems)
 
 
@@ -130,6 +133,7 @@ async def test_webui_manual_distill_excludes_assistant_content(plugin):
     from astrbot_plugin_tmemory.core.admin_service import AdminService
 
     plugin.context = _MockContextNoProvider()
+    plugin._cfg.distill_fallback_to_rules = True
     await _seed(plugin, "manual-web")
 
     result = await AdminService(plugin).trigger_distill()

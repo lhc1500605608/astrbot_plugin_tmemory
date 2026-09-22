@@ -346,10 +346,57 @@ async def test_distill_cycle_integrates_cache_llm_memory_and_history(plugin_with
 
 
 @pytest.mark.asyncio
-async def test_distill_cycle_falls_back_to_rule_and_still_persists_memory(
-    plugin_with_ctx,
-):
-    """LLM 异常时 run_distill_cycle 应走规则降级并完成入库与历史记录。"""
+async def test_distill_cycle_no_fallback_by_default(plugin_with_ctx):
+    """默认不降级：LLM 异常时不生成任何记忆，错误写入 distill_history。"""
+    plugin, ctx = plugin_with_ctx
+
+    await plugin._insert_conversation(
+        canonical_id="no-fallback-user",
+        role="user",
+        content="我长期住在杭州，工作日早上通常七点半出门。",
+        source_adapter="qq",
+        source_user_id="42",
+        unified_msg_origin="group:1",
+    )
+
+    async def bad_llm_generate(**kwargs):
+        raise RuntimeError("simulate distill provider outage")
+
+    ctx.llm_generate = bad_llm_generate
+    plugin._cfg.distill_provider_id = "mock-provider"
+    plugin._cfg.use_independent_distill_model = True
+    assert plugin._cfg.distill_fallback_to_rules is False
+
+    processed_users, total_memories, errs = await plugin._run_distill_cycle(
+        force=True, trigger="qa-no-fallback-cycle"
+    )
+
+    with plugin._db() as conn:
+        mem_count = conn.execute(
+            "SELECT COUNT(*) AS n FROM memories WHERE canonical_user_id=?",
+            ("no-fallback-user",),
+        ).fetchone()["n"]
+        pending = conn.execute(
+            "SELECT COUNT(*) AS n FROM conversation_cache WHERE canonical_user_id=? AND distilled=0",
+            ("no-fallback-user",),
+        ).fetchone()["n"]
+        history = conn.execute(
+            "SELECT errors, users_failed FROM distill_history ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+
+    assert processed_users == 1
+    assert total_memories == 0
+    assert mem_count == 0
+    assert pending == 0
+    assert errs, "结构化错误应被记录"
+    assert any(e.category.value == "llm_error" for e in errs)
+    assert "llm_error" in str(history["errors"])
+    assert history["users_failed"] >= 1
+
+
+@pytest.mark.asyncio
+async def test_distill_cycle_falls_back_to_rule_when_enabled(plugin_with_ctx):
+    """开关开启时保留旧规则降级：入库规则记忆并标记 rule_fallback。"""
     plugin, ctx = plugin_with_ctx
 
     await plugin._insert_conversation(
@@ -367,6 +414,7 @@ async def test_distill_cycle_falls_back_to_rule_and_still_persists_memory(
     ctx.llm_generate = bad_llm_generate
     plugin._cfg.distill_provider_id = "mock-provider"
     plugin._cfg.use_independent_distill_model = True
+    plugin._cfg.distill_fallback_to_rules = True
 
     processed_users, total_memories, _errs = await plugin._run_distill_cycle(
         force=True, trigger="qa-rule-fallback-cycle"
@@ -399,7 +447,7 @@ async def test_distill_cycle_falls_back_to_rule_and_still_persists_memory(
     assert total_memories == 1
     assert pending == 0
     assert memory["memory_type"] == "fact"
-    assert memory["source_channel"] == "scheduled_distill"
+    assert memory["source_channel"] == "rule_fallback"
     assert "杭州" in memory["memory"]
     assert history["trigger_type"] == "qa-rule-fallback-cycle"
     assert history["users_processed"] == 1
@@ -590,8 +638,8 @@ async def test_on_llm_response_respects_capture_assistant_reply_when_auto_captur
 
 
 @pytest.mark.asyncio
-async def test_distill_rows_with_llm_fallback_on_llm_error(plugin_with_ctx):
-    """LLM 调用抛出异常时，回退到规则蒸馏并返回非空结果。"""
+async def test_distill_rows_with_llm_no_fallback_on_llm_error_by_default(plugin_with_ctx):
+    """默认不降级：LLM 调用抛异常时不产生记忆，返回 llm_error 记录。"""
     plugin, ctx = plugin_with_ctx
 
     rows = [
@@ -614,18 +662,58 @@ async def test_distill_rows_with_llm_fallback_on_llm_error(plugin_with_ctx):
     plugin._cfg.distill_provider_id = "mock-provider"
     plugin._cfg.distill_model_id = ""
     plugin._cfg.use_independent_distill_model = True
+    assert plugin._cfg.distill_fallback_to_rules is False
 
-    items, tok_in, tok_out, _errs = await plugin._distill_rows_with_llm(rows)
+    items, tok_in, tok_out, errs = await plugin._distill_rows_with_llm(rows)
 
-    # 回退路径应返回至少 1 条规则蒸馏结果
-    assert len(items) >= 1
-    assert tok_in == -1
-    assert tok_out == -1
+    assert items == []
+    assert (tok_in, tok_out) == (-1, -1)
+    assert len(errs) == 1
+    assert errs[0].category.value == "llm_error"
+    assert errs[0].code == "RuntimeError"
+    assert errs[0].category_label() == "llm_error(RuntimeError)"
 
 
 @pytest.mark.asyncio
-async def test_distill_rows_with_llm_fallback_when_no_provider(plugin):
-    """未配置 provider 时直接走规则蒸馏，不调用 LLM。"""
+async def test_distill_rows_with_llm_fallback_on_llm_error_when_enabled(plugin_with_ctx):
+    """开关开启时保留旧行为：LLM 异常回退规则蒸馏并返回非空结果。"""
+    plugin, ctx = plugin_with_ctx
+
+    rows = [
+        {
+            "id": 1,
+            "role": "user",
+            "content": "我住在北京，每天骑车上班",
+            "source_adapter": "qq",
+            "source_user_id": "42",
+            "unified_msg_origin": "group:1",
+            "scope": "user",
+            "persona_id": "",
+        }
+    ]
+
+    async def bad_llm(**kwargs):
+        raise RuntimeError("simulate LLM timeout")
+
+    ctx.llm_generate = bad_llm
+    plugin._cfg.distill_provider_id = "mock-provider"
+    plugin._cfg.distill_model_id = ""
+    plugin._cfg.use_independent_distill_model = True
+    plugin._cfg.distill_fallback_to_rules = True
+
+    items, tok_in, tok_out, errs = await plugin._distill_rows_with_llm(rows)
+
+    # 回退路径应返回至少 1 条规则蒸馏结果，并标记来源。
+    assert len(items) >= 1
+    assert items[0]["source"] == "rule_fallback"
+    assert tok_in == -1
+    assert tok_out == -1
+    assert errs[0].category.value == "fallback"
+
+
+@pytest.mark.asyncio
+async def test_distill_rows_with_llm_no_fallback_when_no_provider(plugin):
+    """未配置 provider 时默认不降级，返回 no_provider 记录。"""
     rows = [
         {
             "id": 1,
@@ -642,12 +730,49 @@ async def test_distill_rows_with_llm_fallback_when_no_provider(plugin):
     plugin._cfg.distill_provider_id = ""
     plugin._cfg.distill_model_id = ""
     plugin._cfg.use_independent_distill_model = False
+    assert plugin._cfg.distill_fallback_to_rules is False
 
-    items, tok_in, tok_out, _errs = await plugin._distill_rows_with_llm(rows)
+    items, tok_in, tok_out, errs = await plugin._distill_rows_with_llm(rows)
 
-    assert len(items) >= 1
-    assert tok_in == -1
-    assert tok_out == -1
+    assert items == []
+    assert (tok_in, tok_out) == (-1, -1)
+    assert errs[0].category.value == "no_provider"
+
+
+@pytest.mark.asyncio
+async def test_distill_rows_with_llm_no_fallback_on_unparseable(plugin_with_ctx):
+    """LLM 返回无法解析内容时默认不降级，返回 unparseable 记录。"""
+    plugin, ctx = plugin_with_ctx
+
+    class _Resp:
+        completion_text = "这不是 JSON"
+        usage = None
+
+    async def bad_llm(**kwargs):
+        return _Resp()
+
+    ctx.llm_generate = bad_llm
+    plugin._cfg.distill_provider_id = "mock-provider"
+    plugin._cfg.distill_model_id = ""
+    plugin._cfg.use_independent_distill_model = True
+
+    rows = [
+        {
+            "id": 1,
+            "role": "user",
+            "content": "我住在北京，每天骑车上班",
+            "source_adapter": "qq",
+            "source_user_id": "42",
+            "unified_msg_origin": "group:1",
+            "scope": "user",
+            "persona_id": "",
+        }
+    ]
+    items, tok_in, tok_out, errs = await plugin._distill_rows_with_llm(rows)
+
+    assert items == []
+    assert (tok_in, tok_out) == (-1, -1)
+    assert errs[0].category.value == "unparseable"
 
 
 # ── 场景 2: 记忆衰减 / 自动裁剪 ─────────────────────────────────────────────

@@ -172,3 +172,216 @@ class AdminDistillMixin:
             include_pinned=include_pinned,
             extra_instruction=extra_instruction,
         )
+
+    async def redistill_memory(
+        self,
+        user: str,
+        memory_id: int,
+        unified_msg_origin: str = "",
+    ) -> dict[str, Any]:
+        """对单条记忆重新蒸馏（失败不降级）。
+
+        成功时就地替换该条记忆文本（保留 id、更新 ``updated_at`` 与
+        ``source_channel='redistill'``）；失败时返回 ``error`` + ``category``，
+        绝不生成规则兜底记忆。
+
+        Raises:
+            LookupError: 记忆不存在或不属于该用户（bridge 映射为 404）。
+        """
+        from .attribution import filter_assistant_attributed
+        from .distill_errors import exception_code
+        from .style_analyzer import get_style_analyzer
+
+        row = self._fetch_memory_by_id(user, memory_id)
+        if not row:
+            raise LookupError("memory not found")
+
+        rows, evidence_source = self._collect_redistill_rows(
+            user, row, unified_msg_origin
+        )
+
+        plugin = self._plugin
+        mgr = plugin._distill_mgr
+        provider_id = await mgr.resolve_distill_provider_id(rows, plugin.context)
+        if not provider_id:
+            return {
+                "ok": False,
+                "error": "无法确定用于重新蒸馏的 LLM provider",
+                "category": "no_provider",
+            }
+        model_id = await mgr.resolve_distill_model_id(rows)
+
+        transcript, _user_transcript = self._build_redistill_transcript(rows)
+        style_analyzer = get_style_analyzer()
+        style_context = style_analyzer.build_style_context(style_analyzer.analyze(rows))
+        prompt = mgr.build_distill_prompt(transcript, style_context)
+
+        try:
+            llm_kwargs: dict[str, Any] = {
+                "chat_provider_id": provider_id,
+                "prompt": prompt,
+            }
+            if model_id:
+                llm_kwargs["model_id"] = model_id
+            llm_resp = await plugin.context.llm_generate(**llm_kwargs)
+            completion = plugin._strip_think_tags(
+                plugin._normalize_text(getattr(llm_resp, "completion_text", "") or "")
+            )
+            parsed = plugin._parse_llm_json_memories(completion)
+        except Exception as exc:  # noqa: BLE001 - 失败不降级，返回结构化错误
+            logger.warning("[tmemory] redistill llm failed id=%s: %s", memory_id, exc)
+            return {
+                "ok": False,
+                "error": f"LLM 调用失败: {type(exc).__name__}",
+                "category": "llm_error",
+                "code": exception_code(exc),
+            }
+
+        if not parsed:
+            return {
+                "ok": False,
+                "error": "LLM 未返回可解析的记忆",
+                "category": "unparseable",
+            }
+
+        parsed = filter_assistant_attributed(parsed, rows)
+        valid_items = plugin._validate_distill_output(parsed)
+        if not valid_items:
+            return {
+                "ok": False,
+                "error": "LLM 输出未通过校验",
+                "category": "unparseable",
+            }
+
+        # 单条重新蒸馏语义：产出多条时取最高分一条替换，其余忽略。
+        best = max(valid_items, key=lambda it: float(it.get("score", 0.0) or 0.0))
+        new_text = plugin._sanitize_text(
+            plugin._normalize_text(str(best.get("memory", "")))
+        )
+        if not new_text:
+            return {
+                "ok": False,
+                "error": "蒸馏结果为空",
+                "category": "unparseable",
+            }
+
+        self._update_memory_text(memory_id, new_text)
+        with self._db() as conn:
+            conn.execute(
+                "UPDATE memories SET source_channel='redistill' WHERE id=?",
+                (memory_id,),
+            )
+
+        if getattr(plugin, "_vec_available", False):
+            try:
+                await plugin._upsert_vector(memory_id, new_text)
+            except Exception as exc:  # noqa: BLE001 - 向量失败仅告警
+                logger.warning(
+                    "[tmemory] redistill vector upsert failed id=%s: %s", memory_id, exc
+                )
+
+        from .memory_ops import log_memory_event
+        log_memory_event(
+            plugin,
+            canonical_user_id=user,
+            event_type="redistill",
+            payload={
+                "memory_id": memory_id,
+                "evidence": evidence_source,
+                "old_memory": str(row["memory"]),
+            },
+        )
+        return {
+            "ok": True,
+            "memory_id": memory_id,
+            "memory": new_text,
+            "memory_type": str(best.get("memory_type", row["memory_type"])),
+            "source_channel": "redistill",
+            "evidence": evidence_source,
+        }
+
+    def _collect_redistill_rows(
+        self,
+        user: str,
+        memory_row: dict[str, Any],
+        unified_msg_origin: str,
+    ) -> tuple[list[dict[str, Any]], str]:
+        """取重新蒸馏的来源证据。
+
+        优先级：该记忆 episode 关联的原文 → 该用户最近的用户发言 →
+        对现有记忆文本做一次 LLM 归一化重写（无任何缓存时）。
+        """
+        episode_id = int(memory_row.get("episode_id", 0) or 0)
+        episode_rows: list[dict[str, Any]] = []
+        if episode_id:
+            with self._db() as conn:
+                episode_rows = [
+                    dict(r)
+                    for r in conn.execute(
+                        "SELECT cc.role AS role, cc.content AS content, "
+                        "cc.unified_msg_origin AS unified_msg_origin "
+                        "FROM episode_sources es "
+                        "JOIN conversation_cache cc ON cc.id = es.conversation_cache_id "
+                        "WHERE es.episode_id=? AND cc.canonical_user_id=? "
+                        "ORDER BY cc.id ASC",
+                        (episode_id, user),
+                    ).fetchall()
+                ]
+        if episode_rows:
+            return self._tag_redistill_origin(episode_rows, unified_msg_origin), "episode"
+
+        with self._db() as conn:
+            recent_rows = [
+                dict(r)
+                for r in conn.execute(
+                    "SELECT role, content, unified_msg_origin "
+                    "FROM conversation_cache "
+                    "WHERE canonical_user_id=? AND role='user' AND archived_at='' "
+                    "ORDER BY id DESC LIMIT 40",
+                    (user,),
+                ).fetchall()
+            ]
+        if recent_rows:
+            return self._tag_redistill_origin(recent_rows, unified_msg_origin), "recent_cache"
+
+        return (
+            [
+                {
+                    "role": "user",
+                    "content": str(memory_row.get("memory", "")),
+                    "unified_msg_origin": unified_msg_origin,
+                }
+            ],
+            "memory_text",
+        )
+
+    @staticmethod
+    def _tag_redistill_origin(
+        rows: list[dict[str, Any]], unified_msg_origin: str
+    ) -> list[dict[str, Any]]:
+        for r in rows:
+            if not r.get("unified_msg_origin"):
+                r["unified_msg_origin"] = unified_msg_origin
+        return rows
+
+    @staticmethod
+    def _build_redistill_transcript(rows: list[dict[str, Any]]) -> tuple[str, str]:
+        user_lines: list[str] = []
+        assistant_lines: list[str] = []
+        user_transcript_lines: list[str] = []
+        for r in rows:
+            role = str(r.get("role", "user"))
+            content = str(r.get("content", ""))
+            if role == "assistant":
+                assistant_lines.append(f"- {content}")
+            else:
+                label = "" if role == "user" else f"[{role}] "
+                user_lines.append(f"- {label}{content}")
+                user_transcript_lines.append(f"{role}: {content}")
+        transcript = "【用户发言（唯一可作为用户画像依据）】\n" + "\n".join(user_lines)
+        if assistant_lines:
+            transcript += (
+                "\n【助手发言（仅作上下文参考，禁止作为用户画像依据）】\n"
+                + "\n".join(assistant_lines)
+            )
+        return transcript, "\n".join(user_transcript_lines)
