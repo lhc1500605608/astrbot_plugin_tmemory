@@ -125,26 +125,72 @@ def _is_closed_provider_error(error: Exception) -> bool:
     return "closed" in str(error).lower()
 
 
-async def _refresh_after_closed(vm) -> bool:
-    """强制重新解析 provider（丢弃已关闭的旧实例）；返回是否拿到可用 provider。"""
-    if vm is None:
+def _provider_looks_closed(provider) -> bool:
+    """异常信息未含 "closed" 时（部分 openai 版本会包装成 Connection error）
+    仍以实例自身的 client 关闭状态判定，确保自愈仍然触发（TMEAAA-519）。"""
+    try:
+        from ..adapters import provider as _provider_port
+
+        raw = getattr(provider, "_provider", provider)
+        return _provider_port.instance_is_closed(raw)
+    except Exception:
         return False
+
+
+async def _refresh_after_closed(vm, failed=None):
+    """强制重新解析 provider（丢弃已关闭的旧实例）；返回新 provider 或 None。
+
+    ``failed`` 为刚因 client 已关闭而失败的 provider 适配器/实例；解析时跳过它，
+    避免再次拿回同一个失效实例（TMEAAA-519）。
+    """
+    if vm is None:
+        return None
     refresh = getattr(vm, "refresh", None)
     if not callable(refresh):
-        return False
+        return None
+    exclude = {id(failed)} if failed is not None else None
     try:
-        await refresh(force=True)
+        await refresh(force=True, exclude=exclude)
     except TypeError:
-        # 兼容未实现 force 参数的 VectorManager 鸭子类型。
+        # 兼容未实现 exclude 参数的 VectorManager 鸭子类型。
         try:
-            await refresh()
+            await refresh(force=True)
         except Exception as e:
             logger.debug("[tmemory] embedding provider refresh failed: %s", e)
-            return False
+            return None
     except Exception as e:
         logger.debug("[tmemory] embedding provider refresh failed: %s", e)
-        return False
-    return getattr(vm, "embedding_provider", None) is not None
+        return None
+    return getattr(vm, "embedding_provider", None)
+
+
+async def _recover_closed_provider(vm, failed) -> bool:
+    """client 已关闭时尝试自愈：先重解析换实例，仍不行则按配置重建 client。
+
+    AstrBot 关闭 provider client 后不会把它从 ``embedding_provider_insts`` 移除，
+    仅重新解析会一直拿回同一个已关闭实例（TMEAAA-510 自愈因此无效，见 519）。
+    返回是否拿到可用的新 provider。
+    """
+    failed_raw = getattr(failed, "_provider", failed)
+    provider = await _refresh_after_closed(vm, failed_raw)
+    if provider is not None:
+        new_raw = getattr(provider, "_provider", provider)
+        if new_raw is not failed_raw:
+            return True
+    rebuild = getattr(vm, "rebuild_embedding_provider", None)
+    if callable(rebuild):
+        try:
+            if await rebuild(failed):
+                return True
+        except TypeError:
+            try:
+                if await rebuild():
+                    return True
+            except Exception as e:
+                logger.debug("[tmemory] embedding provider rebuild failed: %s", e)
+        except Exception as e:
+            logger.debug("[tmemory] embedding provider rebuild failed: %s", e)
+    return False
 
 
 async def embed_text(plugin, text: str) -> Optional[List[float]]:
@@ -171,10 +217,12 @@ async def embed_text(plugin, text: str) -> Optional[List[float]]:
     try:
         vec = await provider.embed_text(text)
     except Exception as e:
-        # TMEAAA-510：插件重载后旧 provider 的 httpx client 已被关闭，仅靠
-        # provider 为 None 才刷新会漏掉这种「存在但已失效」的实例 → 强制重新
-        # 解析并重试一次，重载后自动恢复向量能力。
-        if _is_closed_provider_error(e) and await _refresh_after_closed(vm):
+        # TMEAAA-510/519：插件重载或平台重建 provider 后，旧 provider 的 httpx
+        # client 已被关闭；此时重新解析往往仍是同一实例，故需在 adapter 层重建
+        # client 才可真正恢复向量能力。
+        if (
+            _is_closed_provider_error(e) or _provider_looks_closed(provider)
+        ) and await _recover_closed_provider(vm, provider):
             provider = getattr(vm, "embedding_provider", None)
             try:
                 vec = await provider.embed_text(text)
