@@ -77,6 +77,7 @@ body { font-family: var(--font); background:var(--bg); color:var(--text); min-he
 .type-task { background:#3d2e00; color:#e3b341; }
 .type-restriction { background:#3d1f20; color:#f85149; }
 .type-style { background:#2d1a3e; color:#bc8cff; }
+.type-rule_fallback { background:#3d2e00; color:#e3b341; }
 .score-bar { width:50px; height:6px; background:var(--surface2); border-radius:3px; display:inline-block; vertical-align:middle; overflow:hidden; }
 .score-bar-fill { height:100%; border-radius:3px; }
 
@@ -314,7 +315,7 @@ body { font-family: var(--font); background:var(--bg); color:var(--text); min-he
               <th style="width:60px">置信度</th>
               <th style="width:45px">强化</th>
               <th style="width:30px">常驻</th>
-              <th style="width:120px">操作</th>
+              <th style="width:170px">操作</th>
             </tr>
           </thead>
           <tbody id="memoryTableBody"></tbody>
@@ -855,9 +856,10 @@ function renderMemoryTable(memories) {
     return;
   }
   tbody.innerHTML = filtered.map(function(m) {
+    var channelBadge = m.source_channel === 'rule_fallback' ? ' <span class="type-badge type-rule_fallback">规则兜底</span>' : '';
     return '<tr>' +
       '<td>' + m.id + '</td>' +
-      '<td><span class="type-badge type-' + m.memory_type + '">' + m.memory_type + '</span></td>' +
+      '<td><span class="type-badge type-' + m.memory_type + '">' + m.memory_type + '</span>' + channelBadge + '</td>' +
       '<td style="max-width:300px;word-break:break-all">' + escHtml(m.memory) + '</td>' +
       '<td>' + scoreBar(m.score) + '</td>' +
       '<td>' + scoreBar(m.importance) + '</td>' +
@@ -867,6 +869,7 @@ function renderMemoryTable(memories) {
       '<td>' +
         '<button class="btn btn-sm" onclick="togglePin(' + m.id + ', ' + !m.is_pinned + ')" title="' + (m.is_pinned ? '取消常驻' : '设为常驻') + '">' + (m.is_pinned ? '\ud83d\udccc' : '\ud83d\udccd') + '</button> ' +
         '<button class="btn btn-sm" onclick=\'openEditModal(' + JSON.stringify(m) + ')\'>' + '\u270f\ufe0f' + '</button> ' +
+        '<button class="btn btn-sm" onclick="redistillMemory(' + m.id + ')" title="重新蒸馏">重新蒸馏</button> ' +
         '<button class="btn btn-sm btn-danger" onclick="deleteMemory(' + m.id + ')">' + '\ud83d\uddd1\ufe0f' + '</button>' +
       '</td>' +
     '</tr>';
@@ -931,6 +934,18 @@ async function togglePin(id, pinned) {
   if (res && res.ok) {
     toast(pinned ? '已设为常驻' : '已取消常驻', 'success');
     if (currentUser) loadUserData(currentUser);
+  }
+}
+
+async function redistillMemory(id) {
+  var confirmed = await confirmDialog('确认对记忆 #' + id + ' 重新蒸馏？将调用 AI 重新提炼该条记忆。', { title: '重新蒸馏', okText: '重新蒸馏' });
+  if (!confirmed) return;
+  var res = await api('/memory/redistill', { method: 'POST', body: JSON.stringify({ user: currentUser, id: id }) });
+  if (res && !res.error) {
+    toast('已重新蒸馏', 'success');
+    if (currentUser) loadUserData(currentUser);
+  } else {
+    toast((res && res.message) || '重新蒸馏失败', 'error');
   }
 }
 
