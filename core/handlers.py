@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING, List, Optional
 
 from . import vector as _vector
@@ -18,6 +19,12 @@ logger = logging.getLogger("astrbot")
 _RECALL_FOR_PROMPT_TIMEOUT_SEC = 2.0
 _RECALL_FOR_PROMPT_MAX_CHARS = 200
 _RECALL_FOR_PROMPT_MAX_LIMIT = 50
+
+# get_profile_for_prompt 公共 API 约束（TMEAAA-522）
+_PROFILE_FOR_PROMPT_TIMEOUT_SEC = 2.0
+_PROFILE_FOR_PROMPT_MAX_SUMMARY_CHARS = 200
+_PROFILE_FOR_PROMPT_MAX_HIGHLIGHT_CHARS = 120
+_PROFILE_FOR_PROMPT_MAX_LIMIT = 50
 
 
 class PluginHandlersMixin(CommandHandlersMixin):
@@ -376,3 +383,123 @@ class PluginHandlersMixin(CommandHandlersMixin):
         except Exception as e:
             logger.debug("[tmemory] recall_for_prompt persona cache failed: %s", e)
         return ""
+
+    # ── 公共只读画像 API（供 companion-core 注入用户画像）────────────────────
+
+    async def get_profile_for_prompt(
+        self,
+        umo: str,
+        query: str = "",
+        limit: int = 5,
+        session_type: str = "private",
+    ) -> dict:
+        """只读、无副作用的用户画像读取公共 API（TMEAAA-522）。
+
+        复用 ``_resolve_canonical_from_umo`` 从 umo 解析 canonical_user_id，再读取
+        ``get_profile_summary`` + ``get_profile_items``（按 importance/confidence
+        排序取前 N）。
+
+        - 返回 ``{"facets": {facet: active_count}, "summary": "≤200字",
+          "highlights": ["≤120字", ...], "as_of": ISO8601}``。
+        - ``session_type == "group"``：隐私隔离，排除 private 来源与跨 persona 条目
+          （除非配置 ``private_memory_in_group``）。
+        - 未初始化 / 禁用（memory_mode=distill_only）/ 无画像 / 异常 → ``{}``，绝不抛出。
+        - 内部超时 ≤2s；只读，不写库。
+        """
+        try:
+            if not self._recall_api_ready():
+                return {}
+            return await asyncio.wait_for(
+                self._get_profile_for_prompt_impl(umo, query, limit, session_type),
+                timeout=_PROFILE_FOR_PROMPT_TIMEOUT_SEC,
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.debug("[tmemory] get_profile_for_prompt failed: %s", e)
+            return {}
+
+    async def _get_profile_for_prompt_impl(
+        self, umo: str, query: str, limit: int, session_type: str
+    ) -> dict:
+        umo = str(umo or "").strip()
+        if not umo:
+            return {}
+        canonical_id = self._resolve_canonical_from_umo(umo)
+        if not canonical_id:
+            return {}
+
+        from .admin_service import AdminService
+
+        admin = AdminService(self)
+        summary_data = admin.get_profile_summary(canonical_id) or {}
+        items = admin.get_profile_items(canonical_id, status="active") or []
+
+        is_group = str(session_type or "").strip().lower() == "group"
+        exclude_private = is_group and not bool(
+            getattr(self._cfg, "private_memory_in_group", False)
+        )
+        scope = self._recall_scope(session_type, umo)
+        persona_id = await self._resolve_persona_from_umo(umo)
+
+        visible = self._visible_profile_items(
+            items, scope, persona_id, exclude_private
+        )
+
+        facets: dict = {}
+        for item in visible:
+            facet = str(item.get("facet_type") or "")
+            if facet:
+                facets[facet] = facets.get(facet, 0) + 1
+
+        profile = summary_data.get("user_profile") or {}
+        summary = self._clip_text(
+            profile.get("summary_text", ""), _PROFILE_FOR_PROMPT_MAX_SUMMARY_CHARS
+        )
+
+        highlights: list[str] = []
+        for item in visible[: self._profile_limit(limit)]:
+            text = self._clip_text(
+                item.get("content", ""), _PROFILE_FOR_PROMPT_MAX_HIGHLIGHT_CHARS
+            )
+            if text:
+                highlights.append(text)
+
+        if not facets and not summary and not highlights:
+            return {}
+
+        return {
+            "facets": facets,
+            "summary": summary,
+            "highlights": highlights,
+            "as_of": datetime.now(timezone.utc).isoformat(),
+        }
+
+    @staticmethod
+    def _visible_profile_items(
+        items: list[dict], scope: str, persona_id: str, exclude_private: bool
+    ) -> list[dict]:
+        """按 source_scope / persona 过滤可见画像条目（与检索层隔离规则一致）。"""
+        out: list[dict] = []
+        for item in items or []:
+            item_scope = str(item.get("source_scope") or "user")
+            if item_scope != scope and item_scope != "user":
+                continue
+            if exclude_private and item_scope == "private":
+                continue
+            item_persona = str(item.get("persona_id") or "")
+            if item_persona and item_persona != persona_id:
+                continue
+            out.append(item)
+        return out
+
+    def _profile_limit(self, limit: int) -> int:
+        try:
+            value = 5 if limit is None else int(limit)
+        except (TypeError, ValueError):
+            value = 5
+        return max(1, min(value, _PROFILE_FOR_PROMPT_MAX_LIMIT))
+
+    def _clip_text(self, text, max_chars: int) -> str:
+        normalized = self._normalize_text(str(text or ""))
+        if len(normalized) > max_chars:
+            normalized = normalized[: max_chars - 1] + "…"
+        return normalized
