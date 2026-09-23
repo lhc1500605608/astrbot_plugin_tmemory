@@ -26,6 +26,10 @@ _PROFILE_FOR_PROMPT_MAX_SUMMARY_CHARS = 200
 _PROFILE_FOR_PROMPT_MAX_HIGHLIGHT_CHARS = 120
 _PROFILE_FOR_PROMPT_MAX_LIMIT = 50
 
+# resolve_person 公共 API 约束（TMEAAA-540）
+_RESOLVE_PERSON_TIMEOUT_SEC = 2.0
+_PRIVATE_MESSAGE_TYPE = "friendmessage"
+
 
 class PluginHandlersMixin(CommandHandlersMixin):
 
@@ -503,3 +507,67 @@ class PluginHandlersMixin(CommandHandlersMixin):
         if len(normalized) > max_chars:
             normalized = normalized[: max_chars - 1] + "…"
         return normalized
+
+    # ── 公共只读身份 API（供 companion-core 解析人物身份）────────────────────
+
+    async def resolve_person(self, umo: str) -> dict:
+        """只读人物身份解析公共 API（TMEAAA-540）。
+
+        从 umo（``platform:message_type:session_id``）解析「人物」权威身份：
+
+        - 私聊：``{"person_id": <canonical_user_id>, "adapter", "adapter_user_id",
+          "is_group": False}``；``person_id`` 即该 Person 的权威 id。
+        - 群聊：``is_group=True`` 且 ``person_id=""``（不跨人聚合；此时
+          ``adapter_user_id`` 为群会话 id）。
+        - 空 / 未初始化 / 异常 → ``{}``（fail-closed，绝不抛出）。
+        - 内部超时 ≤2s；只读，不写库、不隐式建绑定。
+        """
+        try:
+            if not self._identity_api_ready():
+                return {}
+            return await asyncio.wait_for(
+                self._resolve_person_impl(umo),
+                timeout=_RESOLVE_PERSON_TIMEOUT_SEC,
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.debug("[tmemory] resolve_person failed: %s", e)
+            return {}
+
+    def _identity_api_ready(self) -> bool:
+        """身份读取 API 是否可用（仅依赖 cfg + db，不依赖 memory_mode）。"""
+        return (
+            getattr(self, "_cfg", None) is not None
+            and getattr(self, "_db_mgr", None) is not None
+        )
+
+    async def _resolve_person_impl(self, umo: str) -> dict:
+        umo = str(umo or "").strip()
+        if not umo:
+            return {}
+        adapter, session_id = self._parse_umo(umo)
+        if not adapter or not session_id:
+            return {}
+        if self._is_group_umo(umo):
+            return {
+                "person_id": "",
+                "adapter": adapter,
+                "adapter_user_id": session_id,
+                "is_group": True,
+            }
+        canonical_id = self._resolve_canonical_from_umo(umo)
+        if not canonical_id:
+            return {}
+        return {
+            "person_id": canonical_id,
+            "adapter": adapter,
+            "adapter_user_id": session_id,
+            "is_group": False,
+        }
+
+    @staticmethod
+    def _is_group_umo(umo: str) -> bool:
+        """UMO 第二段为群聊消息类型时判定为群聊（``FriendMessage`` 为私聊）。"""
+        parts = str(umo or "").split(":")
+        if len(parts) < 3:
+            return False
+        return parts[1].strip().lower() not in ("", _PRIVATE_MESSAGE_TYPE)

@@ -86,6 +86,9 @@ def test_route_table_covers_every_legacy_capability(bridge_module):
         ("GET", "/embedding/providers"),
         ("POST", "/embedding/provider"),
         ("POST", "/memory/redistill"),
+        ("POST", "/identity/bind"),
+        ("GET", "/identity/list"),
+        ("POST", "/identity/unbind"),
     }
     assert ("GET", "/session") in bridge_sigs
     assert ("POST", "/login") not in bridge_sigs

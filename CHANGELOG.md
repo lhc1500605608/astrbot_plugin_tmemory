@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v0.15.0] - 2026-09-23
+
+跨适配器人物身份权威能力：新增只读 `resolve_person` 契约与身份绑定/解绑/列表 API（TMEAAA-540）。
+无破坏性迁移，直接替换安装即可。
+
+### Added
+
+- **只读人物身份契约 `resolve_person(umo)`**：私聊返回该 Person 的权威 `person_id`（= canonical_user_id）；群聊 `is_group=true` 且 `person_id=""`（不跨人聚合）；空/未初始化/异常返回 `{}`（fail-closed，≤2s）。供关联插件读取身份，不写库。
+- **身份绑定 bridge API**：`POST /identity/bind`（canonical 为空时按 `adapter:user` 建新人）、`GET /identity/list`（Person → 多适配器绑定，含 display_name）、`POST /identity/unbind`（回退为该 `adapter:user` 自成 Person），均幂等并写审计事件。
+- **显示名重复提示**（默认关闭，配置 `identity_autobind_display_name`）：开启后身份列表附带「显示名完全一致、是否同一人」提示，只提示、不自动绑定。
+
 ## [v0.14.1] - 2026-09-23
 
 修复「添加/编辑记忆」弹窗「类型」下拉显示英文裸值的问题（TMEAAA-535）。无配置迁移，直接替换安装即可。
