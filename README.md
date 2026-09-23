@@ -1,12 +1,12 @@
-# MemoryForge
+# MemoryForge · 铸忆
 
 <div align="center">
-  <img src="./logo.png" alt="MemoryForge" width="180">
+  <img src="./logo.png" alt="MemoryForge · 铸忆" width="180">
 </div>
 
-**MemoryForge** 是 [AstrBot](https://github.com/AstrBotDevs/AstrBot) 的长期记忆插件，通过自动采集对话、LLM 蒸馏和分层注入，让机器人在多轮、跨会话、跨平台场景下持续理解用户。
+**MemoryForge · 铸忆** 是 [AstrBot](https://github.com/AstrBotDevs/AstrBot) 的长期记忆插件，通过自动采集对话、LLM 蒸馏和分层注入，让机器人在多轮、跨会话、跨平台场景下持续理解用户。
 
-> 当前版本：`v0.15.0`。完整变更历史见 [`CHANGELOG.md`](./CHANGELOG.md)。
+> 当前版本：`v0.15.1`。完整变更历史见 [`CHANGELOG.md`](./CHANGELOG.md)。
 
 ## 功能概览
 
