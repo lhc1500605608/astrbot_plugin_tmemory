@@ -196,6 +196,17 @@ body { font-family: var(--font); background:var(--bg); color:var(--text); min-he
 .cost-trend { display:flex; gap:4px; align-items:flex-end; height:60px; margin-top:10px; }
 .cost-trend-bar { flex:1; background:var(--brand); border-radius:3px 3px 0 0; min-height:2px; transition:height .3s ease; }
 
+/* ── Person View ────────────────────────────────────────────────── */
+.person-group { background:var(--surface); border:1px solid var(--border); border-radius:var(--radius); margin-bottom:12px; overflow:hidden; }
+.person-group-head { display:flex; align-items:center; gap:10px; padding:10px 14px; background:var(--surface2); border-bottom:1px solid var(--border); flex-wrap:wrap; }
+.person-id { font-weight:600; font-size:13px; word-break:break-all; }
+.person-name { font-size:12px; background:var(--brand-light); color:var(--brand); padding:2px 8px; border-radius:10px; }
+.person-count { font-size:11px; color:var(--text2); margin-left:auto; }
+.suggest-card { background:var(--surface); border:1px solid var(--warn); border-radius:var(--radius); padding:12px 14px; margin-bottom:10px; }
+.suggest-card .suggest-title { font-size:13px; font-weight:600; color:var(--warn); margin-bottom:4px; }
+.suggest-card .suggest-body { font-size:12px; color:var(--text); line-height:1.6; margin-bottom:8px; }
+.suggest-card .suggest-actions { display:flex; gap:8px; }
+
 /* ── Mobile responsive ──────────────────────────────────────────── */
 @media (max-width: 768px) {
   .main { flex-direction:column; }
@@ -260,7 +271,7 @@ body { font-family: var(--font); background:var(--bg); color:var(--text); min-he
         <button onclick="switchTab('pending',this)">待蒸馏队列</button>
         <button onclick="switchTab('events',this)">审计日志</button>
         <button onclick="switchTab('refine',this)">手动精馏</button>
-        <button onclick="switchTab('identity',this)">用户管理</button>
+        <button id="tabIdentityBtn" onclick="switchTab('identity',this)">人物</button>
         <button onclick="switchTab('health',this)">系统健康</button>
         <button onclick="switchTab('proactive',this)">主动性配置</button>
         <button onclick="switchTab('importexport',this)">导入导出</button>
@@ -420,23 +431,16 @@ body { font-family: var(--font); background:var(--bg); color:var(--text); min-he
         </div>
       </div>
 
-      <!-- Identity View -->
+      <!-- Person View -->
       <div class="table-panel" id="panelIdentity" style="display:none">
-        <div style="margin-bottom:12px;display:flex;gap:8px;align-items:center;">
-          <button class="btn btn-sm btn-primary" onclick="openMergeModal()">合并用户</button>
-          <span style="font-size:12px;color:var(--text2)">将不同适配器的账号识别为同一个人，合并其记忆</span>
+        <div id="identitySuggestions" style="display:none;margin-bottom:12px"></div>
+        <div style="margin-bottom:12px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+          <button class="btn btn-sm btn-primary" onclick="openBindModal()" id="btnNewBind">新建绑定</button>
+          <button class="btn btn-sm" onclick="openMergeModal()" id="btnMergePersons">合并人物</button>
+          <span id="identityHint" style="font-size:12px;color:var(--text2)">将不同适配器上的账号识别为同一个人，统一管理记忆。</span>
         </div>
-        <table class="mem-table">
-          <thead><tr>
-            <th style="width:40px">ID</th>
-            <th style="width:100px">适配器</th>
-            <th>适配器用户 ID</th>
-            <th>统一用户 ID</th>
-            <th style="width:120px">更新时间</th>
-            <th style="width:80px">操作</th>
-          </tr></thead>
-          <tbody id="identityTableBody"></tbody>
-        </table>
+        <div id="identityGroupHint" style="font-size:12px;color:var(--text2);margin-bottom:12px">群聊按会话隔离，不归入人物；绑定仅合并个人身份。</div>
+        <div id="identityPersons"></div>
       </div>
 
       <!-- Proactive Config View -->
@@ -504,15 +508,15 @@ body { font-family: var(--font); background:var(--bg); color:var(--text); min-he
 <!-- Merge Modal -->
 <div class="modal-backdrop" id="mergeModal">
   <div class="modal" style="width:420px">
-    <div class="modal-header"><h3>合并用户</h3><button class="btn btn-icon btn-sm" onclick="closeModal('mergeModal')">X</button></div>
+    <div class="modal-header"><h3 id="mergeModalTitle">合并人物</h3><button class="btn btn-icon btn-sm" onclick="closeModal('mergeModal')">X</button></div>
     <div class="modal-body">
-      <p style="font-size:12px;color:var(--text2);margin-bottom:14px">将来源用户的所有记忆、缓存和绑定迁移到目标用户。合并后来源用户的数据将归入目标用户名下。</p>
-      <div class="form-group"><label>来源用户 (将被合并)</label><input id="mergeFrom" type="text" placeholder="例如 qq:123456"></div>
-      <div class="form-group"><label>目标用户 (保留)</label><input id="mergeTo" type="text" placeholder="例如 alice"></div>
+      <p id="mergeModalDesc" style="font-size:12px;color:var(--text2);margin-bottom:14px">将来源人物的全部记忆与绑定并入目标人物，合并后不可撤销。</p>
+      <div class="form-group"><label id="mergeFromLabel">来源人物（将被合并）</label><input id="mergeFrom" type="text" list="personDatalist" placeholder="输入人物 ID"></div>
+      <div class="form-group"><label id="mergeToLabel">目标人物（保留）</label><input id="mergeTo" type="text" list="personDatalist" placeholder="输入人物 ID"></div>
     </div>
     <div class="modal-footer">
       <button class="btn" onclick="closeModal('mergeModal')">取消</button>
-      <button class="btn btn-primary" onclick="doMerge()">确认合并</button>
+      <button class="btn btn-primary" onclick="doMerge()" id="mergeConfirmBtn">确认合并</button>
     </div>
   </div>
 </div>
@@ -520,19 +524,45 @@ body { font-family: var(--font); background:var(--bg); color:var(--text); min-he
 <!-- Rebind Modal -->
 <div class="modal-backdrop" id="rebindModal">
   <div class="modal" style="width:420px">
-    <div class="modal-header"><h3>改绑用户</h3><button class="btn btn-icon btn-sm" onclick="closeModal('rebindModal')">X</button></div>
+    <div class="modal-header"><h3 id="rebindModalTitle">改绑</h3><button class="btn btn-icon btn-sm" onclick="closeModal('rebindModal')">X</button></div>
     <div class="modal-body">
-      <p style="font-size:12px;color:var(--text2);margin-bottom:14px">将此适配器账号重新绑定到另一个统一用户 ID。</p>
-      <div class="form-group"><label>当前绑定</label><input id="rebindInfo" type="text" disabled style="opacity:.7"></div>
+      <p id="rebindModalDesc" style="font-size:12px;color:var(--text2);margin-bottom:14px">将该适配器账号改绑到另一个人物。</p>
+      <div class="form-group"><label id="rebindCurrentLabel">当前绑定</label><input id="rebindInfo" type="text" disabled style="opacity:.7"></div>
       <input type="hidden" id="rebindId">
-      <div class="form-group"><label>新的统一用户 ID</label><input id="rebindNewCanonical" type="text" placeholder="输入目标统一用户 ID"></div>
+      <div class="form-group"><label id="rebindTargetLabel">目标人物</label><input id="rebindNewCanonical" type="text" list="personDatalist" placeholder="输入目标人物 ID"></div>
     </div>
     <div class="modal-footer">
       <button class="btn" onclick="closeModal('rebindModal')">取消</button>
-      <button class="btn btn-primary" onclick="doRebind()">确认改绑</button>
+      <button class="btn btn-primary" onclick="doRebind()" id="rebindConfirmBtn">确认改绑</button>
     </div>
   </div>
 </div>
+
+<!-- Bind Modal -->
+<div class="modal-backdrop" id="bindModal">
+  <div class="modal" style="width:420px">
+    <div class="modal-header"><h3 id="bindModalTitle">新建绑定</h3><button class="btn btn-icon btn-sm" onclick="closeModal('bindModal')">X</button></div>
+    <div class="modal-body">
+      <div class="form-group"><label id="bindAdapterLabel">适配器</label>
+        <input id="bindAdapter" type="text" list="adapterDatalist" placeholder="例如 aiocqhttp">
+      </div>
+      <div class="form-group"><label id="bindAccountLabel">账号 ID</label>
+        <input id="bindAdapterUser" type="text" placeholder="该适配器上的用户 ID">
+      </div>
+      <div class="form-group"><label id="bindPersonLabel">目标人物</label>
+        <input id="bindPerson" type="text" list="personDatalist" placeholder="留空则新建人物">
+      </div>
+      <p id="bindHint" style="font-size:12px;color:var(--text2)">选择已有人物可把该账号并入；留空将创建新人物。</p>
+    </div>
+    <div class="modal-footer">
+      <button class="btn" onclick="closeModal('bindModal')">取消</button>
+      <button class="btn btn-primary" onclick="doBind()" id="bindConfirmBtn">绑定</button>
+    </div>
+  </div>
+</div>
+
+<datalist id="personDatalist"></datalist>
+<datalist id="adapterDatalist"></datalist>
 
 <!-- Profile Edit Modal -->
 <div class="modal-backdrop" id="profileEditModal">
@@ -650,6 +680,18 @@ function getToken() { return ''; }
 function setToken() {}
 function clearToken() {}
 function getAuthHeaders() { return {}; }
+
+/* i18n via AstrBotPluginPage bridge; falls back to the Chinese default. */
+function t(key, fallback) {
+  var sdk = window.AstrBotPluginPage;
+  if (sdk && typeof sdk.t === 'function') {
+    try {
+      var v = sdk.t(key, fallback);
+      if (v != null && v !== '') return String(v);
+    } catch (e) { /* use fallback */ }
+  }
+  return fallback;
+}
 
 /* ── ui.js ─────────────────────────────────────────────────────── */
 function escHtml(s) { var d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
@@ -1137,31 +1179,143 @@ async function openEvidenceModal(itemId) {
   }).join('');
 }
 
-/* ── identities.js ─────────────────────────────────────────────── */
-async function loadIdentities() {
-  var data = await api('/identities');
-  var tbody = document.getElementById('identityTableBody');
-  if (!data || !data.bindings || data.bindings.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;color:var(--text2);padding:40px">暂无绑定记录</td></tr>';
-    return;
+/* ── identities.js — Person view ─────────────────────────────────── */
+var identityPersons = [];
+var identitySuggestions = [];
+var dismissedSuggestKeys = {};
+
+function suggestKey(s) { return s.binding_id + '>' + s.candidate_person_id; }
+
+function findBinding(bid) {
+  for (var i = 0; i < identityPersons.length; i++) {
+    var bs = identityPersons[i].bindings || [];
+    for (var j = 0; j < bs.length; j++) {
+      if (bs[j].binding_id === bid) return { b: bs[j], person: identityPersons[i] };
+    }
   }
-  var lastCanonical = '';
-  tbody.innerHTML = data.bindings.map(function(b) {
-    var isNewGroup = b.canonical_user_id !== lastCanonical;
-    lastCanonical = b.canonical_user_id;
-    var sep = isNewGroup ? 'border-top:2px solid var(--border)' : '';
-    return '<tr style="' + sep + '">' +
-      '<td>' + b.id + '</td>' +
-      '<td><span class="type-badge type-fact">' + escHtml(b.adapter) + '</span></td>' +
-      '<td>' + escHtml(b.adapter_user_id) + '</td>' +
-      '<td style="font-weight:' + (isNewGroup ? '600' : '400') + '">' + escHtml(b.canonical_user_id) + '</td>' +
-      '<td style="font-size:12px;color:var(--text2)">' + b.updated_at + '</td>' +
-      '<td><button class="btn btn-sm" onclick="openRebindModal(' + b.id + ', \'' + escHtml(b.adapter) + ':' + escHtml(b.adapter_user_id) + '\', \'' + escHtml(b.canonical_user_id) + '\')">改绑</button></td>' +
-    '</tr>';
+  return null;
+}
+
+function fillIdentityDatalists() {
+  var personDl = document.getElementById('personDatalist');
+  var adapterDl = document.getElementById('adapterDatalist');
+  var personIds = [], adapters = [];
+  identityPersons.forEach(function(p) {
+    if (p.person_id && personIds.indexOf(p.person_id) < 0) personIds.push(p.person_id);
+    (p.bindings || []).forEach(function(b) {
+      if (b.adapter && adapters.indexOf(b.adapter) < 0) adapters.push(b.adapter);
+    });
+  });
+  personDl.innerHTML = personIds.map(function(v) { return '<option value="' + escHtml(v) + '">'; }).join('');
+  adapterDl.innerHTML = adapters.map(function(v) { return '<option value="' + escHtml(v) + '">'; }).join('');
+}
+
+function renderSuggestions() {
+  var wrap = document.getElementById('identitySuggestions');
+  var visible = identitySuggestions.filter(function(s) { return !dismissedSuggestKeys[suggestKey(s)]; });
+  if (!visible.length) { wrap.style.display = 'none'; wrap.innerHTML = ''; return; }
+  wrap.style.display = '';
+  wrap.innerHTML = visible.map(function(s) {
+    var idx = identitySuggestions.indexOf(s);
+    var body = t('memory.person.suggestBody',
+      '显示名「{name}」相同：{account} 与人物 {candidate} 可能是同一人。')
+      .replace('{name}', s.display_name)
+      .replace('{account}', s.adapter + ':' + s.adapter_user_id)
+      .replace('{candidate}', s.candidate_person_id);
+    return '<div class="suggest-card">' +
+      '<div class="suggest-title">' + escHtml(t('memory.person.suggestTitle', '是否同一人？')) + '</div>' +
+      '<div class="suggest-body">' + escHtml(body) + '</div>' +
+      '<div class="suggest-actions">' +
+        '<button class="btn btn-sm btn-primary" data-sact="confirm" data-si="' + idx + '">' + escHtml(t('memory.person.suggestConfirm', '确认绑定')) + '</button>' +
+        '<button class="btn btn-sm" data-sact="dismiss" data-si="' + idx + '">' + escHtml(t('memory.person.suggestDismiss', '忽略')) + '</button>' +
+      '</div>' +
+    '</div>';
   }).join('');
 }
 
+function renderPersonList() {
+  var c = document.getElementById('identityPersons');
+  if (!identityPersons.length) {
+    c.innerHTML = '<div style="text-align:center;color:var(--text2);padding:40px">' +
+      escHtml(t('memory.person.empty', '暂无人物，点击「新建绑定」添加。')) + '</div>';
+    return;
+  }
+  c.innerHTML = identityPersons.map(function(p) {
+    var rows = (p.bindings || []).map(function(b) {
+      return '<tr>' +
+        '<td><span class="type-badge type-fact">' + escHtml(b.adapter) + '</span></td>' +
+        '<td>' + escHtml(b.adapter_user_id) + '</td>' +
+        '<td style="font-size:12px;color:var(--text2)">' + escHtml(b.updated_at || '') + '</td>' +
+        '<td style="white-space:nowrap">' +
+          '<button class="btn btn-sm" data-pact="rebind" data-bid="' + b.binding_id + '">' + escHtml(t('memory.person.rebind', '改绑')) + '</button> ' +
+          '<button class="btn btn-sm btn-danger" data-pact="unbind" data-bid="' + b.binding_id + '">' + escHtml(t('memory.person.unbind', '解绑')) + '</button>' +
+        '</td>' +
+      '</tr>';
+    }).join('');
+    var count = t('memory.person.bindingCount', '{n} 个身份').replace('{n}', (p.bindings || []).length);
+    return '<div class="person-group">' +
+      '<div class="person-group-head">' +
+        '<span class="person-id">' + escHtml(p.person_id) + '</span>' +
+        (p.display_name ? '<span class="person-name">' + escHtml(p.display_name) + '</span>' : '') +
+        '<span class="person-count">' + escHtml(count) + '</span>' +
+      '</div>' +
+      (rows
+        ? '<table class="mem-table"><thead><tr>' +
+            '<th style="width:110px">' + escHtml(t('memory.person.adapter', '适配器')) + '</th>' +
+            '<th>' + escHtml(t('memory.person.account', '账号 ID')) + '</th>' +
+            '<th style="width:150px">' + escHtml(t('memory.person.updatedAt', '更新时间')) + '</th>' +
+            '<th style="width:150px">' + escHtml(t('memory.person.actions', '操作')) + '</th>' +
+          '</tr></thead><tbody>' + rows + '</tbody></table>'
+        : '<div style="padding:10px 14px;color:var(--text2);font-size:12px">' +
+            escHtml(t('memory.person.noBindings', '暂无绑定')) + '</div>') +
+    '</div>';
+  }).join('');
+}
+
+async function loadIdentities() {
+  var data = await api('/identity/list');
+  var c = document.getElementById('identityPersons');
+  if (!data) {
+    identityPersons = [];
+    identitySuggestions = [];
+    renderSuggestions();
+    c.innerHTML = '<div style="text-align:center;color:var(--text2);padding:40px">' +
+      escHtml(t('memory.person.loadFailed', '加载失败，请刷新重试')) + '</div>';
+    return;
+  }
+  identityPersons = data.persons || [];
+  identitySuggestions = data.suggestions || [];
+  fillIdentityDatalists();
+  renderSuggestions();
+  renderPersonList();
+}
+
+function openBindModal() {
+  fillIdentityDatalists();
+  document.getElementById('bindAdapter').value = '';
+  document.getElementById('bindAdapterUser').value = '';
+  document.getElementById('bindPerson').value = '';
+  document.getElementById('bindModal').classList.add('show');
+}
+
+async function doBind() {
+  var adapter = document.getElementById('bindAdapter').value.trim();
+  var adapterUser = document.getElementById('bindAdapterUser').value.trim();
+  var person = document.getElementById('bindPerson').value.trim();
+  if (!adapter || !adapterUser) { toast(t('memory.person.bindNeedAccount', '请填写适配器和账号 ID'), 'error'); return; }
+  var res = await api('/identity/bind', { method: 'POST', body: JSON.stringify({ adapter: adapter, adapter_user_id: adapterUser, canonical_user_id: person }) });
+  if (res && res.ok) {
+    toast(t('memory.person.bindOk', '绑定成功'), 'success');
+    closeModal('bindModal');
+    loadIdentities();
+    await refreshAll();
+  } else {
+    toast(t('memory.person.bindFail', '绑定失败'), 'error');
+  }
+}
+
 function openMergeModal() {
+  fillIdentityDatalists();
   document.getElementById('mergeFrom').value = '';
   document.getElementById('mergeTo').value = '';
   document.getElementById('mergeModal').classList.add('show');
@@ -1170,40 +1324,123 @@ function openMergeModal() {
 async function doMerge() {
   var from = document.getElementById('mergeFrom').value.trim();
   var to = document.getElementById('mergeTo').value.trim();
-  if (!from || !to) { toast('请填写来源和目标用户 ID', 'error'); return; }
-  if (from === to) { toast('两个 ID 相同', 'error'); return; }
-  if (!(await confirmDialog('确认将 "' + from + '" 的所有数据合并到 "' + to + '"？此操作不可撤销。', { title: '合并用户', okText: '合并' }))) return;
+  if (!from || !to) { toast(t('memory.person.mergeNeedBoth', '请填写来源和目标人物'), 'error'); return; }
+  if (from === to) { toast(t('memory.person.mergeSame', '两个 ID 相同'), 'error'); return; }
+  var msg = t('memory.person.mergeConfirm', '确认将「{from}」的全部数据并入「{to}」？合并后不可撤销。')
+    .replace('{from}', from).replace('{to}', to);
+  if (!(await confirmDialog(msg, { title: t('memory.person.merge', '合并人物'), okText: t('memory.person.merge', '合并人物') }))) return;
   var res = await api('/identity/merge', { method: 'POST', body: JSON.stringify({ from_user: from, to_user: to }) });
   if (res && res.ok) {
-    toast('合并完成：' + res.from_user + ' \u2192 ' + res.to_user + '，迁移 ' + res.moved + ' 条记忆', 'success');
+    toast(t('memory.person.mergeOk', '合并完成'), 'success');
     closeModal('mergeModal');
     await refreshAll();
     loadIdentities();
   } else {
-    toast('合并失败: ' + (res && res.error || 'unknown'), 'error');
+    toast(t('memory.person.mergeFail', '合并失败'), 'error');
   }
 }
 
-function openRebindModal(bindingId, displayInfo, currentCanonical) {
+function openRebindModal(bindingId) {
+  var hit = findBinding(bindingId);
+  if (!hit) { toast(t('memory.person.bindingMissing', '未找到该绑定'), 'error'); return; }
   document.getElementById('rebindId').value = bindingId;
-  document.getElementById('rebindInfo').value = displayInfo + ' \u2192 ' + currentCanonical;
+  document.getElementById('rebindInfo').value = hit.b.adapter + ':' + hit.b.adapter_user_id + ' → ' + hit.person.person_id;
   document.getElementById('rebindNewCanonical').value = '';
+  fillIdentityDatalists();
   document.getElementById('rebindModal').classList.add('show');
 }
 
 async function doRebind() {
-  var bindingId = parseInt(document.getElementById('rebindId').value);
+  var bindingId = parseInt(document.getElementById('rebindId').value, 10);
   var newCanonical = document.getElementById('rebindNewCanonical').value.trim();
-  if (!bindingId || !newCanonical) { toast('请填写新的统一用户 ID', 'error'); return; }
+  if (!bindingId || !newCanonical) { toast(t('memory.person.rebindNeedPerson', '请填写目标人物'), 'error'); return; }
   var res = await api('/identity/rebind', { method: 'POST', body: JSON.stringify({ binding_id: bindingId, new_canonical_user_id: newCanonical }) });
   if (res && res.ok) {
-    toast('改绑成功', 'success');
+    toast(t('memory.person.rebindOk', '改绑成功'), 'success');
     closeModal('rebindModal');
     loadIdentities();
     await refreshAll();
   } else {
-    toast('改绑失败: ' + (res && res.error || 'unknown'), 'error');
+    toast(t('memory.person.rebindFail', '改绑失败'), 'error');
   }
+}
+
+async function doUnbind(bindingId) {
+  var hit = findBinding(bindingId);
+  if (!hit) { toast(t('memory.person.bindingMissing', '未找到该绑定'), 'error'); return; }
+  var account = hit.b.adapter + ':' + hit.b.adapter_user_id;
+  var msg = t('memory.person.unbindConfirm',
+    '解绑后「{account}」将自成一个人物，需手动改绑才能恢复。此操作不可撤销。')
+    .replace('{account}', account);
+  if (!(await confirmDialog(msg, { title: t('memory.person.unbind', '解绑'), okText: t('memory.person.unbind', '解绑') }))) return;
+  var res = await api('/identity/unbind', { method: 'POST', body: JSON.stringify({ binding_id: bindingId }) });
+  if (res && res.ok) {
+    toast(t('memory.person.unbindOk', '已解绑'), 'success');
+    loadIdentities();
+    await refreshAll();
+  } else {
+    toast(t('memory.person.unbindFail', '解绑失败'), 'error');
+  }
+}
+
+function confirmSuggestion(idx) {
+  var s = identitySuggestions[idx];
+  if (!s) return;
+  var msg = t('memory.person.suggestConfirmBody',
+    '确认将「{account}」绑定到人物「{candidate}」？')
+    .replace('{account}', s.adapter + ':' + s.adapter_user_id)
+    .replace('{candidate}', s.candidate_person_id);
+  confirmDialog(msg, { title: t('memory.person.suggestTitle', '是否同一人？'), okText: t('memory.person.suggestConfirm', '确认绑定'), danger: false })
+    .then(async function(ok) {
+      if (!ok) return;
+      var res = await api('/identity/bind', {
+        method: 'POST',
+        body: JSON.stringify({ adapter: s.adapter, adapter_user_id: s.adapter_user_id, canonical_user_id: s.candidate_person_id })
+      });
+      if (res && res.ok) {
+        toast(t('memory.person.bindOk', '绑定成功'), 'success');
+        loadIdentities();
+        await refreshAll();
+      } else {
+        toast(t('memory.person.bindFail', '绑定失败'), 'error');
+      }
+    });
+}
+
+function dismissSuggestion(idx) {
+  var s = identitySuggestions[idx];
+  if (s) dismissedSuggestKeys[suggestKey(s)] = 1;
+  renderSuggestions();
+}
+
+function applyIdentityI18n() {
+  var map = {
+    tabIdentityBtn: ['memory.person.tab', '人物'],
+    btnNewBind: ['memory.person.newBind', '新建绑定'],
+    btnMergePersons: ['memory.person.merge', '合并人物'],
+    identityHint: ['memory.person.hint', '将不同适配器上的账号识别为同一个人，统一管理记忆。'],
+    identityGroupHint: ['memory.person.groupHint', '群聊按会话隔离，不归入人物；绑定仅合并个人身份。'],
+    mergeModalTitle: ['memory.person.merge', '合并人物'],
+    mergeModalDesc: ['memory.person.mergeDesc', '将来源人物的全部记忆与绑定并入目标人物，合并后不可撤销。'],
+    mergeFromLabel: ['memory.person.mergeFrom', '来源人物（将被合并）'],
+    mergeToLabel: ['memory.person.mergeTo', '目标人物（保留）'],
+    mergeConfirmBtn: ['memory.person.mergeConfirmBtn', '确认合并'],
+    rebindModalTitle: ['memory.person.rebind', '改绑'],
+    rebindModalDesc: ['memory.person.rebindDesc', '将该适配器账号改绑到另一个人物。'],
+    rebindCurrentLabel: ['memory.person.rebindCurrent', '当前绑定'],
+    rebindTargetLabel: ['memory.person.rebindTarget', '目标人物'],
+    rebindConfirmBtn: ['memory.person.rebindConfirmBtn', '确认改绑'],
+    bindModalTitle: ['memory.person.newBind', '新建绑定'],
+    bindAdapterLabel: ['memory.person.adapter', '适配器'],
+    bindAccountLabel: ['memory.person.account', '账号 ID'],
+    bindPersonLabel: ['memory.person.bindPerson', '目标人物'],
+    bindHint: ['memory.person.bindHint', '选择已有人物可把该账号并入；留空将创建新人物。'],
+    bindConfirmBtn: ['memory.person.bindConfirmBtn', '绑定']
+  };
+  Object.keys(map).forEach(function(id) {
+    var el = document.getElementById(id);
+    if (el) el.textContent = t(map[id][0], map[id][1]);
+  });
 }
 
 /* ── health.js ─────────────────────────────────────────────────── */
@@ -1963,6 +2200,40 @@ async function purgeCurrentUser() {
 
 /* ── Init: verify Dashboard session then load ──────────────────── */
 document.addEventListener('DOMContentLoaded', function() {
+  applyIdentityI18n();
+  var sdk = window.AstrBotPluginPage;
+  if (sdk && typeof sdk.ready === 'function') {
+    try {
+      Promise.resolve(sdk.ready()).then(function() {
+        applyIdentityI18n();
+        if (activeTab === 'identity') loadIdentities();
+      }).catch(function() {});
+    } catch (e) { /* keep defaults */ }
+  }
+
+  var personsEl = document.getElementById('identityPersons');
+  if (personsEl) {
+    personsEl.addEventListener('click', function(e) {
+      var btn = e.target.closest ? e.target.closest('button[data-pact]') : null;
+      if (!btn) return;
+      var bid = parseInt(btn.getAttribute('data-bid'), 10);
+      var act = btn.getAttribute('data-pact');
+      if (act === 'rebind') openRebindModal(bid);
+      else if (act === 'unbind') doUnbind(bid);
+    });
+  }
+  var suggestEl = document.getElementById('identitySuggestions');
+  if (suggestEl) {
+    suggestEl.addEventListener('click', function(e) {
+      var btn = e.target.closest ? e.target.closest('button[data-sact]') : null;
+      if (!btn) return;
+      var idx = parseInt(btn.getAttribute('data-si'), 10);
+      var act = btn.getAttribute('data-sact');
+      if (act === 'confirm') confirmSuggestion(idx);
+      else if (act === 'dismiss') dismissSuggestion(idx);
+    });
+  }
+
   api('/session').then(function(data) {
     if (data && data.authenticated) {
       showApp();
