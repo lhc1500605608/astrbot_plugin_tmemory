@@ -244,6 +244,9 @@ class PluginPagesBridge:
         BridgeRoute(("POST",), "/distill/pause", "distill_pause", "暂停/恢复蒸馏"),
         BridgeRoute(("POST",), "/identity/merge", "identity_merge", "合并用户身份"),
         BridgeRoute(("POST",), "/identity/rebind", "identity_rebind", "重绑身份"),
+        BridgeRoute(("POST",), "/identity/bind", "identity_bind", "新增/更新人物身份绑定"),
+        BridgeRoute(("GET",), "/identity/list", "identity_list", "人物身份列表"),
+        BridgeRoute(("POST",), "/identity/unbind", "identity_unbind", "解绑人物身份"),
         BridgeRoute(("GET",), "/profile/summary", "profile_summary", "画像摘要"),
         BridgeRoute(("GET",), "/profile/items", "profile_items", "画像条目"),
         BridgeRoute(
@@ -561,6 +564,33 @@ class PluginPagesBridge:
             return {"error": "binding_id and new_canonical_user_id are required"}, 400
         self.admin().rebind_user(binding_id, new_canonical)
         return {"ok": True}, 200
+
+    async def identity_bind(self, request: Any) -> BridgeResult:
+        """新增/更新人物身份绑定；canonical 为空时按 ``adapter:user`` 建新人。"""
+        data = await _json_object(request)
+        adapter = str(data.get("adapter", "") or "").strip()
+        adapter_user_id = str(data.get("adapter_user_id", "") or "").strip()
+        if not adapter or not adapter_user_id:
+            return {"error": "adapter and adapter_user_id are required"}, 400
+        canonical = str(data.get("canonical_user_id", "") or "").strip()
+        result = self.admin().bind_identity(adapter, adapter_user_id, canonical)
+        return {"ok": True, **result}, 200
+
+    async def identity_list(self, request: Any) -> BridgeResult:
+        """Person → 多适配器绑定列表；按配置决定是否附带重复显示名建议。"""
+        include = bool(
+            getattr(self.plugin._cfg, "identity_autobind_display_name", False)
+        )
+        return dict(
+            self.admin().get_person_identities(include_suggestions=include)
+        ), 200
+
+    async def identity_unbind(self, request: Any) -> BridgeResult:
+        """解绑单条绑定（回退到该 ``adapter:user`` 自成 Person）；幂等。"""
+        data = await _json_object(request)
+        binding_id = _require_positive_int(data.get("binding_id"), field="binding_id")
+        result = self.admin().unbind_identity(binding_id)
+        return {"ok": True, **result}, 200
 
     # ── 画像 ────────────────────────────────────────────────────────────
 

@@ -377,6 +377,12 @@
         "description": "群聊中注入私聊记忆",
         "hint": "默认关闭；开启后群聊会注入该用户私聊记忆，可能泄露隐私。"
       },
+      "identity_autobind_display_name": {
+        "type": "bool",
+        "default": false,
+        "description": "显示名重复时提示绑定",
+        "hint": "默认关闭；开启后仅在身份列表中提示可能为同一人，不会自动绑定。"
+      },
       "session_reset_policy": {
         "type": "string",
         "default": "keep",

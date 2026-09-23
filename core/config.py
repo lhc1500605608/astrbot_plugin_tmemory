@@ -5,8 +5,8 @@ from dataclasses import dataclass, field
 
 logger = logging.getLogger("astrbot")
 
-# 代码版本常量：与 metadata.yaml / README「当前版本」保持一致（TMEAAA-522）。
-PLUGIN_VERSION = "v0.14.0"
+# 代码版本常量：与 metadata.yaml / README「当前版本」保持一致（TMEAAA-540）。
+PLUGIN_VERSION = "v0.15.0"
 
 @dataclass
 class PluginConfig:
@@ -110,6 +110,9 @@ class PluginConfig:
     inject_enable_vector_search: bool = False
     memory_scope: str = "user"
     private_memory_in_group: bool = False
+    # ── 人物身份（TMEAAA-540）──
+    # 默认关闭：开启后仅在身份列表附带「显示名一致、是否同一人」提示，绝不自动绑定。
+    identity_autobind_display_name: bool = False
     inject_position: str = "system_prompt"
     inject_slot_marker: str = "{{tmemory}}"
     inject_memory_limit: int = 5
@@ -450,6 +453,15 @@ def parse_config(raw_config: dict) -> PluginConfig:
     if c.memory_scope not in {"user", "session"}:
         c.memory_scope = "user"
     c.private_memory_in_group = _safe_bool(_cfg_get(raw_config, "session_identity.private_memory_in_group", False), False, label="private_memory_in_group")
+    c.identity_autobind_display_name = _safe_bool(
+        _cfg_get(
+            raw_config,
+            "session_identity.identity_autobind_display_name",
+            raw_config.get("identity_autobind_display_name", False),
+        ),
+        False,
+        label="identity_autobind_display_name",
+    )
 
     c.inject_position = str(_cfg_get(raw_config, "injection.inject_position", "system_prompt")).strip().lower()
     if c.inject_position not in {"system_prompt", "user_message_before", "user_message_after", "slot", "extra_user_temp"}:
