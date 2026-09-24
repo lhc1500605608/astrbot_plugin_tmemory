@@ -16,6 +16,7 @@ import pytest
 UMO_PRIVATE = "qq:FriendMessage:42"
 UMO_PRIVATE_OTHER = "wx:FriendMessage:7"
 UMO_GROUP = "qq:GroupMessage:1000"
+UMO_WEBCHAT = "webchat:FriendMessage:webchat!tmemory-smoke!qa368-smoke-1789624808"
 
 
 def _seed_profile(plugin, canonical_id, display_name=""):
@@ -127,6 +128,38 @@ async def test_resolve_person_exception_fails_closed(plugin, monkeypatch):
 
     monkeypatch.setattr(type(plugin), "_resolve_canonical_from_umo", _boom)
     assert await plugin.resolve_person(UMO_PRIVATE) == {}
+
+
+@pytest.mark.asyncio
+async def test_resolve_person_webchat_session_normalizes_to_sender(plugin):
+    """webchat 编码 session（``webchat!<user>!<会话>``）按 sender 命中绑定。
+
+    TMEAAA-578：离线 identity_map 键空间为 ``adapter:sender_id``，此处在权威侧
+    验证 umo→identity_bindings 回退同样 normalize。
+    """
+    plugin._identity_mgr.bind_identity("webchat", "tmemory-smoke", "person-smoke")
+    result = await plugin.resolve_person(UMO_WEBCHAT)
+    assert result == {
+        "person_id": "person-smoke",
+        "adapter": "webchat",
+        "adapter_user_id": "tmemory-smoke",
+        "is_group": False,
+    }
+
+
+def test_webchat_umo_helper_decodes():
+    from astrbot_plugin_tmemory.adapters import event as ev
+
+    assert ev.get_adapter_user_id_from_umo(
+        "webchat", "webchat!smoke!conv-1"
+    ) == "smoke"
+    assert ev.get_adapter_user_id_from_umo("webchat", "smoke") == "smoke"
+    assert ev.get_adapter_user_id_from_umo(
+        "qq", "webchat!smoke!conv-1"
+    ) == "webchat!smoke!conv-1"
+    assert ev.get_adapter_user_id_from_umo("webchat", "webchat!smoke") == (
+        "webchat!smoke"
+    )
 
 
 @pytest.mark.asyncio

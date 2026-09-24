@@ -18,6 +18,12 @@ class IdentityManager:
     def _now(self) -> str:
         return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
 
+    def _export_identity_map(self) -> None:
+        """身份绑定/合并提交后全量刷新共享 identity_map.json（fail-closed）。"""
+        from .identity_export import export_identity_map
+
+        export_identity_map(self._db_mgr)
+
     @staticmethod
     def _platform_str(val) -> str:
         return _event_adapter.get_platform_str(val)
@@ -63,6 +69,7 @@ class IdentityManager:
             event_type="bind",
             payload={"adapter": adapter, "adapter_user_id": adapter_user},
         )
+        self._export_identity_map()
 
     def merge_identity(self, from_id: str, to_id: str) -> int:
         """Merge all data from from_id into to_id within a single transaction.
@@ -237,6 +244,7 @@ class IdentityManager:
             event_type="profile_identity_merged",
             payload={"from_id": from_id, "to_id": to_id, "profile_items": profile_moved, "legacy_memories": legacy_moved},
         )
+        self._export_identity_map()
         return total_moved
 
     @staticmethod

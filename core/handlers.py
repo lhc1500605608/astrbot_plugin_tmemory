@@ -6,6 +6,7 @@ import re
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, List, Optional
 
+from ..adapters import event as _event_adapter
 from . import vector as _vector
 from .commands import CommandHandlersMixin
 
@@ -325,11 +326,19 @@ class PluginHandlersMixin(CommandHandlersMixin):
         return "", ""
 
     def _resolve_canonical_from_umo(self, umo: str) -> str:
-        """从 umo 解析 canonical_user_id，优先 conversation_cache，再 identity_bindings。"""
+        """从 umo 解析 canonical_user_id，优先 conversation_cache，再 identity_bindings。
+
+        绑定回退用 ``get_adapter_user_id_from_umo`` 把平台编码的 session_id
+        normalize 回 sender id（如 webchat ``webchat!<user>!<会话>`` → ``<user>``），
+        与 companion 消费侧 identity_map 键空间一致（TMEAAA-578）。
+        """
         umo = str(umo or "").strip()
         if not umo:
             return ""
         adapter, session_id = self._parse_umo(umo)
+        adapter_user_id = _event_adapter.get_adapter_user_id_from_umo(
+            adapter, session_id
+        )
 
         try:
             with self._db() as conn:
@@ -344,13 +353,13 @@ class PluginHandlersMixin(CommandHandlersMixin):
         except Exception as e:
             logger.debug("[tmemory] recall_for_prompt cache resolve failed: %s", e)
 
-        if session_id:
+        if adapter_user_id:
             try:
                 with self._db() as conn:
                     row = conn.execute(
                         "SELECT canonical_user_id FROM identity_bindings"
                         " WHERE adapter=? AND adapter_user_id=?",
-                        (adapter, session_id),
+                        (adapter, adapter_user_id),
                     ).fetchone()
                 if row and row["canonical_user_id"]:
                     return str(row["canonical_user_id"])
@@ -560,7 +569,9 @@ class PluginHandlersMixin(CommandHandlersMixin):
         return {
             "person_id": canonical_id,
             "adapter": adapter,
-            "adapter_user_id": session_id,
+            "adapter_user_id": _event_adapter.get_adapter_user_id_from_umo(
+                adapter, session_id
+            ),
             "is_group": False,
         }
 

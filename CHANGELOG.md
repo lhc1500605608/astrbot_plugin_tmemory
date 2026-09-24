@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v0.16.0] - 2026-09-24
+
+共享身份映射导出：tmemory 作为身份权威，将身份绑定全量写出到共享文件，供关联插件离线解析同一用户。
+无破坏性迁移，直接替换安装即可。
+
+### Added
+
+- **身份映射导出**（TMEAAA-569）：绑定、合并、重绑、解绑及启动时将全库身份绑定原子写入 `<AstrBot data>/plugin_data/_shared/identity_map.json`（单一写者，群聊键不入映射）；写失败不影响主流程。
+- **webchat 身份键归一**（TMEAAA-578）：从会话 ID 解析身份时把 `webchat!<用户>!<会话>` 还原为用户 ID，与共享映射键空间一致，离线解析可命中。
+
 ## [v0.15.1] - 2026-09-23
 
 ### Changed
