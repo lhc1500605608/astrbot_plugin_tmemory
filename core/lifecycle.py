@@ -472,6 +472,14 @@ class PluginLifecycleMixin:
             self._cfg.memory_mode,
         )
 
+        # 启动完成后全量导出共享身份映射（plan TMEAAA-568 §2.4；fail-closed）。
+        try:
+            from .identity_export import export_identity_map
+
+            export_identity_map(self._db_mgr)
+        except Exception as e:  # noqa: BLE001 - 导出绝不应阻断启动
+            logger.debug("[tmemory] identity_map startup export skipped: %s", e)
+
     async def terminate(self):
         self._worker_running = False
         if self._distill_task and not self._distill_task.done():

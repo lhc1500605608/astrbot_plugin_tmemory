@@ -112,6 +112,22 @@ def get_adapter_user_id(event: Any) -> str:
     return "unknown_user"
 
 
+def get_adapter_user_id_from_umo(adapter: str, session_id: str) -> str:
+    """从 UMO 的 ``session_id`` 还原身份绑定的 ``adapter_user_id``。
+
+    身份绑定以 ``event.get_sender_id()`` 为键；多数适配器 ``session_id`` 即
+    sender id，但 **WebChat** 私聊编码为 ``webchat!<user>!<会话>``
+    （``webchat_adapter.py``），需解码为 ``<user>``，与 TMEAAA-578 契约 §20.1.1
+    的消费侧 normalize 对称。未知形态原样返回。
+    """
+    sid = str(session_id or "")
+    if str(adapter or "") == "webchat" and sid.startswith("webchat!"):
+        parts = sid.split("!", 2)
+        if len(parts) == 3 and parts[1]:
+            return parts[1]
+    return sid
+
+
 def _message_type() -> Optional[Any]:
     """MessageType 枚举，不可用时返回 None。
 

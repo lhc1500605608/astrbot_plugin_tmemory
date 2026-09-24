@@ -34,6 +34,7 @@ __all__ = [
     "get_platform_str",
     "get_adapter_name",
     "get_adapter_user_id",
+    "get_adapter_user_id_from_umo",
     "get_identity_adapter_name",
     "get_memory_scope",
     "is_group_event",
@@ -52,6 +53,7 @@ get_unified_msg_origin = event.get_unified_msg_origin
 get_platform_str = event.get_platform_str
 get_adapter_name = event.get_adapter_name
 get_adapter_user_id = event.get_adapter_user_id
+get_adapter_user_id_from_umo = event.get_adapter_user_id_from_umo
 get_identity_adapter_name = event.get_identity_adapter_name
 get_memory_scope = event.get_memory_scope
 is_group_event = event.is_group_event

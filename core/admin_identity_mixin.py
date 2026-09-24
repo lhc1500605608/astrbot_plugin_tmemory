@@ -21,8 +21,15 @@ class AdminIdentityMixin:
     包含用户合并、绑定迁移、数据导出与清除。
     """
 
+    def _export_identity_map(self) -> None:
+        """绑定类变更后全量刷新共享 identity_map.json（fail-closed，不并入业务事务）。"""
+        from .identity_export import export_identity_map
+
+        export_identity_map(self._db_mgr)
+
     def merge_users(self, from_id: str, to_id: str) -> int:
         """合并两个用户：将 from_user 的所有记忆和绑定迁移到 to_user。"""
+        # 导出由 ``IdentityManager.merge_identity`` 在事务提交后统一触发。
         return self._identity_mgr.merge_identity(from_id, to_id)
 
     # ── 人物身份绑定（TMEAAA-540）──────────────────────────────────────────
@@ -72,6 +79,7 @@ class AdminIdentityMixin:
                 "source": "admin",
             },
         )
+        self._export_identity_map()
         return {
             "binding_id": binding_id,
             "adapter": adapter,
@@ -116,6 +124,7 @@ class AdminIdentityMixin:
                 "new_canonical": self_canonical,
             },
         )
+        self._export_identity_map()
         return {
             "binding_id": binding_id,
             "adapter": adapter,
@@ -256,6 +265,7 @@ class AdminIdentityMixin:
                 "new_canonical": new_canonical,
             },
         )
+        self._export_identity_map()
         return {
             "old_canonical": old_canonical,
             "adapter": str(row["adapter"]),
