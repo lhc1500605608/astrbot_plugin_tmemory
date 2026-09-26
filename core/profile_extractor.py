@@ -8,6 +8,7 @@ import re
 from typing import Dict, List, Optional
 
 from .config import PluginConfig
+from .utils_shared import _time_anchor_line
 
 logger = logging.getLogger("astrbot")
 
@@ -47,8 +48,13 @@ class ProfileExtractor:
     def __init__(self, cfg: "PluginConfig"):
         self._cfg = cfg
 
-    def build_extraction_prompt(self, transcript: str) -> str:
-        lines = [
+    def build_extraction_prompt(self, transcript: str, time_anchor: str = "") -> str:
+        anchor_line = _time_anchor_line(time_anchor)
+        lines = []
+        if anchor_line:
+            lines.append(anchor_line)
+            lines.append("")
+        lines += [
             "你是用户画像提取器。从对话中提取关于用户的稳定、长期有价值的结构化画像信息。",
             "仅输出 JSON，不要输出任何解释文字或 markdown 标记。",
             "",
@@ -81,6 +87,10 @@ class ProfileExtractor:
             "6. 优先提取跨对话的稳定模式，而非单次对话的细节。",
             "7. 以下对话已按发言者分区:只能从【用户发言】区块提取画像；"
             "【助手发言】仅作上下文，严禁据此生成任何画像项。",
+            "",
+            "时间与事件规则(严格执行):",
+            "8. 相对时间词(今天/明天/这周末/下周X/月底等)必须结合当前时间基准理解为绝对日期；不得把相对表述当作长期事实。",
+            "9. 一次性、日期限定或时效性内容(如某天要做的事、节日安排)属于事件，**不得**写成任何 facet；profile_items 只放跨对话稳定的持久画像。",
             "",
             "对话:",
             transcript,

@@ -1636,6 +1636,7 @@ async def test_inj002_build_profile_injection_empty_when_no_data(plugin_module, 
     instance = plugin_module.TMemoryPlugin(context=None, config={})
     instance._init_db()
     instance._migrate_schema()
+    instance._cfg.inject_time_context = False
 
     block = await instance._injection_builder.build_profile_injection(
         "no-user", "", "no-session",

@@ -5,11 +5,13 @@ Hot-path constraint: on_llm_request path must be zero LLM calls, SQLite reads on
 
 from __future__ import annotations
 
+import datetime
 from typing import Dict, List, Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from search.retrieval import RetrievalManager
 
+from . import calendar as _calendar
 from .config import PluginConfig
 
 # Facet → block heading mapping
@@ -20,6 +22,21 @@ _FACET_HEADINGS: Dict[str, str] = {
     "task_pattern": "[用户画像·任务模式]",
     "style": "[用户画像·风格指导]",
 }
+
+_WEEKDAY_SHORT = ("周一", "周二", "周三", "周四", "周五", "周六", "周日")
+
+
+def _local_today() -> datetime.date:
+    return datetime.datetime.now(tz=datetime.timezone.utc).astimezone().date()
+
+
+def _format_event_date(value: object) -> str:
+    """`2026-09-27` → `09-27(周日)`; unparsable input → empty string."""
+    try:
+        d = datetime.date.fromisoformat(str(value)[:10])
+    except (ValueError, TypeError):
+        return ""
+    return f"{d:%m-%d}({_WEEKDAY_SHORT[d.weekday()]})"
 
 
 class InjectionBuilder:
@@ -46,6 +63,20 @@ class InjectionBuilder:
         Zero LLM calls — reads from SQLite only.
         """
         blocks: List[str] = []
+
+        # ── Time / festival context (always first when enabled) ──
+        if self._cfg.inject_time_context:
+            time_line = _calendar.today_context()
+            if time_line:
+                blocks.append(f"[时间] {time_line}")
+
+        # ── Time-sensitive events inside the configured window ──
+        event_block = self._build_event_block(
+            canonical_id, scope=scope, persona_id=persona_id,
+            exclude_private=exclude_private,
+        )
+        if event_block:
+            blocks.append(event_block)
 
         # ── Working context from recent conversation turns ──
         context_block = self._build_context_block(canonical_id, session_key)
@@ -110,6 +141,39 @@ class InjectionBuilder:
             role_label = "用户" if role == "user" else "助手"
             lines.append(f"- {role_label}: {content}")
         return "\n".join(lines)
+
+    def _build_event_block(
+        self,
+        canonical_id: str,
+        scope: str = "user",
+        persona_id: str = "",
+        exclude_private: bool = False,
+    ) -> str:
+        """Build [近期事件] block from active events within the inject window."""
+        if not canonical_id:
+            return ""
+        try:
+            events = self._retrieval.retrieve_events(
+                canonical_id,
+                _local_today(),
+                self._cfg.event_inject_window_days,
+                scope,
+                persona_id,
+                exclude_private,
+            )
+        except Exception:  # noqa: BLE001 - injection must never break the LLM call
+            return ""
+        if not events:
+            return ""
+
+        lines = ["[近期事件]"]
+        for ev in events:
+            content = str(ev.get("memory", ""))
+            if not content:
+                continue
+            dated = _format_event_date(ev.get("event_date", ""))
+            lines.append(f"- {dated}: {content}" if dated else f"- {content}")
+        return "\n".join(lines) if len(lines) > 1 else ""
 
     @staticmethod
     def _assemble_profile_blocks(

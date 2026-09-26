@@ -239,5 +239,7 @@ node_modules/
 # Local Runtime Data
 data/
 eval/
+# QA 验收产物（内部证据，不入库）
+qa-artifacts/
 STABILITY_TEST_REPORT.md
 .worktrees/

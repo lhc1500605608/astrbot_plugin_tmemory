@@ -1,5 +1,6 @@
 import time
 import asyncio
+import datetime
 from typing import List, Dict, Optional, Tuple
 import sqlite3
 
@@ -145,6 +146,77 @@ class RetrievalManager:
 
         scored.sort(key=lambda x: float(x.get("final_score", x.get("_retrieval_score", 0.0))), reverse=True)
         return scored, []
+
+    def retrieve_events(
+        self,
+        canonical_id: str,
+        today,
+        window_days: int = 0,
+        scope: str = "user",
+        persona_id: str = "",
+        exclude_private: bool = False,
+    ) -> list[dict[str, object]]:
+        """Return active ``event`` memories dated within ±window_days of ``today``.
+
+        Read-only. Rows whose ``valid_until`` is set and earlier than today are
+        dropped; results are ordered by ``event_date`` ascending.
+        """
+        try:
+            if isinstance(today, datetime.datetime):
+                today_date = today.date()
+            elif isinstance(today, datetime.date):
+                today_date = today
+            else:
+                today_date = datetime.date.fromisoformat(str(today)[:10])
+        except Exception:  # noqa: BLE001 - malformed input falls back to today
+            today_date = datetime.datetime.now(tz=datetime.timezone.utc).astimezone().date()
+        try:
+            window = max(0, int(window_days))
+        except (TypeError, ValueError):
+            window = 0
+
+        today_iso = today_date.isoformat()
+        lower = (today_date - datetime.timedelta(days=window)).isoformat()
+        upper = (today_date + datetime.timedelta(days=window)).isoformat()
+
+        scope_cond = ""
+        scope_params: list = []
+        if self._cfg.memory_scope == "session":
+            scope_cond = "AND (scope=? OR scope='user')"
+            scope_params = [scope]
+        persona_cond = "AND (persona_id=? OR persona_id='')"
+        private_cond = "AND scope != 'private'" if exclude_private else ""
+
+        with self._db_mgr.db() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT id, memory_type, memory, event_date, valid_until,
+                       score, importance, confidence, scope, persona_id
+                FROM memories
+                WHERE canonical_user_id=? AND is_active=1 AND memory_type='event'
+                  AND event_date != '' AND event_date >= ? AND event_date <= ?
+                  AND (valid_until = '' OR valid_until >= ?)
+                  {scope_cond} {persona_cond} {private_cond}
+                ORDER BY event_date ASC, id ASC
+                """,
+                (canonical_id, lower, upper, today_iso, *scope_params, persona_id),
+            ).fetchall()
+
+        return [
+            {
+                "id": int(r["id"]),
+                "memory_type": str(r["memory_type"]),
+                "memory": str(r["memory"]),
+                "event_date": str(r["event_date"]),
+                "valid_until": str(r["valid_until"]),
+                "score": float(r["score"]),
+                "importance": float(r["importance"]),
+                "confidence": float(r["confidence"]),
+                "scope": str(r["scope"]),
+                "persona_id": str(r["persona_id"]),
+            }
+            for r in rows
+        ]
 
     def retrieve_working_context(
         self,

@@ -306,6 +306,12 @@
         "description": "启用记忆注入",
         "hint": "开启后把召回的记忆追加到对话上下文中。"
       },
+      "inject_time_context": {
+        "type": "bool",
+        "default": true,
+        "description": "告知当前日期与节日",
+        "hint": "开启后每次对话都会带上今天的日期和星期，节日当天会附上节日名。默认开启。"
+      },
       "inject_enable_vector_search": {
         "type": "bool",
         "default": false,
@@ -317,6 +323,12 @@
         "default": 5,
         "description": "注入记忆条数上限",
         "hint": "每次请求最多注入的长期记忆条数。默认 5。"
+      },
+      "event_inject_window_days": {
+        "type": "int",
+        "default": 3,
+        "description": "事件记忆注入窗口",
+        "hint": "只注入日期在前后几天内的带日期事件，单位：天。默认 3。"
       },
       "inject_max_chars": {
         "type": "int",

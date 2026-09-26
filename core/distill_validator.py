@@ -42,6 +42,67 @@ UNSAFE_PATTERNS = [
     ),
 ]
 
+# ── 日期限定内容防误记（TMEAAA-593）──
+# 相对时间词把语句锚定在「当下」，由此换算出的日期不得固化为稳定属性。
+RELATIVE_TIME_TOKENS = (
+    "这月", "本月", "这个月", "这几个月", "这周", "本周", "这星期", "这个星期",
+    "这礼拜", "这几天", "这两天", "这阵子", "这段时间", "最近", "近期", "今年",
+    "这次", "今天", "明天", "后天", "昨天", "前天", "下周", "下个月", "下月",
+)
+# 记忆文本中出现的日期引用：说明该条可能由相对时间换算而来。
+DATE_REF_PATTERNS = (
+    re.compile(r"\d{4}-\d{1,2}-\d{1,2}"),
+    re.compile(r"\d{1,2}\s*月"),
+    re.compile(r"\d{1,2}\s*[日号]"),
+)
+ABSOLUTE_DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
+# 只能作为稳定属性存在的类型；event 允许承载日期限定内容。
+_ATTRIBUTE_TYPES = frozenset({"fact", "preference", "task", "restriction"})
+
+
+def has_relative_time(text: str) -> bool:
+    return any(tok in text for tok in RELATIVE_TIME_TOKENS)
+
+
+def has_date_ref(text: str) -> bool:
+    return any(pat.search(text) for pat in DATE_REF_PATTERNS)
+
+
+def guard_relative_date_items(
+    items: list[dict[str, object]], transcript: str
+) -> list[dict[str, object]]:
+    """剔除「日期限定内容被误记为稳定属性」的条目。
+
+    仅当本批用户发言含相对时间词时生效：此时任何被标为
+    fact/preference/task/restriction 却带日期引用的条目都属当下信息。
+    - 记忆内含绝对日期 ``YYYY-MM-DD`` → 规范化为 ``event`` 并补 ``event_date``；
+    - 否则无法确定为稳定属性 → 丢弃。
+
+    ``event`` 条目与非相对时间来源的条目不受影响。
+    """
+    if not transcript or not has_relative_time(transcript):
+        return items
+    kept: list[dict[str, object]] = []
+    for item in items:
+        mtype = str(item.get("memory_type", ""))
+        mem = str(item.get("memory", ""))
+        if mtype in _ATTRIBUTE_TYPES and has_date_ref(mem):
+            matched = ABSOLUTE_DATE_RE.search(mem)
+            if not matched:
+                logger.debug(
+                    "[tmemory] date-limited attribute dropped (relative time): %s",
+                    mem[:60],
+                )
+                continue
+            item = dict(item)
+            item["memory_type"] = "event"
+            if not str(item.get("event_date", "") or "").strip():
+                item["event_date"] = matched.group(0)
+            logger.debug(
+                "[tmemory] date-limited attribute normalized to event: %s", mem[:60]
+            )
+        kept.append(item)
+    return kept
 
 
 def is_junk_memory(text: str) -> bool:
@@ -66,9 +127,13 @@ def is_unsafe_memory(text: str) -> bool:
 
 
 def validate_distill_output(
-    plugin, items: List[Dict[str, object]]
+    plugin, items: List[Dict[str, object]], transcript: str = ""
 ) -> List[Dict[str, object]]:
-    """校验 LLM 蒸馏输出:安全审计 + 废话过滤 + 低置信度剪枝 + 风格专项过滤。"""
+    """校验 LLM 蒸馏输出:安全审计 + 废话过滤 + 低置信度剪枝 + 日期限定防误记。
+
+    ``transcript`` 为本批用户发言原文；提供时用于剔除由相对时间词换算出的
+    伪稳定属性（TMEAAA-593），未提供则跳过该步。
+    """
     valid: List[Dict[str, object]] = []
     cfg = plugin._cfg
     for item in items:
@@ -89,7 +154,7 @@ def validate_distill_output(
             continue
 
         mtype = str(item.get("memory_type", ""))
-        if mtype not in {"preference", "fact", "task", "restriction", "style"}:
+        if mtype not in {"preference", "fact", "task", "restriction", "style", "event"}:
             item["memory_type"] = plugin._distill_mgr.infer_memory_type(mem)
             mtype = str(item.get("memory_type", ""))
 
@@ -118,7 +183,7 @@ def validate_distill_output(
             continue
 
         valid.append(item)
-    return valid
+    return guard_relative_date_items(valid, transcript)
 
 
 def record_distill_history(

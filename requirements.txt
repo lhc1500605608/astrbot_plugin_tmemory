@@ -1,4 +1,6 @@
 aiohttp>=3.8.0
+# 中国法定节假日数据源（纯 Python，py2.py3-none-any），用于在对话中告知当前日期/节日。
+chinese_calendar>=1.11.0
 # 可选：向量检索支持（enable_vector_search=true 时需要）
 # pip install sqlite-vec
 sqlite-vec>=0.1.6

@@ -149,7 +149,8 @@ async def test_profile_injection_groups_multiple_facets(plugin):
 
 @pytest.mark.asyncio
 async def test_profile_injection_empty_when_no_data(plugin):
-    """No profile items and no working context → empty block."""
+    """No profile items and no working context → empty block (time off)."""
+    plugin._cfg.inject_time_context = False
     block = await plugin._injection_builder.build_profile_injection(
         "u-none", "query", session_key="s1",
     )
