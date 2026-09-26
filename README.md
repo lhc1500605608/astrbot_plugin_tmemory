@@ -4,260 +4,57 @@
   <img src="./logo.png" alt="MemoryForge · 铸忆" width="180">
 </div>
 
-**MemoryForge · 铸忆** 是 [AstrBot](https://github.com/AstrBotDevs/AstrBot) 的长期记忆插件，通过自动采集对话、LLM 蒸馏和分层注入，让机器人在多轮、跨会话、跨平台场景下持续理解用户。
+[![Version](https://img.shields.io/badge/version-v0.17.0-blue.svg)](https://github.com/lhc1500605608/astrbot_plugin_tmemory)
+[![AstrBot](https://img.shields.io/badge/AstrBot-%3E%3D4.16%2C%3C5-green.svg)](https://github.com/AstrBotDevs/AstrBot)
 
-> 当前版本：`v0.17.0`。完整变更历史见 [`CHANGELOG.md`](./CHANGELOG.md)。
+[**AstrBot**](https://github.com/AstrBotDevs/AstrBot) 的长期记忆插件：自动积累用户画像，并在对话前按需注入，让机器人在多轮、跨会话、跨平台下持续"记得你"。
 
-## 功能概览
+## 它能做什么
 
-- **用户画像架构**：以用户为中心的五维画像（偏好·事实·风格·限制·任务模式），结构化存储用户长期认知
-- **自动采集**：监听用户消息，可选采集助手回复
-- **画像形成**：后台自动从对话中提炼画像条目，并保留证据溯源
-- **主动工具**：`remember` / `recall` 工具，支持模型主动保存和检索记忆
-- **画像注入**：注入在请求前自动完成，无需额外模型调用
-- **WebUI 安全加固**：写接口参数校验与错误码处理
-- **混合召回**：支持关键词与向量混合召回，可提升召回相关性
-- **蒸馏预算控制**：可设置每日用量上限，超出自动降级，`/tm_distill_history` 查看消耗
-- **自动化测试**：覆盖采集、蒸馏、召回、注入、WebUI 等主要链路
-- **记忆维护**：强化、衰减、固定、提纯、合并、拆分、失活
-- **身份合并**：通过 `canonical_user_id` 合并同一用户跨平台记忆
-- **WebUI 管理面板**：可选画像工作台、审计日志和手动蒸馏
+- **记住用户**：从日常对话中沉淀偏好、事实、习惯、约束与沟通风格，形成以用户为中心的长期画像。
+- **按需回忆**：回复前自动注入相关画像，无需额外配置，也不额外调用模型。
+- **主动记忆**：模型可通过 `remember` / `recall` 工具主动保存与检索记忆。
+- **跨平台同一人**：可把同一用户在不同平台/账号下绑定为同一人，共享一份记忆。
+- **可管理**：支持强化、衰减、固定、合并、拆分、提纯、失活，以及可选的记忆管理面板。
 
-## 工作流程
+## 安装
 
-```text
-用户/助手消息
-  ↓ 自动采集
-conversation_cache (原始证据)
-  ↓ LLM 画像形成
-用户画像条目
-  ├─ preference  偏好
-  ├─ fact        事实
-  ├─ style       风格
-  ├─ restriction 限制
-  └─ task_pattern 任务模式
-  ↓ 关键词 / 向量混合召回
-请求前自动注入相关画像
-  ↓
-模型生成更个性化的回复
-```
+1. 在 AstrBot 插件市场安装，或克隆本仓库到 AstrBot 的插件目录。
+2. 在 AstrBot WebUI 启用插件；默认配置即可开始自动采集与注入。
+3. 对话累计到阈值后，后台自动沉淀画像（管理员亦可手动触发）。
 
-`memory_mode` 控制写入路径：
+## 常用配置
 
-| 模式 | 行为 |
-|------|------|
-| `hybrid` | 默认，同时启用后台蒸馏和主动工具记忆 |
-| `distill_only` | 仅缓存 + 蒸馏，禁用 `remember` |
-| `active_only` | 仅主动工具写入，停止后台蒸馏 |
+- **Embedding（建议配置）**：先在 AstrBot「模型」中配好 Embedding Provider，再在插件「向量检索」中选择它。开启向量混合召回可提升相关性；未配置时自动退回关键词检索。
+- **写入模式** `memory_mode`：`hybrid`（默认，自动沉淀 + 主动记忆）、`distill_only`（仅自动沉淀）、`active_only`（仅主动记忆）。
+- **成本控制**：可设置每日蒸馏上限与批大小，超出自动降级。
 
-## 快速开始
+## 使用
 
-1. 在 AstrBot 插件市场安装，保持默认配置即可自动采集和注入记忆。
-2. 对话累计到阈值后后台自动蒸馏。
-3. 管理员可执行 `/tm_distill_now` 立即触发，`/tm_memory` 查看记忆，`/tm_context <问题>` 预览召回。
-
-## 环境要求
-
-向量检索（sqlite-vec）需要 AstrBot 运行的 Python 环境满足以下条件：
-
-| 要求 | 说明 |
-|------|------|
-| **loadable extensions** | Python 编译时启用 `--enable-loadable-sqlite-extensions`，使 `sqlite3.Connection.load_extension()` 可用 |
-| **FTS5** | SQLite 编译时启用 `ENABLE_FTS5`（大多数发行版默认包含） |
-| **sqlite-vec** | `pip install sqlite-vec` |
-
-> 面板「运行时能力」会自报当前解释器路径、Python/SQLite 版本及各能力状态，缺失时显示具体原因与修复命令。
-
-### 自检命令
-
-```bash
-# 在 AstrBot 运行的 Python 解释器中执行（非系统 python）
-python -c "import sqlite3,sys;print('python:',sys.version.split()[0],'sqlite:',sqlite3.sqlite_version,'load_extension:',hasattr(sqlite3.Connection,'load_extension'))"
-```
-
-### 缺 load_extension 或 FTS5 的回退
-
-若 AstrBot 的 Python sqlite3 缺 `load_extension` 或 FTS5，安装 `pysqlite3-binary` 后插件启动时会自动切换到 pysqlite3 后端：
-
-```bash
-# 替换 <astrbot-python> 为 AstrBot 实际运行的解释器路径（面板「运行解释器」可查看）
-<astrbot-python> -m pip install pysqlite3-binary sqlite-vec
-# 重启 AstrBot 生效
-```
-
-> `pysqlite3-binary` 仅有 **x86_64** 预编译包（PyPI 无 aarch64/arm64 wheel）。
-> 若面板「平台架构」显示 `aarch64`/`arm64`，安装会失败，此时请改用带
-> loadable extensions/FTS5 的 Python 构建（如 python.org 官方构建），面板会给出对应提示。
-> 因此 `pysqlite3-binary` **未**列入插件 `requirements.txt`（避免安装失败中断插件更新）。
-
-> 插件只做探测与提示，不会自动执行 `pip install`。修复命令需由管理员手动执行。
-
-## 配置
-
-插件配置页按相关性分组：**基础设置 / 向量检索 / 蒸馏调度与成本 / 蒸馏模型 / 记忆注入 / 会话与身份 / 用户画像 / 主动性记忆 / WebUI**。
-
-### Embedding：只使用 AstrBot Provider
-
-1. 先在 AstrBot 的「模型」中配置好 Embedding Provider；
-2. 打开插件「记忆面板 → 向量检索」，在下拉框中选择 AstrBot 已配置的 Embedding Provider（留空自动选第一个可用项）；配置页的 **Embedding Provider ID** 仍可查看/手填该 `id`。**无需手填 API Key / 模型名 / Base URL**。
-
-> Embedding 已收敛为 **仅 Provider 路径**：`embedding_source` 固定为 `provider`，不再支持 standalone / local。旧配置中的 `embedding_source=standalone|local` 与相关键仍保留在配置文件中（不丢值），但加载时会记录一条 warning 并按 provider 处理。
-
-### 向后兼容
-
-从旧版本升级时，插件会把旧的平铺配置项自动迁移到新的分组路径，**旧值不丢失**：
-
-- 迁移在插件加载时原地完成并写回配置文件，此后以新分组路径为准。
-- 已废弃的配置（分层注入、三层整合流水线等）不再在配置页展示，但键与值仍保留在配置文件中，确保升级后行为与取值不变。
-
-## Smoke 验证
-
-OpenAPI 本地集成 smoke 默认面向 Docker AstrBot `http://localhost:6186`，并按 `ASTRBOT_LOCAL_TEST_STANDARD.md` 固化 4 步：`/api/v1/chat` SSE、`/api/v1/chat/sessions`、`/api/v1/configs`、`/api/v1/im/message`。前置条件是 `docker-compose up -d` 已启动 `astrbot_tmemory_test`，且 `ASTRBOT_API_KEY` 可用（默认 `admin`）。如使用本地 AstrBot `http://localhost:6185`，设置 `ASTRBOT_REQUIRE_DOCKER=0` 并传入本机已创建的 OpenAPI key。
-
-```bash
-ASTRBOT_URL=http://localhost:6186 ASTRBOT_API_KEY=admin SKIP_DEEPSEEK=1 bash docker/e2e_verify.sh
-
-ASTRBOT_URL=http://localhost:6185 ASTRBOT_REQUIRE_DOCKER=0 ASTRBOT_API_KEY=<openapi-key> SKIP_DEEPSEEK=1 bash docker/e2e_verify.sh
-```
-
-WebUI route 级 smoke 通过 pytest 覆盖 auth、profile 查询/更新/合并、config 读写、negative auth/input：
-
-```bash
-python3 -m pytest -q tests/test_profile_admin_api.py::test_webui_profile_route_smoke_covers_auth_crud_merge_and_config
-```
-
-## 打包与发布
-
-从仓库根目录生成可被 AstrBot Dashboard 安装的干净 zip（单一顶层目录 `astrbot_plugin_tmemory/`，自动排除 `__MACOSX`、`.DS_Store`、`._*`、`__pycache__`、`.env` 等）：
-
-```bash
-tools/pack_plugin.sh            # -> dist/astrbot_plugin_tmemory.zip
-tools/pack_plugin.sh --output /tmp/astrbot_plugin_tmemory.zip
-```
-
-脚本内置 AstrBot 同规则校验（`_resolve_archive_root_dir` + `metadata.yaml` 命中），校验失败即非零退出。验证已有压缩包：
-
-```bash
-python3 tools/plugin_archive.py verify dist/astrbot_plugin_tmemory.zip
-```
-
-不要使用 macOS Finder「压缩」生成的 zip（会带入 `__MACOSX/` 资源叉），否则 AstrBot 推导的根目录退化为空、找不到 `metadata.yaml`。详见 `docs/PACKAGING.md`。
-
-## 管理命令
-
-以下命令均需 AstrBot `ADMIN` 权限。
+管理命令（需 AstrBot `ADMIN` 权限）：
 
 | 命令 | 说明 |
 |------|------|
-| `/tm_memory` | 查看当前用户长期记忆 |
-| `/tm_context <问题>` | 预览记忆召回上下文 |
-| `/tm_distill_now` | 手动触发批量蒸馏 |
-| `/tm_worker` | 查看蒸馏后台状态 |
-| `/tm_stats` | 全局统计（含向量索引行数） |
-| `/tm_distill_history` | 蒸馏历史和 token 成本 |
-| `/tm_purify` | 全量记忆提纯 |
-| `/tm_refine mode=both limit=20` | 手动提纯（合并/拆分/dry-run） |
-| `/tm_mem_merge <id1,id2> <文本>` | 合并多条记忆 |
-| `/tm_mem_split <id> [片段]` | 拆分记忆（可选 LLM 自动拆分） |
-| `/tm_forget <id>` | 删除记忆 |
-| `/tm_pin <id>` | 固定记忆（不受衰减/剪枝影响） |
-| `/tm_unpin <id>` | 取消固定 |
-| `/tm_export` | 导出当前用户记忆 JSON |
-| `/tm_purge` | 删除当前用户全部记忆和缓存 |
-| `/tm_bind <canonical_id>` | 绑定当前账号到统一用户 ID |
-| `/tm_merge <from_id> <to_id>` | 合并两个用户 ID 的记忆 |
-| `/tm_vec_rebuild [force=true]` | 重建向量索引 |
+| `/tm_memory` | 查看当前用户记忆 |
+| `/tm_context <问题>` | 预览将被召回的内容 |
+| `/tm_distill_now` | 立即触发一次蒸馏 |
+| `/tm_stats` / `/tm_distill_history` | 统计与成本 |
+| `/tm_mem_merge` / `/tm_mem_split` / `/tm_forget` / `/tm_pin` | 记忆整理 |
+| `/tm_export` / `/tm_purge` | 导出 / 清除 |
+| `/tm_bind` / `/tm_merge` | 账号绑定与记忆合并 |
 
-## LLM 工具
+模型工具：`remember`（保存）、`recall`（检索）。
 
-| 工具 | 参数 | 说明 |
-|------|------|------|
-| `remember` | `content`, `memory_type` | 保存长期记忆。type: preference/fact/task/restriction/style |
-| `recall` | `query` | 检索相关记忆 |
+## 隐私与安全
 
-## 画像维度
+- 只沉淀结构化的"派生画像"，不含密钥等敏感信息。
+- **群聊默认不注入私聊记忆**；如需群聊召回须显式开启，并自行评估隐私风险。
 
-| 维度 | 含义 | 示例 |
-|------|------|------|
-| `preference` | 偏好 | "用户喜欢简洁回答" |
-| `fact` | 事实 | "用户是 Python 开发者" |
-| `task_pattern` | 任务模式 | "用户常在晚上9点后开始工作" |
-| `restriction` | 约束 | "不要向用户推荐含花生的食物" |
-| `style` | 风格 | "用户希望先给结论再解释" |
+## 兼容性
 
-## 数据存储
+- AstrBot `>=4.16,<5`；支持主流适配器。
+- 向量检索为可选增强，环境不满足时自动降级，不影响使用。
 
-本地 SQLite 数据库默认位置：
+## 许可
 
-```text
-data/plugin_data/astrbot_plugin_tmemory/tmemory.db
-```
-
-核心表：`identity_bindings`、`conversation_cache`、`user_profiles`、`profile_items`、`profile_item_evidence`、`profile_relations`、`memory_vectors`、`memory_events`、`distill_history`。
-
-## 会话生命周期（`/new` `/reset`）
-
-AstrBot ≥4.28 在 `/new` `/reset` 时会新建/重置会话，插件通过
-`ConversationManager.register_on_session_deleted` + 对话 ID 变化检测观测该事件，并按
-`session_reset_policy` 三态处理**会话缓存**（`conversation_cache`）；长期记忆
-（`profile_items` / 蒸馏产物）始终保留：
-
-| 取值 | 行为 |
-|------|------|
-| `keep`（默认） | 仅记录日志，缓存与长期记忆全部保留（向后兼容） |
-| `archive` | 会话缓存软归档（写入 `archived_at`）：不再作为工作上下文注入，但保留证据与蒸馏资格 |
-| `clear` | 删除该会话缓存行；被 `profile_item_evidence` / `episode_sources` 引用的行保留，避免破坏证据链 |
-
-- 仅支持 AstrBot ≥4.28 的会话删除钩子；低版本自动跳过并记一条日志，不影响插件加载。
-  `/new` `/reset` 的轮转检测不依赖该钩子（基于对话 ID 变化），4.16–4.28 全版本可用。
-- 会话删除事件以 INFO 级别记录：`[tmemory] 会话删除观测 umo=... policy=... archived=... cleared=...`。
-- 同时接入 `on_agent_begin` / `on_agent_done`（≥4.28）作为 Agent 运行起止观测（DEBUG 日志）。
-- 详细语义与验证步骤见 [`docs/session-lifecycle.md`](docs/session-lifecycle.md)。
-
-## 常见问题
-
-**为什么没有立即生成长期记忆？** 默认需要单用户未蒸馏消息达到 `distill_min_batch_count`（默认 20），等待后台处理。管理员可用 `/tm_distill_now` 手动触发。
-
-**群聊为什么不注入私聊记忆？** 这是默认隐私保护。需开启 `private_memory_in_group`（注意隐私风险）。
-
-**如何控制 LLM 成本？** 提高 `distill_min_batch_count`、增大 `distill_interval_sec`、使用 `distill_user_throttle_sec`，或切换到 `active_only` 模式完全依赖模型主动调用 `remember`。
-
-**向量检索为空？** 确认 `sqlite-vec` 可用、API Key 有效、维度匹配，执行 `/tm_vec_rebuild`。
-
-**WebUI 打不开？** AstrBot ≥4.28 默认在 Dashboard 插件详情页以 Plugin Pages 打开（无需单独端口/密码）。旧独立端口面板已下线，如需回滚请开启 `webui_legacy_enabled=true`（同时保持 `webui_enabled=true` 并设置 `webui_password`、确认端口未被占用）。
-
-**Plugin Pages 接口 500 / `ModuleNotFoundError: No module named 'astrbot.api.web'`？** 当前 AstrBot 版本 <4.28（`astrbot.api.web` 缺失）。插件的能力探测会同时校验 `Context.register_web_api` 与 `astrbot.api.web` 契约，不满足时跳过 bridge 注册并记日志（`[tmemory] 当前 AstrBot 无 Plugin Pages 能力（需 >=4.28），跳过 bridge 注册。`），不再返回 500。请将镜像升级到提供 `astrbot.api.web` 的版本（≥4.28）后重启；校验命令：`docker exec <容器> python3 -c "import astrbot.api.web"`。
-
-## 兼容层说明
-
-### AstrBot 版本兼容
-
-- 插件声明 `astrbot_version: ">=4.16,<5"`（保守策略），在 AstrBot 4.16 及以上均可加载。
-- 注入位置 `inject_position=extra_user_temp` 依赖 `TextPart.mark_as_temp()`，**需 AstrBot ≥4.28**；在 4.16–4.27 上会自动回退为 `system_prompt`。
-
-> **当前产品基线**：MemoryForge 的主产品能力是「用户画像」，旧记忆体系仅作为内部兼容层存在，不对外宣称为产品能力。
-
-### style_distill 剥离
-
-- 聊天风格蒸馏功能已完全剥离至独立插件 `astrbot_plugin_tstyle_distill`，与主记忆管道零耦合。
-- 主插件不再提供 `/style_distill` 命令，旧 Docker 拓扑文档中该命令的引用仅为历史记录。
-
-### refine / purify 现状
-
-- `/tm_purify` — 全量记忆提纯，检测并消解冲突画像条目。
-- `/tm_refine mode=both limit=20` — 手动提纯（合并/拆分/dry-run），对标 `tm_mem_merge` + `tm_mem_split` 的批量操作入口。
-- `/tm_quality_refine` — 旧命令兼容别名，等价于 `/tm_purify`，保留用于向后兼容。
-
-### 旧表停用声明
-
-以下表已退出主数据链路，仅保留 DDL 及只读兼容路径，不参与检索、注入或蒸馏：
-
-| 表名 | 状态 | 说明 |
-|------|------|------|
-| `memories` | 停用 | 旧版语义事实表，已由 `profile_items` 替代 |
-| `memory_episodes` | 停用 | 旧版情节表，检索链路已切换至画像条目 |
-| `episode_sources` | 停用 | 旧版情节来源表，证据链由 `profile_item_evidence` 承载 |
-
-**当前核心表**：`identity_bindings`、`conversation_cache`、`user_profiles`、`profile_items`、`profile_item_evidence`、`profile_relations`、`memory_vectors`、`memory_events`、`distill_history`。
-
-上述旧表尚未移除，仍保留 DDL 与只读兼容路径；后续移除时将提供至少一个发布周期的只读过渡期。
+GNU AGPL-3.0（见 [`LICENSE`](./LICENSE)）。版本与变更历史见 [`CHANGELOG.md`](./CHANGELOG.md)。
