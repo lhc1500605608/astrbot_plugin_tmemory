@@ -33,6 +33,8 @@ class DataAccessMixin:
         source_channel: str = "default",
         persona_id: str = "",
         scope: str = "user",
+        event_date: str = "",
+        valid_until: str = "",
     ) -> int:
         from .memory_ops import MemoryOps
 
@@ -48,6 +50,8 @@ class DataAccessMixin:
             source_channel=source_channel,
             persona_id=persona_id,
             scope=scope,
+            event_date=event_date,
+            valid_until=valid_until,
         )
 
     def _delete_memory(self, memory_id: int) -> bool:
@@ -404,7 +408,7 @@ class DataAccessMixin:
         with self._db() as conn:
             rows = conn.execute(
                 """
-                SELECT id, canonical_user_id, role, content, source_adapter, source_user_id, unified_msg_origin, scope, persona_id
+                SELECT id, canonical_user_id, role, content, source_adapter, source_user_id, unified_msg_origin, scope, persona_id, created_at
                 FROM conversation_cache
                 WHERE canonical_user_id=? AND distilled=0 AND episode_id=0
                 ORDER BY id ASC

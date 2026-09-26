@@ -5,6 +5,34 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v0.17.0] - 2026-09-26
+
+时间感知 + 蒸馏防误记（TMEAAA-587）：每次对话告知当前日期/星期/节日，带日期的事件记忆按时间窗口注入，
+蒸馏阶段把「下周六」这类相对时间规范化为绝对日期并落成 event 记忆，避免把未来日程误记成永久事实。
+无破坏性迁移（`memories` 新增两列自动迁移、默认空），直接替换安装即可。
+
+### Added
+
+- **时间/节日上下文**（TMEAAA-588/590）：新增 `core/calendar.py`，产出单行今日上下文注入对话；
+  节日源优先 `chinese_calendar`（新增依赖 `chinese_calendar>=1.11.0`），缺依赖或超出版年份时回退固定太阳能节日（元旦/劳动节/国庆节），
+  再退化为仅日期+星期；全程 fail-closed 不抛错。
+- **event 记忆维度**（TMEAAA-588）：`memories` 新增 `event_date` / `valid_until` 列（旧库启动自动迁移，老行空值）；
+  新增 `retrieve_events` 按日期窗口取带日期事件。
+- **时效 event 注入**（TMEAAA-590）：窗口内事件以 `MM-DD(周X)` 形式随记忆块注入；过期/超窗/他人事件与普通 fact 不注入。
+- **蒸馏防误记**（TMEAAA-589）：相对时间（「下周六」「这月」）在写库前规范化为绝对日期；日程类陈述落 event 而非 fact。
+
+### Changed
+
+- 新增配置项（默认开启，配置页「记忆注入」分组）：
+  - `injection.inject_time_context`（bool，默认 `true`）——是否在对话中带上日期与节日。
+  - `injection.event_inject_window_days`（int，默认 `3`）——事件记忆注入的时间窗口，单位天。
+- `_conf_schema.json` 同步新增上述两项；`tests/test_layered_injection.py`、`tests/test_plugin_baseline.py`
+  的空注入断言显式关闭时间上下文以保持原语义。
+
+### Notes
+
+- 依赖新增 `chinese_calendar`（guarded import，未安装也能跑，只是节日精度降级）。
+
 ## [v0.16.0] - 2026-09-24
 
 共享身份映射导出：tmemory 作为身份权威，将身份绑定全量写出到共享文件，供关联插件离线解析同一用户。

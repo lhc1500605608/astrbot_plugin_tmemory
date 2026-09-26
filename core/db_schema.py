@@ -36,6 +36,8 @@ CREATE TABLE IF NOT EXISTS memories (
     evidence_json TEXT NOT NULL DEFAULT '',
     semantic_status TEXT NOT NULL DEFAULT 'active',
     contradiction_of INTEGER NOT NULL DEFAULT 0,
+    event_date TEXT NOT NULL DEFAULT '',
+    valid_until TEXT NOT NULL DEFAULT '',
     UNIQUE(canonical_user_id, memory_hash, persona_id, scope)
 )
 """

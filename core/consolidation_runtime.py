@@ -291,7 +291,7 @@ class ConsolidationRuntimeMixin:
                     self._mark_episode_semantic_done(ep_id, "empty_result")
                     continue
 
-                valid_items = self._validate_distill_output(items)
+                valid_items = self._validate_distill_output(items, snippets)
                 if valid_items and sources:
                     from .attribution import filter_assistant_attributed
                     valid_items = filter_assistant_attributed(valid_items, sources)

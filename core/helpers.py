@@ -343,7 +343,7 @@ class PluginHelpersMixin(DataAccessMixin):
 
     def _safe_memory_type(self, value: object) -> str:
         s = str(value or "fact").strip().lower()
-        if s in {"preference", "fact", "task", "restriction", "style"}:
+        if s in {"preference", "fact", "task", "restriction", "style", "event"}:
             return s
         return "fact"
 

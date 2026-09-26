@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 logger = logging.getLogger("astrbot")
 
 # 代码版本常量：与 metadata.yaml / README「当前版本」保持一致（TMEAAA-540）。
-PLUGIN_VERSION = "v0.16.0"
+PLUGIN_VERSION = "v0.17.0"
 
 @dataclass
 class PluginConfig:
@@ -117,6 +117,9 @@ class PluginConfig:
     inject_slot_marker: str = "{{tmemory}}"
     inject_memory_limit: int = 5
     inject_max_chars: int = 0
+    # ── 时间/节日上下文与事件记忆（TMEAAA-588）──
+    inject_time_context: bool = True
+    event_inject_window_days: int = 3
 
     # ── Deprecated injection configs (no longer drive main logic; kept for backward compat) ──
     enable_layered_injection: bool = False
@@ -469,6 +472,8 @@ def parse_config(raw_config: dict) -> PluginConfig:
     c.inject_slot_marker = str(_cfg_get(raw_config, "injection.inject_slot_marker", "{{tmemory}}")).strip()
     c.inject_memory_limit = _safe_int(_cfg_get(raw_config, "injection.inject_memory_limit", 5), 5, label="inject_memory_limit")
     c.inject_max_chars = _safe_int(_cfg_get(raw_config, "injection.inject_max_chars", 0), 0, label="inject_max_chars")
+    c.inject_time_context = _safe_bool(_cfg_get(raw_config, "injection.inject_time_context", True), True, label="inject_time_context")
+    c.event_inject_window_days = max(0, _safe_int(_cfg_get(raw_config, "injection.event_inject_window_days", 3), 3, label="event_inject_window_days"))
     # 已废弃：保留旧键读取以保持行为/值不变（配置页不再展示）。
     c.enable_layered_injection = _safe_bool(raw_config.get("enable_layered_injection", False), False, label="enable_layered_injection")
     c.inject_working_turns = max(0, _safe_int(raw_config.get("inject_working_turns", 5), 5, label="inject_working_turns"))

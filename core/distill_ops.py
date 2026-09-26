@@ -19,6 +19,7 @@ from .distill_errors import (
     make_unparseable_record,
 )
 from .style_analyzer import get_style_analyzer
+from .utils_shared import _earliest_date
 
 logger = logging.getLogger("astrbot:db.py")
 
@@ -94,7 +95,11 @@ class DistillOpsMixin:
 
         style_analysis = get_style_analyzer().analyze(rows)
         style_context = get_style_analyzer().build_style_context(style_analysis)
-        prompt = self.plugin._distill_mgr.build_distill_prompt(transcript, style_context)
+        # 以本批对话最早时间为基准，让 LLM 把相对时间词换算为绝对日期。
+        time_anchor = _earliest_date(r.get("created_at", "") for r in rows)
+        prompt = self.plugin._distill_mgr.build_distill_prompt(
+            transcript, style_context, time_anchor
+        )
 
         try:
             llm_generate_kwargs = {
@@ -328,7 +333,14 @@ class DistillOpsMixin:
                     processed_users += 1
                     continue
 
-                valid_items = self.plugin._validate_distill_output(llm_items)
+                user_transcript = "\n".join(
+                    str(r.get("content", ""))
+                    for r in rows
+                    if str(r.get("role", "")) == "user"
+                )
+                valid_items = self.plugin._validate_distill_output(
+                    llm_items, user_transcript
+                )
                 if not valid_items:
                     from .distill_errors import make_validation_failure_record
                     vf_err = make_validation_failure_record(
@@ -371,6 +383,8 @@ class DistillOpsMixin:
                         source_channel=insert_channel,
                         scope=row_scope,
                         persona_id=row_persona,
+                        event_date=str(item.get("event_date", "") or "").strip(),
+                        valid_until=str(item.get("valid_until", "") or "").strip(),
                     )
                     if self.plugin._vec_available and new_id:
                         await self.plugin._upsert_vector(new_id, mem_text)

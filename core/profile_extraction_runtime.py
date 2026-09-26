@@ -8,6 +8,7 @@ from typing import Dict, List
 
 from .distill_errors import classify_llm_error
 from .profile_extractor import ProfileExtractor
+from .utils_shared import _earliest_date
 
 logger = logging.getLogger("astrbot")
 
@@ -82,7 +83,8 @@ class ProfileExtractionRuntimeMixin:
                     continue
 
                 transcript = _build_transcript(rows)
-                prompt = extractor.build_extraction_prompt(transcript)
+                time_anchor = _earliest_date(r.get("created_at", "") for r in rows)
+                prompt = extractor.build_extraction_prompt(transcript, time_anchor)
 
                 provider_id, model_id = await self._resolve_consolidation_model(rows)
                 if not provider_id:

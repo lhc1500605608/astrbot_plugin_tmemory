@@ -245,7 +245,7 @@ class AdminDistillMixin:
             }
 
         parsed = filter_assistant_attributed(parsed, rows)
-        valid_items = plugin._validate_distill_output(parsed)
+        valid_items = plugin._validate_distill_output(parsed, _user_transcript)
         if not valid_items:
             return {
                 "ok": False,

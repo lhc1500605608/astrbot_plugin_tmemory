@@ -76,6 +76,8 @@ class LLMHelpers:
                     "importance": clamp01_func(item.get("importance", 0.6)),
                     "confidence": clamp01_func(item.get("confidence", 0.7)),
                     "score": clamp01_func(item.get("score", 0.7)),
+                    "event_date": str(item.get("event_date", "") or "").strip(),
+                    "valid_until": str(item.get("valid_until", "") or "").strip(),
                 }
             )
         return result

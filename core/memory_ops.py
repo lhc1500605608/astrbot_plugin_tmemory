@@ -43,6 +43,8 @@ class MemoryOps(DistillOpsMixin):
         source_channel: str = "default",
         persona_id: str = "",
         scope: str = "user",
+        event_date: str = "",
+        valid_until: str = "",
     ) -> int:
         normalized = self.plugin._normalize_text(memory)
         mhash = hashlib.sha256(
@@ -110,8 +112,8 @@ class MemoryOps(DistillOpsMixin):
                 INSERT INTO memories(
                     canonical_user_id, source_adapter, source_user_id, source_channel, memory_type,
                     summary_channel, memory, tokenized_memory, memory_hash, score, importance, confidence, reinforce_count, attention_score, is_active,
-                    last_seen_at, created_at, updated_at, persona_id, scope
-                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    last_seen_at, created_at, updated_at, persona_id, scope, event_date, valid_until
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     canonical_id,
@@ -134,6 +136,8 @@ class MemoryOps(DistillOpsMixin):
                     now,
                     persona_id,
                     scope,
+                    str(event_date or ""),
+                    str(valid_until or ""),
                 ),
             )
             new_id = int(cur.lastrowid or 0)
