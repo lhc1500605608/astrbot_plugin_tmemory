@@ -97,7 +97,7 @@ def build_message_chain(parts: Sequence[Any]) -> Any:
     except Exception:
         return texts
     try:
-        from astrbot.api.message_components import MessageChain  # type: ignore
+        from astrbot.api.event import MessageChain  # type: ignore
 
         return MessageChain(components)
     except Exception:
@@ -122,8 +122,8 @@ async def send_message(source: Any, umo: str, chain: Sequence[Any]) -> bool:
     if isinstance(chain, (list, tuple)) and chain and isinstance(chain[0], dict):
         payload = build_message_chain(chain)
     try:
-        await fn(umo, payload)
-        return True
+        result = await fn(umo, payload)
+        return result is not False
     except Exception as e:
         logger.warning("[tmemory] proactive send_message failed: %s", e)
         return False

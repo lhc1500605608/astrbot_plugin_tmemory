@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from ..adapters.llm import generate as generate_llm
+
 import asyncio
 import logging
 from typing import Dict, List
@@ -101,7 +103,7 @@ class ProfileExtractionRuntimeMixin:
                         if model_id:
                             llm_kwargs["model_id"] = model_id
 
-                        llm_resp = await self.context.llm_generate(**llm_kwargs)
+                        llm_resp = await generate_llm(self, **llm_kwargs)
                         completion = self._normalize_text(
                             getattr(llm_resp, "completion_text", "") or ""
                         )

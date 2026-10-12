@@ -1,6 +1,7 @@
 import os
 import time
-import sqlite3
+from .sqlite_env import sqlite_backend
+sqlite3 = sqlite_backend()
 import threading
 import logging
 from typing import Optional, Dict

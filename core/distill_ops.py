@@ -5,6 +5,8 @@ Physical move only — no behavior change. ``MemoryOps`` inherits this mixin so
 the public object and method surface stay identical.
 """
 
+from ..adapters.llm import generate as generate_llm
+
 import logging
 from typing import Dict, List, Tuple
 
@@ -109,7 +111,7 @@ class DistillOpsMixin:
             if chat_model_id:
                 llm_generate_kwargs["model_id"] = chat_model_id
 
-            llm_resp = await self.plugin.context.llm_generate(**llm_generate_kwargs)
+            llm_resp = await generate_llm(self.plugin, **llm_generate_kwargs)
             completion_text = self.plugin._normalize_text(
                 getattr(llm_resp, "completion_text", "") or ""
             )

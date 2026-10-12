@@ -10,6 +10,14 @@ from . import version as _version
 logger = logging.getLogger("astrbot")
 
 
+async def generate(plugin: Any, **kwargs):
+    """One plugin-owned gateway to AstrBot; never mutate a shared Provider."""
+    legacy_model = kwargs.pop("model_id", None)
+    if legacy_model:
+        kwargs.setdefault("model", legacy_model)
+    return await plugin.context.llm_generate(**kwargs)
+
+
 def inject_extra_user_temp(req: Any, block: str) -> bool:
     """把 memory block 作为「临时用户内容部件」追加到 ProviderRequest。
 

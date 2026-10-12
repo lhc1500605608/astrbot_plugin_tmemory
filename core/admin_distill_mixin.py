@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+from ..adapters.llm import generate as generate_llm
+
 import logging
 from typing import TYPE_CHECKING, Any, Dict, List
 
@@ -223,7 +225,7 @@ class AdminDistillMixin:
             }
             if model_id:
                 llm_kwargs["model_id"] = model_id
-            llm_resp = await plugin.context.llm_generate(**llm_kwargs)
+            llm_resp = await generate_llm(plugin, **llm_kwargs)
             completion = plugin._strip_think_tags(
                 plugin._normalize_text(getattr(llm_resp, "completion_text", "") or "")
             )

@@ -214,6 +214,8 @@ def test_log_self_report_caches_on_plugin_and_is_unconditional(plugin, caplog):
 def test_install_shim_switches_to_pysqlite3_and_is_idempotent(
     sqlite_env, monkeypatch
 ):
+    original_sqlite3 = sys.modules["sqlite3"]
+    monkeypatch.setattr(sqlite_env, "_local_backend", None)
     fake_pysqlite3 = types.ModuleType("pysqlite3")
     fake_pysqlite3.sqlite_version = "3.99.0"
     fake_pysqlite3.Connection = type(
@@ -227,11 +229,11 @@ def test_install_shim_switches_to_pysqlite3_and_is_idempotent(
 
     first = sqlite_env.install_sqlite3_shim()
     assert first.backend == "pysqlite3"
-    assert sys.modules["sqlite3"] is fake_pysqlite3
+    assert sys.modules["sqlite3"] is original_sqlite3
 
     second = sqlite_env.install_sqlite3_shim()
     assert second.backend == "pysqlite3"
-    assert sys.modules["sqlite3"] is fake_pysqlite3
+    assert sys.modules["sqlite3"] is original_sqlite3
 
 
 def test_install_shim_noop_when_pysqlite3_absent(sqlite_env, monkeypatch):

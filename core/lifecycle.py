@@ -481,6 +481,7 @@ class PluginLifecycleMixin:
             logger.debug("[tmemory] identity_map startup export skipped: %s", e)
 
     async def terminate(self):
+        self._session_callback_active = False
         self._worker_running = False
         if self._distill_task and not self._distill_task.done():
             self._distill_task.cancel()

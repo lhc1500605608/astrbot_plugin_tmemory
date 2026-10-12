@@ -51,14 +51,26 @@ class SessionLifecycleRuntimeMixin:
 
     def _register_session_lifecycle_hooks(self) -> bool:
         """注册会话删除钩子；能力缺失 / 异常时返回 False，不阻断启动。"""
+        import weakref
+        if getattr(self, "_session_callback_active", False):
+            return True
+        reference = weakref.ref(self)
+
+        async def on_deleted(umo):
+            instance = reference()
+            if instance is not None and getattr(instance, "_session_callback_active", False):
+                await instance._on_session_deleted(umo)
+
+        self._session_callback_active = True
         try:
             registered = _conversation_adapter.register_session_deleted(
-                getattr(self, "context", None), self._on_session_deleted
+                getattr(self, "context", None), on_deleted
             )
         except Exception as e:
             logger.warning("[tmemory] 会话删除钩子注册异常: %s", e)
             return False
 
+        self._session_callback_active = registered
         if registered:
             logger.info(
                 "[tmemory] 会话删除钩子已注册（session_reset_policy=%s）",

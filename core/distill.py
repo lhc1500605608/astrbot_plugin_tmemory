@@ -141,8 +141,6 @@ class DistillManager:
         if self._cfg.use_independent_distill_model and self._cfg.distill_provider_id:
             return self._cfg.distill_provider_id
 
-        if self._cfg.distill_model_id:
-            return self._cfg.distill_model_id
         if self._cfg.distill_provider_id:
             return self._cfg.distill_provider_id
 

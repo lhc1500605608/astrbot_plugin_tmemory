@@ -154,7 +154,7 @@ class SqliteEnvReport:
 
 def _active_sqlite3_module() -> Any:
     """返回当前生效的 ``sqlite3`` 模块（可能是 shim 后的 pysqlite3）。"""
-    return importlib.import_module("sqlite3")
+    return _local_backend or importlib.import_module("sqlite3")
 
 
 def _detect_load_extension(mod: Any) -> bool:
@@ -339,14 +339,15 @@ def log_sqlite_env_self_report(plugin: Any = None) -> "SqliteEnvReport":
 
 _shim_lock = threading.Lock()
 _shim_installed = False
+_local_backend = None
 
 
 def install_sqlite3_shim() -> SqliteEnvReport:
-    """必要且可行时把 ``sys.modules["sqlite3"]`` 切换到 pysqlite3。
+    """必要且可行时为插件选择 pysqlite3，不修改宿主模块。
 
     幂等：重复调用安全；已是 pysqlite3 后端时直接返回当前探测结果。
     """
-    global _shim_installed
+    global _shim_installed, _local_backend
     with _shim_lock:
         report = probe_sqlite_environment()
         if report.backend == "pysqlite3":
@@ -360,7 +361,7 @@ def install_sqlite3_shim() -> SqliteEnvReport:
         except Exception as e:  # noqa: BLE001 - 回退失败保持 stdlib
             logger.warning("[tmemory] pysqlite3 导入失败，保持 stdlib sqlite3: %s", e)
             return report
-        sys.modules["sqlite3"] = pysqlite3
+        _local_backend = pysqlite3
         _shim_installed = True
         logger.warning(
             "[tmemory] 系统 sqlite3 缺少 load_extension 或 FTS5；"
@@ -427,3 +428,9 @@ __all__ = [
     "probe_sqlite_environment",
     "sqlite_env_dict",
 ]
+
+
+def sqlite_backend():
+    """Return the plugin-local SQLite module."""
+    install_sqlite3_shim()
+    return _active_sqlite3_module()

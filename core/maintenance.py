@@ -6,6 +6,8 @@
 
 from __future__ import annotations
 
+from ..adapters.llm import generate as generate_llm
+
 import json
 import logging
 import math
@@ -44,9 +46,7 @@ async def run_memory_purify(plugin) -> Tuple[int, int]:
     pruned_llm = 0
     kept = 0
     provider_id = (
-        plugin._cfg.purify_model_id
-        or plugin._cfg.distill_model_id
-        or plugin._cfg.distill_provider_id
+        plugin._cfg.distill_provider_id
     )
     if not provider_id:
         with plugin._db() as conn:
@@ -115,9 +115,10 @@ async def llm_purify_judge(
         f"待审核记忆:\n{json.dumps(memories, ensure_ascii=False)}"
     )
     try:
-        resp = await plugin.context.llm_generate(
+        resp = await generate_llm(plugin, 
             chat_provider_id=provider_id,
             prompt=prompt,
+            **({"model": plugin._cfg.purify_model_id} if plugin._cfg.purify_model_id else {}),
         )
         txt = plugin._strip_think_tags(
             plugin._normalize_text(getattr(resp, "completion_text", "") or "")
@@ -171,7 +172,7 @@ async def llm_purify_operations(
         return {"updates": [], "adds": [], "deletes": [], "note": "no provider"}
 
     try:
-        resp = await plugin.context.llm_generate(
+        resp = await generate_llm(plugin, 
             chat_provider_id=str(provider_id), prompt=prompt
         )
         txt = plugin._strip_think_tags(
@@ -210,7 +211,7 @@ async def llm_split_memory(plugin, event, memory_text: str) -> List[str]:
         ]
 
     try:
-        resp = await plugin.context.llm_generate(
+        resp = await generate_llm(plugin, 
             chat_provider_id=str(provider_id), prompt=prompt
         )
         txt = plugin._strip_think_tags(

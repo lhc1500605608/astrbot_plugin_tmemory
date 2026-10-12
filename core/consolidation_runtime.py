@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from ..adapters.llm import generate as generate_llm
+
 import asyncio
 import hashlib
 import json
@@ -154,7 +156,7 @@ class ConsolidationRuntimeMixin:
             if model_id:
                 llm_kwargs["model_id"] = model_id
 
-            llm_resp = await self.context.llm_generate(**llm_kwargs)
+            llm_resp = await generate_llm(self, **llm_kwargs)
             completion = self._normalize_text(
                 getattr(llm_resp, "completion_text", "") or ""
             )
@@ -166,7 +168,7 @@ class ConsolidationRuntimeMixin:
             logger.debug("[tmemory] episode JSON parse failed, retrying")
             stricter_prompt = ep_mgr.build_stricter_prompt(transcript)
             llm_kwargs["prompt"] = stricter_prompt
-            llm_resp2 = await self.context.llm_generate(**llm_kwargs)
+            llm_resp2 = await generate_llm(self, **llm_kwargs)
             completion2 = self._normalize_text(
                 getattr(llm_resp2, "completion_text", "") or ""
             )
@@ -269,7 +271,7 @@ class ConsolidationRuntimeMixin:
                     if model_id:
                         llm_kwargs["model_id"] = model_id
 
-                    llm_resp = await self.context.llm_generate(**llm_kwargs)
+                    llm_resp = await generate_llm(self, **llm_kwargs)
                     completion = self._normalize_text(
                         getattr(llm_resp, "completion_text", "") or ""
                     )
