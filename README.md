@@ -7,14 +7,14 @@
 [![Version](https://img.shields.io/badge/version-v0.17.0-blue.svg)](https://github.com/lhc1500605608/astrbot_plugin_tmemory)
 [![AstrBot](https://img.shields.io/badge/AstrBot-%3E%3D4.16%2C%3C5-green.svg)](https://github.com/AstrBotDevs/AstrBot)
 
-[**AstrBot**](https://github.com/AstrBotDevs/AstrBot) 的长期记忆插件：自动积累用户画像，并在对话前按需注入，让机器人在多轮、跨会话、跨平台下持续"记得你"。
+[**AstrBot**](https://github.com/AstrBotDevs/AstrBot) 的长期记忆插件：自动积累用户画像，并在对话前按需注入，让机器人在多轮、跨会话中持续"记得你"。
 
 ## 它能做什么
 
 - **记住用户**：从日常对话中沉淀偏好、事实、习惯、约束与沟通风格，形成以用户为中心的长期画像。
 - **按需回忆**：回复前自动注入相关画像，无需额外配置，也不额外调用模型。
 - **主动记忆**：模型可通过 `remember` / `recall` 工具主动保存与检索记忆。
-- **跨平台同一人**：可把同一用户在不同平台/账号下绑定为同一人，共享一份记忆。
+- **跨平台同一人**：可绑定同一用户在不同平台/账号下的身份；各平台实例、私聊与群聊默认仍分别隔离，只有管理员显式设置共享范围才可跨范围召回。
 - **可管理**：支持强化、衰减、固定、合并、拆分、提纯、失活，以及可选的记忆管理面板。
 
 ## 安装
@@ -52,9 +52,12 @@
 
 ## 兼容性
 
-- AstrBot `>=4.16,<5`；支持主流适配器。
+- 声明适配 AstrBot `>=4.16,<5`；已在 4.16.0、4.23.2、4.28.1 进行本地真实插件加载验证，其他版本尚未逐一验证。
 - 向量检索为可选增强，环境不满足时自动降级，不影响使用。
 
 ## 许可
 
 GNU AGPL-3.0（见 [`LICENSE`](./LICENSE)）。版本与变更历史见 [`CHANGELOG.md`](./CHANGELOG.md)。
+## v2 迁移
+
+升级旧版数据库前，请阅读[迁移与恢复说明](docs/MIGRATION_V2.md)，核对在线备份、待审记录和回退边界。当前改动仍为待验收候选版本。

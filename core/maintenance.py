@@ -57,7 +57,7 @@ async def run_memory_purify(plugin) -> Tuple[int, int]:
 
     with plugin._db() as conn:
         user_rows = conn.execute(
-            "SELECT DISTINCT canonical_user_id FROM memories WHERE is_active=1 AND is_pinned=0"
+            "SELECT DISTINCT canonical_user_id,scope,persona_id,source_adapter FROM memories WHERE is_active=1 AND is_pinned=0"
         ).fetchall()
 
     for user_row in user_rows:
@@ -66,9 +66,9 @@ async def run_memory_purify(plugin) -> Tuple[int, int]:
             with plugin._db() as conn:
                 mems = conn.execute(
                     "SELECT id, memory, memory_type, score, importance, confidence, reinforce_count "
-                    "FROM memories WHERE canonical_user_id=? AND is_active=1 AND is_pinned=0 "
+                    "FROM memories WHERE canonical_user_id=? AND scope=? AND persona_id=? AND source_adapter=? AND is_active=1 AND is_pinned=0 "
                     "ORDER BY importance ASC LIMIT 50",
-                    (uid,),
+                    (uid, user_row["scope"], user_row["persona_id"], user_row["source_adapter"]),
                 ).fetchall()
                 mem_list = [dict(r) for r in mems]
 
@@ -82,7 +82,7 @@ async def run_memory_purify(plugin) -> Tuple[int, int]:
                 with plugin._db() as conn:
                     for mid in ids_to_deactivate:
                         conn.execute(
-                            "UPDATE memories SET is_active=0 WHERE id=? AND canonical_user_id=? AND is_pinned=0", (mid, uid)
+                            "UPDATE memories SET is_active=0 WHERE id=? AND canonical_user_id=? AND scope=? AND persona_id=? AND source_adapter=? AND is_pinned=0", (mid, uid, user_row["scope"], user_row["persona_id"], user_row["source_adapter"])
                         )
                 pruned_llm += len(ids_to_deactivate)
         except Exception as e:

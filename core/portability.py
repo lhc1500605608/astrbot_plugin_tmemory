@@ -419,7 +419,7 @@ def write_backup(plugin, users: List[str]) -> str:
     snapshot["kind"] = "tmemory_import_backup"
     backup_dir = _backup_dir(plugin)
     os.makedirs(backup_dir, exist_ok=True)
-    path = os.path.join(backup_dir, f"tm_import_{time.strftime('%Y%m%d-%H%M%S')}.json")
+    path = os.path.join(backup_dir, f"tm_import_{time.strftime('%Y%m%d-%H%M%S')}_{time.time_ns()}.json")
     with open(path, "w", encoding="utf-8") as fh:
         json.dump(snapshot, fh, ensure_ascii=False, indent=2)
     logger.info("[tmemory] import backup written: %s", path)

@@ -694,7 +694,7 @@ function t(key, fallback) {
 }
 
 /* ── ui.js ─────────────────────────────────────────────────────── */
-function escHtml(s) { var d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
+function escHtml(s) { var d = document.createElement('div'); d.textContent = s; return d.innerHTML.replace(/"/g, '&quot;').replace(/'/g, '&#39;'); }
 
 function toast(msg, type) {
   type = type || 'success';
@@ -897,11 +897,11 @@ function renderMemoryTable(memories) {
     tbody.innerHTML = '<tr><td colspan="9" style="text-align:center;color:var(--text2);padding:40px">暂无记忆</td></tr>';
     return;
   }
-  tbody.innerHTML = filtered.map(function(m) {
+  tbody.innerHTML = filtered.map(function(m, index) {
     var channelBadge = m.source_channel === 'rule_fallback' ? ' <span class="type-badge type-rule_fallback">规则兜底</span>' : '';
     return '<tr>' +
-      '<td>' + m.id + '</td>' +
-      '<td><span class="type-badge type-' + m.memory_type + '">' + m.memory_type + '</span>' + channelBadge + '</td>' +
+      '<td>' + escHtml(m.public_id || String(m.id)) + '</td>' +
+      '<td><span class="type-badge type-' + escHtml(m.memory_type) + '">' + escHtml(m.memory_type) + '</span>' + channelBadge + '</td>' +
       '<td style="max-width:300px;word-break:break-all">' + escHtml(m.memory) + '</td>' +
       '<td>' + scoreBar(m.score) + '</td>' +
       '<td>' + scoreBar(m.importance) + '</td>' +
@@ -909,13 +909,20 @@ function renderMemoryTable(memories) {
       '<td style="text-align:center">' + m.reinforce_count + '</td>' +
       '<td style="text-align:center">' + (m.is_pinned ? '\ud83d\udccc' : '') + '</td>' +
       '<td>' +
+        (m.review_status === 'pending' ? '<button class="btn btn-sm" onclick="reviewMemoryRecord(' + m.id + ')">复核</button> ' : '') +
+        (m.memory_type === 'task' ? '<button class="btn btn-sm" onclick="editTaskState(' + m.id + ')">任务状态</button> ' : '') +
         '<button class="btn btn-sm" onclick="togglePin(' + m.id + ', ' + !m.is_pinned + ')" title="' + (m.is_pinned ? '取消常驻' : '设为常驻') + '">' + (m.is_pinned ? '\ud83d\udccc' : '\ud83d\udccd') + '</button> ' +
-        '<button class="btn btn-sm" onclick=\'openEditModal(' + JSON.stringify(m) + ')\'>' + '\u270f\ufe0f' + '</button> ' +
+        '<button class="btn btn-sm edit-memory-btn" data-edit-index="' + index + '">' + '\u270f\ufe0f' + '</button> ' +
         '<button class="btn btn-sm" onclick="redistillMemory(' + m.id + ')" title="重新蒸馏">重新蒸馏</button> ' +
         '<button class="btn btn-sm btn-danger" onclick="deleteMemory(' + m.id + ')">' + '\ud83d\uddd1\ufe0f' + '</button>' +
       '</td>' +
     '</tr>';
   }).join('');
+  tbody.querySelectorAll('.edit-memory-btn').forEach(function(button) {
+    button.addEventListener('click', function() {
+      openEditModal(filtered[Number(button.dataset.editIndex)]);
+    });
+  });
 }
 
 function openEditModal(m) {
@@ -1136,13 +1143,21 @@ async function saveProfileItem() {
   }
 }
 
-async function reviewProfileItem(itemId) {
+async function editTaskState(itemId) {
+  var state = await promptDialog('任务状态：pending / in_progress / completed / cancelled', 'pending');
+  if (!state) return;
+  var res = await api('/memory/update', {method:'POST',body:JSON.stringify({id:itemId,task_status:state})});
+  if (res && res.ok) await loadUserData(currentUser);
+}
+
+async function reviewProfileItem(itemId) { return reviewMemoryRecord('p:' + itemId); }
+async function reviewMemoryRecord(itemId) {
   var scope = await promptDialog('填写可见范围：平台实例ID|private 或 平台实例ID|group:群号。输入 global 表示明确共享给该用户的所有会话。');
   if (!scope) return;
   var persona = await promptDialog('填写人格ID；留空表示默认人格', '');
   if (persona === null) return;
-  var res = await api('/memory/review', {method:'POST', body:JSON.stringify({id:'p:' + itemId,scope:scope,persona_id:persona,approve:true})});
-  if (res && res.ok) await loadProfileItems(currentUser);
+  var res = await api('/memory/review', {method:'POST', body:JSON.stringify({id:itemId,scope:scope,persona_id:persona,approve:true})});
+  if (res && res.ok) await loadUserData(currentUser);
 }
 
 async function archiveProfileItem(itemId) {

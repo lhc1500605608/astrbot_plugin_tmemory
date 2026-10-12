@@ -19,7 +19,7 @@ ADAPTERS = ROOT / "adapters"
 # R2 边界白名单：允许出现 AstrBot 依赖的目录 / 文件（相对仓库根）。
 # ``docker/`` 下的脚本在 AstrBot 容器内运行（如 seed_openapi_key.py 复用
 # astrbot.dashboard 的 ApiKeyService），属于容器边界层，不是插件运行时。
-BOUNDARY_DIRS = {"adapters", "web", "tests", "docker", ".worktrees", ".git"}
+BOUNDARY_DIRS = {"adapters", "web", "tests", "tools", "docker", ".worktrees", ".git"}
 BOUNDARY_FILES = {"main.py", "web_handlers.py"}
 # 扫描时跳过的非源码目录（虚拟环境 / 运行数据 / 缓存）。
 SKIP_DIRS = {

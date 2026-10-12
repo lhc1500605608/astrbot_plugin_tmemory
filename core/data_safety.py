@@ -112,6 +112,7 @@ def purge_user(plugin, uid):
     """Delete all user-owned rows atomically; retain only a deletion generation."""
     counts = {}
     with plugin._db() as conn:
+        origins = [r[0] for r in conn.execute("SELECT DISTINCT unified_msg_origin FROM conversation_cache WHERE canonical_user_id=?", (uid,))]
         tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         for vector, column, source in (
             ("memory_vectors", "memory_id", "memories"),
@@ -138,4 +139,8 @@ def purge_user(plugin, uid):
         values = getattr(plugin, name, None)
         if isinstance(values, dict):
             values.pop(uid, None)
+    for origin in origins:
+        getattr(plugin, "_session_conv_ids", {}).pop(origin, None)
+    from .identity_export import export_identity_map
+    export_identity_map(plugin._db_mgr)
     return {**counts, "memories": counts.get("memories", 0), "cache": counts.get("conversation_cache", 0)}

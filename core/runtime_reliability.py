@@ -27,7 +27,8 @@ def ensure_schema(conn):
     conn.execute("CREATE TABLE IF NOT EXISTS budget_checkpoints(day TEXT PRIMARY KEY,legacy_id INTEGER NOT NULL)")
     episode_columns = {r[1] for r in conn.execute("PRAGMA table_info(memory_episodes)")}
     for key, ddl in {"semantic_retry_count": "INTEGER NOT NULL DEFAULT 0",
-                     "next_semantic_retry_at": "REAL NOT NULL DEFAULT 0"}.items():
+                     "next_semantic_retry_at": "REAL NOT NULL DEFAULT 0",
+                     "semantic_claimed_at": "REAL NOT NULL DEFAULT 0"}.items():
         if key not in episode_columns:
             conn.execute(f"ALTER TABLE memory_episodes ADD COLUMN {key} {ddl}")
 
@@ -125,6 +126,7 @@ def fail(plugin, rows, reason, waiting=False):
 def recover(plugin, manual=False):
     with plugin._db() as conn:
         conn.execute("UPDATE conversation_cache SET processing_status='retry',next_retry_at=0 WHERE processing_status='running' AND claimed_at<?", (time.time()-600,))
+        conn.execute("UPDATE memory_episodes SET consolidation_status='pending_semantic' WHERE consolidation_status='semantic_running' AND semantic_claimed_at<?", (time.time()-600,))
         if manual:
             conn.execute("UPDATE memory_episodes SET consolidation_status='pending_semantic',semantic_retry_count=0,next_semantic_retry_at=0 WHERE consolidation_status IN ('semantic_failed','pending_semantic')")
             conn.execute("UPDATE conversation_cache SET processing_status='pending',retry_count=0,next_retry_at=0 WHERE distilled=0 AND processing_status IN ('failed','retry','waiting_provider')")
@@ -187,3 +189,8 @@ def fail_episode(plugin, episode_id, waiting=False):
         count = row[0] + (0 if waiting else 1)
         conn.execute("UPDATE memory_episodes SET semantic_retry_count=?,next_semantic_retry_at=?,consolidation_status=? WHERE id=?",
                      (count, time.time()+(60 if waiting else (60,300,1800)[min(max(count-1,0),2)]), "pending_semantic" if count<=3 else "semantic_failed", episode_id))
+
+
+def claim_episode(plugin, episode_id):
+    with plugin._db() as conn:
+        return conn.execute("UPDATE memory_episodes SET consolidation_status='semantic_running',semantic_claimed_at=? WHERE id=? AND consolidation_status='pending_semantic' AND next_semantic_retry_at<=?", (time.time(), episode_id, time.time())).rowcount == 1

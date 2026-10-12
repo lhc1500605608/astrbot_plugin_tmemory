@@ -55,3 +55,21 @@ def test_message_chain_uses_event_api(plugin, monkeypatch):
     result = build_message_chain([{"type": "plain", "text": "hello"}])
     assert isinstance(result, Chain)
     assert result.chain == [("plain", "hello")]
+
+
+def test_loader_can_discover_concrete_termination_hook(plugin_module):
+    assert "terminate" in plugin_module.TMemoryPlugin.__dict__
+
+
+def test_existing_database_preserves_original_config_before_key_migration(plugin_module, tmp_path, monkeypatch):
+    import json
+    import sqlite3
+
+    database = tmp_path / "tmemory.db"
+    sqlite3.connect(database).close()
+    monkeypatch.setattr(plugin_module.TMemoryPlugin, "_resolve_db_path", lambda self: str(database))
+    old = {"enable_auto_capture": False}
+    plugin_module.TMemoryPlugin(context=None, config=old)
+    snapshot = json.loads((tmp_path / "tmemory.db.pre-v018.config.json").read_text(encoding="utf-8"))
+    assert snapshot == {"enable_auto_capture": False}
+    assert old["basic"]["enable_auto_capture"] is False

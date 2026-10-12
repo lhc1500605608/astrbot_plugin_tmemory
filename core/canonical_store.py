@@ -202,25 +202,35 @@ def init_search(conn):
 def activate(conn, now):
     ensure_schema(conn)
     install_functions(conn)
-    if is_active(conn):
-        return
-    migrate_legacy(conn, now)
+    already_active = is_active(conn)
+    if already_active:
+        if "task_status" in {r[1] for r in conn.execute("PRAGMA table_info(memories)")}:
+            return
+        for name in ("canonical_insert", "canonical_update", "canonical_delete"):
+            conn.execute(f"DROP TRIGGER IF EXISTS {name}")
+        conn.execute("DROP VIEW memories")
+    else:
+        migrate_legacy(conn, now)
     for name in ("t_memories_ai", "t_memories_ad", "t_memories_au"):
         conn.execute(f"DROP TRIGGER IF EXISTS {name}")
     conn.execute("DROP TABLE IF EXISTS memories_fts")
-    conn.execute("DROP TABLE memories")
+    if not already_active:
+        conn.execute("DROP TABLE memories")
     selects = []
     for table, kind in (("profile_items", "p"), ("event_items", "e")):
         memory_type = "t.facet_type" if kind == "p" else "t.memory_type"
+        active = "t.status='active' AND t.is_active=1 AND t.review_status='approved'"
+        if kind == "e":
+            active += " AND t.task_status NOT IN ('completed','cancelled') AND (t.valid_until='' OR t.valid_until>=date('now','localtime'))"
         cols = ["r.id", "t.canonical_user_id", "t.source_adapter", "t.source_user_id", "t.source_channel",
                 f"{memory_type} AS memory_type", "t.content AS memory", "tm_tokens(t.content) AS tokenized_memory",
                 "tm_hash(t.persona_id,t.source_scope,t.content) AS memory_hash", "t.score", "t.importance", "t.confidence",
                 "t.reinforce_count", "t.last_seen_at", "t.created_at", "t.updated_at",
-                "CASE WHEN t.status='active' AND t.is_active=1 AND t.review_status='approved' THEN 1 ELSE 0 END AS is_active",
+                f"CASE WHEN {active} THEN 1 ELSE 0 END AS is_active",
                 "t.is_pinned", "t.persona_id", "t.source_scope AS scope",
                 f"CASE WHEN {memory_type}='style' THEN 'persona' ELSE 'canonical' END AS summary_channel",
                 "t.attention_score", "t.episode_id", "t.derived_from", "t.evidence_json", "t.semantic_status",
-                "t.contradiction_of", "t.event_date", "t.valid_until", f"'{kind}:' || t.id AS public_id", "t.platform_id", "t.review_status"]
+                "t.contradiction_of", "t.event_date", "t.valid_until", f"'{kind}:' || t.id AS public_id", "t.platform_id", "t.review_status", "t.task_status" if kind == "e" else "'' AS task_status"]
         selects.append(f"SELECT {','.join(cols)} FROM {table} t JOIN memory_record_ids r ON r.kind='{kind}' AND r.object_id=t.id")
     conn.execute("CREATE VIEW memories AS " + " UNION ALL ".join(selects))
     # INSERT/UPDATE/DELETE compatibility is a projection onto the two canonical stores.
@@ -234,6 +244,8 @@ def activate(conn, now):
                            review_status="CASE WHEN tm_platform(new.scope)='' AND COALESCE(new.scope,'user')!='global' THEN 'pending' ELSE 'approved' END",
                            created_at="COALESCE(new.created_at,datetime('now'))", updated_at="COALESCE(new.updated_at,datetime('now'))",
                            confidence="COALESCE(new.confidence,0.5)", importance="COALESCE(new.importance,0.5)")
+        if kind == "e":
+            expressions["task_status"] = "COALESCE(new.task_status,'pending')"
         if kind == "p":
             expressions["facet_type"] = "CASE WHEN new.memory_type IN ('preference','fact','style','restriction','task_pattern') THEN new.memory_type ELSE 'fact' END"
         parts.append(f"INSERT INTO {table}({','.join(expressions)}) SELECT {','.join(expressions.values())} WHERE {condition};")
@@ -246,6 +258,8 @@ def activate(conn, now):
                            updated_at="new.updated_at", status="CASE WHEN new.is_active=0 THEN 'archived' ELSE 'active' END")
         if kind == "p":
             assignments["facet_type"] = "CASE WHEN new.memory_type IN ('preference','fact','style','restriction','task_pattern') THEN new.memory_type ELSE facet_type END"
+        if kind == "e":
+            assignments["task_status"] = "new.task_status"
         where = f"id IN (SELECT object_id FROM memory_record_ids WHERE id=old.id AND kind='{kind}')"
         updates.append(f"UPDATE {table} SET {','.join(f'{k}={v}' for k,v in assignments.items())} WHERE {where};")
         for evidence, column in (("profile_item_evidence", "profile_item_id"),) if kind == "p" else (("event_item_evidence", "event_item_id"),):
@@ -255,7 +269,7 @@ def activate(conn, now):
         deletes.append(f"DELETE FROM {table} WHERE {where};")
     updates.append("UPDATE memory_record_ids SET canonical_user_id=new.canonical_user_id WHERE id=old.id;")
     deletes.append("DELETE FROM memory_record_ids WHERE id=old.id;")
-    conn.execute("CREATE TRIGGER canonical_update INSTEAD OF UPDATE ON memories BEGIN SELECT CASE WHEN tm_unsafe(new.memory)!='' AND new.memory!=old.memory THEN RAISE(ABORT,'unsafe memory content') END; " + " ".join(updates) + " END")
+    conn.execute("CREATE TRIGGER canonical_update INSTEAD OF UPDATE ON memories BEGIN SELECT CASE WHEN (old.memory_type IN ('event','task')) != (new.memory_type IN ('event','task')) THEN RAISE(ABORT,'cannot change object kind; create a new object') END; SELECT CASE WHEN tm_unsafe(new.memory)!='' AND new.memory!=old.memory THEN RAISE(ABORT,'unsafe memory content') END; " + " ".join(updates) + " END")
     conn.execute("CREATE TRIGGER canonical_delete INSTEAD OF DELETE ON memories BEGIN " + " ".join(deletes) + " END")
     # Alias registration works even without FTS5.
     for table, kind in (("profile_items", "p"), ("event_items", "e")):

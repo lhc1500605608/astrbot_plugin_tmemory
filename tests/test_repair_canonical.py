@@ -85,3 +85,81 @@ def test_native_backup_roundtrip_remaps_ids(canonical, plugin_module, tmp_path):
         assert conn.execute("SELECT event_date FROM event_items WHERE canonical_user_id='u'").fetchone()[0] == "2026-10-15"
         assert conn.execute("SELECT COUNT(*) FROM memory_record_ids").fetchone()[0] == 2
     target._close_db()
+
+
+def test_completed_tasks_and_expired_events_excluded(canonical):
+    from astrbot_plugin_tmemory.core.admin_service import AdminService
+    p = canonical
+    task = p._insert_memory("u", "bot1", "u", "用户需要在周末完成报告", .8, "task", .8, .8, scope="bot1|private")
+    AdminService(p).update_memory(p._public_memory_id(task), {"task_status":"completed"})
+    event = p._insert_memory("u", "bot1", "u", "用户曾参加2020年的会议", .8, "event", .8, .8, scope="bot1|private", valid_until="2020-01-01")
+    with p._db() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM memories WHERE is_active=1").fetchone()[0] == 0
+        assert conn.execute("SELECT task_status FROM event_items WHERE id=(SELECT object_id FROM memory_record_ids WHERE id=?)", (task,)).fetchone()[0] == "completed"
+
+
+@pytest.mark.parametrize("boundary", ["scope", "persona"])
+def test_v2_import_rejects_cross_boundary_episode_source(canonical, plugin_module, tmp_path, boundary):
+    from astrbot_plugin_tmemory.core.canonical_store import activate
+    from astrbot_plugin_tmemory.core.db import DatabaseManager
+    from astrbot_plugin_tmemory.core.portability import build_export, import_dataset
+
+    with canonical._db() as conn:
+        episode = conn.execute(
+            "INSERT INTO memory_episodes(canonical_user_id,scope,persona_id,episode_title,episode_summary,first_source_at,last_source_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)",
+            ("u", "bot1|private", "a", "title", "summary", "2026-01-01", "2026-01-01", "2026-01-01", "2026-01-01"),
+        ).lastrowid
+        cache = conn.execute(
+            "INSERT INTO conversation_cache(canonical_user_id,role,content,created_at,scope,persona_id) VALUES(?,?,?,?,?,?)",
+            ("u", "user", "private source", "2026-01-01", "bot1|group:g" if boundary == "scope" else "bot1|private", "a" if boundary == "scope" else "b"),
+        ).lastrowid
+        conn.execute("INSERT INTO episode_sources(episode_id,conversation_cache_id,canonical_user_id,created_at) VALUES(?,?,?,?)", (episode, cache, "u", "2026-01-01"))
+    target = plugin_module.TMemoryPlugin(context=None, config={})
+    target._db_mgr = DatabaseManager(str(tmp_path / f"{boundary}.sqlite3"))
+    target._init_db()
+    with target._db() as conn:
+        activate(conn, target._now())
+    result = import_dataset(target, build_export(canonical, ["u"]), dry_run=False, backup=False)
+    assert result["rolled_back"] is True
+    assert "episode source crosses isolation boundary" in result["error"]
+    with target._db() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM episode_sources").fetchone()[0] == 0
+    target._close_db()
+
+
+def test_v2_import_rejects_cross_boundary_profile_relation(canonical, plugin_module, tmp_path):
+    from astrbot_plugin_tmemory.core.canonical_store import activate
+    from astrbot_plugin_tmemory.core.db import DatabaseManager
+    from astrbot_plugin_tmemory.core.portability import build_export, import_dataset
+
+    first = canonical._insert_memory("u", "bot1", "u", "用户喜欢蓝色", .8, "preference", .8, .8, scope="bot1|private", persona_id="a")
+    second = canonical._insert_memory("u", "bot1", "u", "用户喜欢绿色", .8, "preference", .8, .8, scope="bot1|group:g", persona_id="a")
+    with canonical._db() as conn:
+        left = conn.execute("SELECT object_id FROM memory_record_ids WHERE id=?", (first,)).fetchone()[0]
+        right = conn.execute("SELECT object_id FROM memory_record_ids WHERE id=?", (second,)).fetchone()[0]
+        conn.execute("INSERT INTO profile_relations(canonical_user_id,from_item_id,to_item_id,relation_type,created_at,updated_at) VALUES(?,?,?,?,?,?)", ("u", left, right, "supports", "2026-01-01", "2026-01-01"))
+    target = plugin_module.TMemoryPlugin(context=None, config={})
+    target._db_mgr = DatabaseManager(str(tmp_path / "relations.sqlite3"))
+    target._init_db()
+    with target._db() as conn:
+        activate(conn, target._now())
+    result = import_dataset(target, build_export(canonical, ["u"]), dry_run=False, backup=False)
+    assert result["rolled_back"] is True
+    assert "profile relation crosses isolation boundary" in result["error"]
+    with target._db() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM profile_relations").fetchone()[0] == 0
+    target._close_db()
+
+
+@pytest.mark.asyncio
+async def test_admin_split_keeps_scope_persona_and_merge_rejects_cross_scope(canonical):
+    from astrbot_plugin_tmemory.core.admin_service import AdminService
+    admin = AdminService(canonical)
+    first = canonical._insert_memory("u", "bot1", "u", "用户喜欢蓝色和绿色", .8, "preference", .8, .8, scope="bot1|private", persona_id="a")
+    result = await admin.split_memory("u", first, ["用户喜欢蓝色", "用户喜欢绿色"])
+    with canonical._db() as conn:
+        row = conn.execute("SELECT scope,persona_id FROM memories WHERE id=?", (result["added_ids"][0],)).fetchone()
+        assert tuple(row) == ("bot1|private", "a")
+    other = canonical._insert_memory("u", "bot1", "u", "用户喜欢红色", .8, "preference", .8, .8, scope="bot1|group:g", persona_id="a")
+    with pytest.raises(ValueError, match="isolation boundary"):
+        await admin.merge_memories("u", [first, other])

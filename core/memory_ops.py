@@ -190,6 +190,8 @@ class MemoryOps(DistillOpsMixin):
         if not rows:
             return {"updates": 0, "adds": 0, "deletes": 0, "note": "no memories"}
 
+        boundary = lambda r: tuple(r.get(k, "") for k in ("scope", "persona_id", "source_adapter"))
+        rows = [r for r in rows if boundary(r) == boundary(rows[0])]
         operations = await self.plugin._llm_purify_operations(
             event, rows, mode, extra_instruction
         )
@@ -199,6 +201,10 @@ class MemoryOps(DistillOpsMixin):
         note = str(operations.get("note", "")) if isinstance(operations, dict) else ""
 
         allowed_ids = {int(r["id"]) for r in rows}
+        candidates = {int(r["id"]): r for r in rows}
+        def writable(mid):
+            current = self.plugin._fetch_memory_by_id(canonical_id, mid)
+            return current and boundary(current) == boundary(candidates[mid]) and (include_pinned or not current["is_pinned"])
         updates = [u for u in updates if isinstance(u, dict) and str(u.get("id", "")).isdigit() and int(u["id"]) in allowed_ids]
         deletes = [int(d) for d in deletes if str(d).isdigit() and int(d) in allowed_ids]
         pinned_ids = {int(r["id"]) for r in rows if int(r["is_pinned"]) == 1}
@@ -226,7 +232,10 @@ class MemoryOps(DistillOpsMixin):
                 )
                 if not memory:
                     continue
-                self.plugin._update_memory_full(
+                with self.plugin._db():
+                    if not writable(mem_id):
+                        continue
+                    self.plugin._update_memory_full(
                     mem_id,
                     memory=memory,
                     memory_type=self.plugin._safe_memory_type(upd.get("memory_type", "fact")),
@@ -257,6 +266,8 @@ class MemoryOps(DistillOpsMixin):
                     importance=self.plugin._clamp01(add.get("importance", 0.6)),
                     confidence=self.plugin._clamp01(add.get("confidence", 0.7)),
                     source_channel="manual_purify",
+                    scope=str(rows[0].get("scope", "user")),
+                    persona_id=str(rows[0].get("persona_id", "")),
                 )
                 if self.plugin._vec_available and new_id:
                     await self.plugin._upsert_vector(new_id, memory)
@@ -267,8 +278,9 @@ class MemoryOps(DistillOpsMixin):
         for d in deletes:
             try:
                 mem_id = int(d)
-                if self.plugin._delete_memory(mem_id):
-                    applied_deletes += 1
+                with self.plugin._db():
+                    if writable(mem_id) and self.plugin._delete_memory(mem_id):
+                        applied_deletes += 1
             except Exception as e:
                 logger.debug("[tmemory] apply delete failed: %s", e)
 

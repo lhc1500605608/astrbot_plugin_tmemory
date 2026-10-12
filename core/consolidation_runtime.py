@@ -123,7 +123,8 @@ class ConsolidationRuntimeMixin:
                                 ep_mgr, transcript, session_rows
                             )
                             if episode is None:
-                                fail(self, session_rows, "episode_summary_failed")
+                                provider, _ = await self._resolve_consolidation_model(session_rows)
+                                fail(self, session_rows, "episode_summary_failed", waiting=not provider)
                                 continue
 
                             ep_id = self._insert_episode(
@@ -155,7 +156,7 @@ class ConsolidationRuntimeMixin:
 
         provider_id, model_id = await self._resolve_consolidation_model(rows)
         if not provider_id:
-            return ep_mgr.extractive_summary(rows)
+            return None
 
         try:
             llm_kwargs = {"chat_provider_id": provider_id, "prompt": prompt}
@@ -262,6 +263,9 @@ class ConsolidationRuntimeMixin:
             with generation_guard(self, str(ep["canonical_user_id"])):
                 ep_id = int(ep["id"])
                 try:
+                    from .runtime_reliability import claim_episode
+                    if not claim_episode(self, ep_id):
+                        continue
                     sources = self._fetch_episode_sources(ep_id, limit=5)
                     snippets = _build_transcript(sources) if sources else ""
 

@@ -1,8 +1,7 @@
 import asyncio
 from typing import Optional, Dict
 
-# SQLite 能力 shim 必须早于任何依赖 sqlite3 的 `.core.*` import（TMEAAA-475）：
-# stdlib 缺 load_extension/FTS5 时切换后端，否则 db.py 等已绑定不具备能力的 sqlite3。
+# 插件连接后端在数据库模块加载前选择，不替换宿主 sqlite3。
 # ruff: noqa: E402
 from .core.sqlite_env import install_sqlite3_shim as _install_sqlite3_shim
 
@@ -82,11 +81,25 @@ class TMemoryPlugin(
     PluginHandlersMixin,
     Star,
 ):
+    async def terminate(self):
+        """AstrBot loaders inspect the concrete class dictionary for this hook."""
+        await PluginLifecycleMixin.terminate(self)
+
     def __init__(self, context: Context, config=None):
         super().__init__(context)
         self.config = config or {}
         self.plugin_name = "astrbot_plugin_tmemory"
         self.db_path = self._resolve_db_path()
+
+        # Preserve the original settings before the in-place legacy-key migration.
+        # The database snapshot is taken separately with SQLite's online backup API.
+        import json
+        from pathlib import Path
+        config_snapshot = Path(self.db_path + ".pre-v018.config.json")
+        if Path(self.db_path).exists() and not config_snapshot.exists():
+            config_snapshot.write_text(
+                json.dumps(dict(self.config), ensure_ascii=False, indent=2), encoding="utf-8"
+            )
 
         # ── DB Manager ─────────────────────────────────────────────────────
         self._db_mgr = DatabaseManager(self.db_path)

@@ -246,7 +246,7 @@ class DataAccessMixin:
     ) -> List[Dict[str, object]]:
         with self._db() as conn:
             sql = (
-                "SELECT id, memory, memory_type, score, importance, confidence, reinforce_count, is_pinned "
+                "SELECT id, memory, memory_type, score, importance, confidence, reinforce_count, is_pinned, scope, persona_id, source_adapter "
                 "FROM memories WHERE canonical_user_id=? AND is_active=1 "
                 + ("" if include_pinned else "AND is_pinned=0 ")
                 + "ORDER BY importance DESC, score DESC, updated_at DESC LIMIT ?"
@@ -257,9 +257,10 @@ class DataAccessMixin:
     def _fetch_memory_by_id(
         self, canonical_id: str, memory_id: int
     ) -> Optional[Dict[str, object]]:
+        memory_id = self._resolve_memory_id(memory_id)
         with self._db() as conn:
             row = conn.execute(
-                "SELECT id, canonical_user_id, source_adapter, source_user_id, memory, memory_type, score, importance, confidence "
+                "SELECT id, canonical_user_id, source_adapter, source_user_id, memory, memory_type, score, importance, confidence, scope, persona_id, is_pinned "
                 "FROM memories WHERE id=? AND canonical_user_id=?",
                 (memory_id, canonical_id),
             ).fetchone()

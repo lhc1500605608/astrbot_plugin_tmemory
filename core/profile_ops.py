@@ -119,6 +119,9 @@ class ProfileItemOps:
                 platform = source_scope.split("|", 1)[0]
                 conn.execute("UPDATE profile_items SET platform_id=?,source_adapter=? WHERE id=?", (platform, platform, new_id))
 
+            elif getattr(self.plugin, "_canonical_store_active", False) and source_scope != "global":
+                conn.execute("UPDATE profile_items SET review_status='pending' WHERE id=?", (new_id,))
+
             self._ensure_user_profile(conn, canonical_id, now)
             log_memory_event(
                 self.plugin, canonical_id,

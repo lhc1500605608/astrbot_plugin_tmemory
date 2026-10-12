@@ -37,21 +37,13 @@ class AdminMemoryMixin:
         """返回指定用户的活跃记忆列表。"""
         if not user:
             return []
+        canonical = getattr(self._plugin, "_canonical_store_active", False)
+        condition = "(is_active=1 OR review_status='pending' OR memory_type IN ('event','task'))" if canonical else "is_active=1"
         with self._db() as conn:
-            rows = conn.execute(
-                """
-                SELECT id, memory_type, memory, score, importance, confidence,
-                       reinforce_count, is_active,
-                       COALESCE(is_pinned, 0) AS is_pinned,
-                       source_channel,
-                       last_seen_at, created_at, updated_at
-                FROM memories WHERE canonical_user_id = ? AND is_active = 1
-                ORDER BY importance DESC, score DESC, updated_at DESC LIMIT 200
-                """,
-                (user,),
-            ).fetchall()
+            rows = conn.execute(f"SELECT * FROM memories WHERE canonical_user_id=? AND {condition} ORDER BY importance DESC,score DESC,updated_at DESC LIMIT 200", (user,)).fetchall()
         return [
             {
+                **({key:r[key] for key in ("public_id", "review_status", "scope", "persona_id", "task_status", "event_date", "valid_until")} if canonical else {}),
                 "id": int(r["id"]),
                 "memory_type": str(r["memory_type"]),
                 "memory": str(r["memory"]),
@@ -204,6 +196,12 @@ class AdminMemoryMixin:
         from .data_safety import require_safe
         if "memory" in data:
             require_safe(data["memory"])
+        if data.get("task_status", "pending") not in ("pending", "in_progress", "completed", "cancelled"):
+            raise ValueError("invalid task status")
+        for key in ("event_date", "valid_until"):
+            if data.get(key):
+                from datetime import date
+                date.fromisoformat(str(data[key]))
         mem_id = self._plugin._resolve_memory_id(mem_id)
         now = _now()
         fields: list = []
@@ -216,6 +214,9 @@ class AdminMemoryMixin:
             ("importance", "importance", lambda v: _clamp01(v)),
             ("confidence", "confidence", lambda v: _clamp01(v)),
             ("is_pinned", "is_pinned", lambda v: 1 if v else 0),
+            ("task_status", "task_status", str),
+            ("event_date", "event_date", str),
+            ("valid_until", "valid_until", str),
         ]:
             if key in data:
                 fields.append(f"{col} = ?")
@@ -264,10 +265,14 @@ class AdminMemoryMixin:
         self, user: str, ids: List[int], merged_text: str = ""
     ) -> Dict[str, Any]:
         """合并多条记忆为一条。"""
-        safe_ids = [int(i) for i in ids if str(i).isdigit()]
+        safe_ids = [self._plugin._resolve_memory_id(i) for i in ids]
+        safe_ids = [i for i in safe_ids if i]
         rows = self._fetch_memories_by_ids(user, safe_ids)
         if len(rows) < 2:
             raise ValueError("not enough valid memory ids")
+        boundaries = {(r["scope"], r["persona_id"], r["source_adapter"], r["memory_type"]) for r in rows}
+        if len(boundaries) != 1:
+            raise ValueError("memories cross an isolation boundary or type")
 
         if not merged_text:
             merged_text = self._auto_merge_memory_text(
@@ -335,6 +340,10 @@ class AdminMemoryMixin:
                 importance=float(row["importance"]),
                 confidence=float(row["confidence"]),
                 source_channel="manual_split",
+                scope=str(row["scope"]),
+                persona_id=str(row["persona_id"]),
+                event_date=str(row["event_date"] or ""),
+                valid_until=str(row["valid_until"] or ""),
             )
             if vec_available and new_id:
                 from .vector import upsert_vector
@@ -354,7 +363,7 @@ class AdminMemoryMixin:
         with self._db() as conn:
             rows = conn.execute(
                 f"SELECT id, memory, memory_type, score, importance, confidence, "
-                f"source_adapter, source_user_id "
+                f"source_adapter, source_user_id, scope, persona_id "
                 f"FROM memories WHERE canonical_user_id=? AND id IN ({placeholders}) ORDER BY id",
                 [canonical_id, *ids],
             ).fetchall()
@@ -366,7 +375,7 @@ class AdminMemoryMixin:
         with self._db() as conn:
             row = conn.execute(
                 "SELECT id, canonical_user_id, source_adapter, source_user_id, "
-                "memory, memory_type, score, importance, confidence, episode_id "
+                "memory, memory_type, score, importance, confidence, episode_id, scope, persona_id, event_date, valid_until "
                 "FROM memories WHERE id=? AND canonical_user_id=?",
                 (memory_id, canonical_id),
             ).fetchone()
@@ -374,7 +383,9 @@ class AdminMemoryMixin:
 
     def _update_memory_text(self, memory_id: int, memory: str) -> None:
         from .utils_shared import _now, _normalize_text
+        from .data_safety import require_safe
 
+        require_safe(memory)
         now = _now()
         mhash = hashlib.sha256(
             _normalize_text(memory).encode("utf-8")

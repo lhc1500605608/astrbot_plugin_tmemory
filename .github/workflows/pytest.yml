@@ -62,4 +62,4 @@ jobs:
 
       # TMEAAA-361 AC1/AC2: 真实 AstrBot 版本矩阵，集成测试实际执行。
       - name: Run real-AstrBot integration tests
-        run: pytest tests/test_real_astrbot_integration.py -q -rs
+        run: python tools/verify_astrbot.py --workdir "${{ runner.temp }}/tmemory-${{ matrix.astrbot-version }}"

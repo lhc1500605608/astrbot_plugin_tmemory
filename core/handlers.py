@@ -161,30 +161,32 @@ class PluginHandlersMixin(CommandHandlersMixin):
         canonical_id, adapter, adapter_user = (
             self._identity_mgr.resolve_current_identity(event)
         )
-        scope = self._get_memory_scope(event)
-        persona_id = await self._get_current_persona_async(event)
+        from .data_safety import generation_guard
+        with generation_guard(self, canonical_id):
+            scope = self._get_memory_scope(event)
+            persona_id = await self._get_current_persona_async(event)
 
-        new_id = self._insert_memory(
-            canonical_id=canonical_id,
-            adapter=adapter,
-            adapter_user=adapter_user,
-            memory=self._sanitize_text(content),
-            score=0.80,
-            memory_type=memory_type,
-            importance=0.70,
-            confidence=0.85,
-            source_channel="active_tool",
-            persona_id=persona_id,
-            scope=scope,
-        )
+            new_id = self._insert_memory(
+                canonical_id=canonical_id,
+                adapter=adapter,
+                adapter_user=adapter_user,
+                memory=self._sanitize_text(content),
+                score=0.80,
+                memory_type=memory_type,
+                importance=0.70,
+                confidence=0.85,
+                source_channel="active_tool",
+                persona_id=persona_id,
+                scope=scope,
+            )
 
-        if self._vec_available and new_id:
-            try:
-                await self._upsert_vector(new_id, content)
-            except Exception:
-                pass
+            if self._vec_available and new_id:
+                try:
+                    await self._upsert_vector(new_id, content)
+                except Exception:
+                    pass
 
-        return f"\u5df2\u8bb0\u4f4f\uff08id={self._public_memory_id(new_id)}, type={memory_type}\uff09\u3002"
+            return f"\u5df2\u8bb0\u4f4f\uff08id={self._public_memory_id(new_id)}, type={memory_type}\uff09\u3002"
 
     async def _handle_tool_recall(self, event: AstrMessageEvent, query: str):
         if self._cfg.memory_mode == "distill_only":

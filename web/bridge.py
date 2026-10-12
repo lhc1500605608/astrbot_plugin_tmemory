@@ -489,7 +489,7 @@ class PluginPagesBridge:
         user = str(data.get("user", "") or "").strip()
         if not user:
             return {"error": "user is required"}, 400
-        memory_id = _require_positive_int(data.get("id"), field="id")
+        memory_id = _require_positive_int(self.plugin._resolve_memory_id(data.get("id")), field="id")
         try:
             result = await self.admin().redistill_memory(
                 user=user,
@@ -515,7 +515,7 @@ class PluginPagesBridge:
     async def memory_split(self, request: Any) -> BridgeResult:
         data = await _json_object(request)
         user = str(data.get("user", "") or "").strip()
-        memory_id = _require_positive_int(data.get("id"), field="id")
+        memory_id = _require_positive_int(self.plugin._resolve_memory_id(data.get("id")), field="id")
         if not user:
             return {"error": "user and id are required"}, 400
         segments = data.get("segments", None)

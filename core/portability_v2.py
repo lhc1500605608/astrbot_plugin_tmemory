@@ -77,6 +77,15 @@ def plan_import(plugin, payload):
                     if table in ("profile_items", "event_items") and row.get("review_status", "approved") == "approved" and review_reason(str(row.get("content", "")) + " " + str(row.get("title", ""))):
                         errors.append({"reason": "unsafe active memory"})
                         continue
+                    if table in ("profile_items", "event_items"):
+                        from .utils_shared import _VALID_FACET_TYPES, _VALID_ITEM_STATUSES
+                        if (not isinstance(row.get("content"), str) or not 1 <= len(row["content"]) <= 4000
+                            or row.get("review_status", "approved") not in ("approved", "pending", "rejected")
+                            or row.get("status", "active") not in _VALID_ITEM_STATUSES
+                            or (table == "profile_items" and row.get("facet_type") not in _VALID_FACET_TYPES)
+                            or (table == "event_items" and (row.get("memory_type") not in ("event", "task") or row.get("task_status", "pending") not in ("pending", "in_progress", "completed", "cancelled")))):
+                            errors.append({"reason":"invalid memory fields"})
+                            continue
                     records.append((uid, table, dict(row), fingerprint(row)))
     seen, unique, duplicates = set(), [], 0
     with plugin._db() as conn:
@@ -199,6 +208,12 @@ def import_dataset(plugin, payload, dry_run=True, on_conflict="skip", backup=Tru
                     mismatch = conn.execute(f"SELECT 1 FROM {evidence} e JOIN {parent} p ON p.id=e.{column} JOIN conversation_cache c ON c.id=e.conversation_cache_id WHERE e.canonical_user_id=? AND (p.canonical_user_id!=e.canonical_user_id OR c.canonical_user_id!=e.canonical_user_id OR c.scope!=p.source_scope OR c.persona_id!=p.persona_id) LIMIT 1", (uid,)).fetchone()
                     if mismatch:
                         raise ValueError("evidence crosses isolation boundary")
+                mismatch = conn.execute("SELECT 1 FROM episode_sources s JOIN memory_episodes e ON e.id=s.episode_id JOIN conversation_cache c ON c.id=s.conversation_cache_id WHERE s.canonical_user_id=? AND (e.canonical_user_id!=s.canonical_user_id OR c.canonical_user_id!=s.canonical_user_id OR e.scope!=c.scope OR e.persona_id!=c.persona_id) LIMIT 1", (uid,)).fetchone()
+                if mismatch:
+                    raise ValueError("episode source crosses isolation boundary")
+                mismatch = conn.execute("SELECT 1 FROM profile_relations r JOIN profile_items a ON a.id=r.from_item_id JOIN profile_items b ON b.id=r.to_item_id WHERE r.canonical_user_id=? AND (a.canonical_user_id!=r.canonical_user_id OR b.canonical_user_id!=r.canonical_user_id OR a.source_scope!=b.source_scope OR a.persona_id!=b.persona_id) LIMIT 1", (uid,)).fetchone()
+                if mismatch:
+                    raise ValueError("profile relation crosses isolation boundary")
     except Exception as exc:
         result.update(error=f"{type(exc).__name__}: {exc}", rolled_back=True, inserted=0)
         return result
