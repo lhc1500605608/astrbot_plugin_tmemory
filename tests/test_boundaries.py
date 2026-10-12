@@ -31,6 +31,7 @@ SKIP_DIRS = {
     "data",
     "node_modules",
     "site-packages",
+    "qa-artifacts",
     "dist",
 }
 

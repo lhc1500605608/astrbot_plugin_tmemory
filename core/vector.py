@@ -6,6 +6,8 @@
 
 from __future__ import annotations
 
+from .data_safety import vector_task
+
 import inspect
 import logging
 import re
@@ -262,6 +264,7 @@ async def embed_text(plugin, text: str) -> Optional[List[float]]:
     return vec
 
 
+@vector_task("memories")
 async def upsert_vector(plugin, memory_id: int, text: str) -> bool:
     """为一条记忆生成并写入向量。成功返回 True，失败返回 False。"""
     if not plugin._vec_available:
@@ -282,6 +285,7 @@ async def upsert_vector(plugin, memory_id: int, text: str) -> bool:
         return False
 
 
+@vector_task("profile_items")
 async def upsert_profile_vector(plugin, profile_item_id: int, text: str) -> bool:
     """为一条画像条目生成并写入向量到 profile_item_vectors。"""
     if not plugin._vec_available:
@@ -296,6 +300,10 @@ async def upsert_profile_vector(plugin, profile_item_id: int, text: str) -> bool
                 "INSERT OR REPLACE INTO profile_item_vectors(profile_item_id, embedding) VALUES(?, ?)",
                 (profile_item_id, blob),
             )
+            conn.execute("UPDATE profile_items SET embedding_status='ready' WHERE id=?", (profile_item_id,))
+            alias = conn.execute("SELECT id FROM memory_record_ids WHERE kind='p' AND object_id=?", (profile_item_id,)).fetchone()
+            if alias:
+                conn.execute("INSERT OR REPLACE INTO memory_vectors(memory_id,embedding) VALUES(?,?)", (alias[0], blob))
         return True
     except Exception as e:
         logger.debug("[tmemory] upsert_profile_vector failed for id=%s: %s", profile_item_id, e)

@@ -1137,9 +1137,9 @@ async function saveProfileItem() {
 }
 
 async function reviewProfileItem(itemId) {
-  var scope = prompt('填写可见范围：平台实例ID|private 或 平台实例ID|group:群号。输入 global 表示明确共享给该用户的所有会话。');
+  var scope = await promptDialog('填写可见范围：平台实例ID|private 或 平台实例ID|group:群号。输入 global 表示明确共享给该用户的所有会话。');
   if (!scope) return;
-  var persona = prompt('填写人格ID；留空表示默认人格', '');
+  var persona = await promptDialog('填写人格ID；留空表示默认人格', '');
   if (persona === null) return;
   var res = await api('/memory/review', {method:'POST', body:JSON.stringify({id:'p:' + itemId,scope:scope,persona_id:persona,approve:true})});
   if (res && res.ok) await loadProfileItems(currentUser);

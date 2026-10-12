@@ -396,6 +396,7 @@ class PluginLifecycleMixin:
             logger.warning("[tmemory] provider dim reconcile after load failed: %s", e)
 
     async def initialize(self):
+        self._terminating = False
         # 契约 §7：无条件自报运行解释器能力（即使 enable_vector_search=False）。
         try:
             from .sqlite_env import log_sqlite_env_self_report
@@ -491,6 +492,7 @@ class PluginLifecycleMixin:
             logger.debug("[tmemory] identity_map startup export skipped: %s", e)
 
     async def terminate(self):
+        self._terminating = True
         self._session_callback_active = False
         self._worker_running = False
         if self._distill_task and not self._distill_task.done():
@@ -508,6 +510,11 @@ class PluginLifecycleMixin:
             except asyncio.CancelledError:
                 pass
         self._proactive_task = None
+        requests = list(getattr(self, "_inflight_llm_tasks", ()))
+        for task in requests:
+            task.cancel()
+        if requests:
+            await asyncio.gather(*requests, return_exceptions=True)
         # 关闭 VectorManager
         if self._vector_manager:
             try:

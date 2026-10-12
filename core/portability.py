@@ -103,15 +103,11 @@ def _clean_str(value: Any, field: str, *, max_len: int, required: bool) -> Tuple
 
 def _list_export_users(plugin) -> List[str]:
     with plugin._db() as conn:
-        rows = conn.execute(
-            "SELECT DISTINCT canonical_user_id FROM memories "
-            "UNION SELECT DISTINCT canonical_user_id FROM identity_bindings "
-            "UNION SELECT DISTINCT canonical_user_id FROM profile_items "
-            "UNION SELECT DISTINCT canonical_user_id FROM event_items "
-            "UNION SELECT DISTINCT canonical_user_id FROM conversation_cache "
-            "UNION SELECT DISTINCT canonical_user_id FROM memory_quarantine "
-            "ORDER BY canonical_user_id"
-        ).fetchall()
+        from .portability_v2 import TABLES
+        existing = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        targets = [t for t in TABLES if t in existing]
+        targets.append("memories")
+        rows = conn.execute(" UNION ".join(f"SELECT canonical_user_id FROM {t}" for t in targets) + " ORDER BY canonical_user_id").fetchall()
     return [str(r[0]) for r in rows]
 
 

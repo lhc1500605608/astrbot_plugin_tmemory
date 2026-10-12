@@ -516,6 +516,8 @@ class ProactiveRuntimeMixin:
                 from .config import parse_config
 
                 self._cfg = parse_config(self.config or {})
+                from .runtime_reliability import sync_config
+                sync_config(self)
             except Exception:
                 pass
 

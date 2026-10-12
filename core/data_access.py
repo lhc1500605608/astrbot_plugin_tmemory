@@ -409,7 +409,7 @@ class DataAccessMixin:
                 """
                 SELECT canonical_user_id, COUNT(*) as cnt
                 FROM conversation_cache
-                WHERE distilled=0 AND episode_id=0
+                WHERE distilled=0 AND episode_id=0 AND processing_status IN ('pending','retry','waiting_provider') AND next_retry_at<=strftime('%s','now')
                 GROUP BY canonical_user_id
                 HAVING cnt >= ?
                 ORDER BY cnt DESC
@@ -425,7 +425,7 @@ class DataAccessMixin:
                 """
                 SELECT id, canonical_user_id, role, content, source_adapter, source_user_id, unified_msg_origin, scope, persona_id, created_at
                 FROM conversation_cache
-                WHERE canonical_user_id=? AND distilled=0 AND episode_id=0
+                WHERE canonical_user_id=? AND distilled=0 AND episode_id=0 AND processing_status IN ('pending','retry','waiting_provider') AND next_retry_at<=strftime('%s','now')
                 ORDER BY id ASC
                 LIMIT ?
                 """,
@@ -440,21 +440,21 @@ class DataAccessMixin:
         params = [self._now(), *ids]
         with self._db() as conn:
             conn.execute(
-                f"UPDATE conversation_cache SET distilled=1, distilled_at=? WHERE id IN ({placeholders})",
+                f"UPDATE conversation_cache SET distilled=1, processing_status='success',last_error='', distilled_at=? WHERE id IN ({placeholders})",
                 params,
             )
 
     def _count_pending_users(self) -> int:
         with self._db() as conn:
             row = conn.execute(
-                "SELECT COUNT(1) AS n FROM (SELECT canonical_user_id FROM conversation_cache WHERE distilled=0 AND episode_id=0 GROUP BY canonical_user_id)"
+                "SELECT COUNT(1) AS n FROM (SELECT canonical_user_id FROM conversation_cache WHERE distilled=0 AND episode_id=0 AND processing_status IN ('pending','retry','waiting_provider') AND next_retry_at<=strftime('%s','now') GROUP BY canonical_user_id)"
             ).fetchone()
         return int(row["n"] if row else 0)
 
     def _count_pending_rows(self) -> int:
         with self._db() as conn:
             row = conn.execute(
-                "SELECT COUNT(1) AS n FROM conversation_cache WHERE distilled=0 AND episode_id=0"
+                "SELECT COUNT(1) AS n FROM conversation_cache WHERE distilled=0 AND episode_id=0 AND processing_status IN ('pending','retry','waiting_provider') AND next_retry_at<=strftime('%s','now')"
             ).fetchone()
         return int(row["n"] if row else 0)
 

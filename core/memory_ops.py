@@ -12,6 +12,7 @@ import logging
 
 import jieba
 
+from .data_safety import user_task
 from .distill_ops import DistillOpsMixin
 from .memory_events import log_memory_event
 from .profile_ops import ProfileItemOps
@@ -168,8 +169,11 @@ class MemoryOps(DistillOpsMixin):
                     conn=conn,
                 )
 
+            from .runtime_reliability import retain
+            retain(self.plugin, canonical_id)
             return new_id
 
+    @user_task("canonical_id")
     async def manual_purify_memories(
         self,
         event,

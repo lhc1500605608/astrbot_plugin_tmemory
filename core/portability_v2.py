@@ -40,9 +40,11 @@ def fingerprint(row):
 
 def existing_object(conn, uid, table, row, key):
     mapped = conn.execute("SELECT target_id FROM import_object_map WHERE canonical_user_id=? AND table_name=? AND source_key=?", (uid, table, key)).fetchone()
-    if mapped:
-        return mapped[0]
     actual = "memories" if table == "legacy_memories" else table
+    if mapped:
+        columns = {r[1] for r in conn.execute(f"PRAGMA table_info({actual})")}
+        if "id" not in columns or conn.execute(f"SELECT 1 FROM {actual} WHERE canonical_user_id=? AND id=?", (uid, mapped[0])).fetchone():
+            return mapped[0]
     if "id" in row:
         current = conn.execute(f"SELECT * FROM {actual} WHERE canonical_user_id=? AND id=?", (uid, row["id"])).fetchone()
         if current and all(dict(current).get(k) == v for k, v in row.items()):
@@ -72,7 +74,7 @@ def plan_import(plugin, payload):
                     if not isinstance(row, dict) or row.get("canonical_user_id") != uid:
                         errors.append({"reason": f"invalid {table} owner"})
                         continue
-                    if table in ("profile_items", "event_items") and row.get("review_status", "approved") == "approved" and review_reason(str(row.get("content", ""))):
+                    if table in ("profile_items", "event_items") and row.get("review_status", "approved") == "approved" and review_reason(str(row.get("content", "")) + " " + str(row.get("title", ""))):
                         errors.append({"reason": "unsafe active memory"})
                         continue
                     records.append((uid, table, dict(row), fingerprint(row)))
@@ -112,6 +114,7 @@ def import_dataset(plugin, payload, dry_run=True, on_conflict="skip", backup=Tru
     if backup:
         result["backup_path"] = write_backup(plugin, plan["_insert_users"])
     maps = {}
+    deferred = []
     try:
         with plugin._db() as conn:
             for uid, table, original, key in plan["_records"]:
@@ -148,7 +151,8 @@ def import_dataset(plugin, payload, dry_run=True, on_conflict="skip", backup=Tru
                                 raise ValueError(f"missing {column} reference")
                             row[column] = target
                     if row.get("contradiction_of"):
-                        row["contradiction_of"] = maps.get((uid, "memory_record_ids", row["contradiction_of"]), 0)
+                        deferred.append((uid, table, source_id, row["contradiction_of"]))
+                        row["contradiction_of"] = 0
                     if table == "proactive_reminders":
                         row["status"], row["sent_at"] = "paused", ""
                     if table == "proactive_user_policy":
@@ -183,8 +187,18 @@ def import_dataset(plugin, payload, dry_run=True, on_conflict="skip", backup=Tru
                         else:
                             target_id = 0
                 maps[(uid, table, source_id)] = target_id
-                conn.execute("INSERT INTO import_object_map VALUES(?,?,?,?)", (uid, table, key, target_id or 0))
+                conn.execute("INSERT INTO import_object_map VALUES(?,?,?,?) ON CONFLICT(canonical_user_id,table_name,source_key) DO UPDATE SET target_id=excluded.target_id", (uid, table, key, target_id or 0))
                 result["inserted"] += 1
+            for uid, table, source_id, old_ref in deferred:
+                target_ref = maps.get((uid, "memory_record_ids", old_ref))
+                if target_ref is None:
+                    raise ValueError("missing contradiction reference")
+                conn.execute(f"UPDATE {table} SET contradiction_of=? WHERE id=? AND canonical_user_id=?", (target_ref, maps[(uid, table, source_id)], uid))
+            for uid in plan["_insert_users"]:
+                for evidence, parent, column in (("profile_item_evidence", "profile_items", "profile_item_id"), ("event_item_evidence", "event_items", "event_item_id")):
+                    mismatch = conn.execute(f"SELECT 1 FROM {evidence} e JOIN {parent} p ON p.id=e.{column} JOIN conversation_cache c ON c.id=e.conversation_cache_id WHERE e.canonical_user_id=? AND (p.canonical_user_id!=e.canonical_user_id OR c.canonical_user_id!=e.canonical_user_id OR c.scope!=p.source_scope OR c.persona_id!=p.persona_id) LIMIT 1", (uid,)).fetchone()
+                    if mismatch:
+                        raise ValueError("evidence crosses isolation boundary")
     except Exception as exc:
         result.update(error=f"{type(exc).__name__}: {exc}", rolled_back=True, inserted=0)
         return result

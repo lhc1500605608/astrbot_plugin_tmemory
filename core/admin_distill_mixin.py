@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+from .data_safety import user_task
+
 from ..adapters.llm import generate as generate_llm
 
 import logging
@@ -146,6 +148,7 @@ class AdminDistillMixin:
             "errors": len(errors),
         }
 
+    @user_task("user")
     async def refine_memories(
         self,
         user: str,
@@ -175,6 +178,7 @@ class AdminDistillMixin:
             extra_instruction=extra_instruction,
         )
 
+    @user_task("user")
     async def redistill_memory(
         self,
         user: str,

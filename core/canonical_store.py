@@ -35,6 +35,8 @@ EXTRA = {
 
 
 def ensure_schema(conn):
+    from .runtime_reliability import ensure_schema as runtime_schema
+    runtime_schema(conn)
     conn.execute("CREATE TABLE IF NOT EXISTS storage_migrations(version INTEGER PRIMARY KEY,report TEXT NOT NULL)")
     conn.execute("CREATE TABLE IF NOT EXISTS memory_record_ids(id INTEGER PRIMARY KEY AUTOINCREMENT,"
                  "canonical_user_id TEXT NOT NULL,kind TEXT NOT NULL,object_id INTEGER NOT NULL,legacy_id INTEGER UNIQUE,UNIQUE(kind,object_id))")

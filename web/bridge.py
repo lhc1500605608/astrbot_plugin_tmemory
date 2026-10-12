@@ -732,6 +732,8 @@ class PluginPagesBridge:
         from ..core.config import parse_config
 
         self.plugin._cfg = parse_config(current_config)
+        from ..core.runtime_reliability import sync_config
+        sync_config(self.plugin)
 
         payload: Dict[str, Any] = {"status": "ok"}
         if not saved:
@@ -794,6 +796,8 @@ class PluginPagesBridge:
         from ..core.config import parse_config
 
         self.plugin._cfg = parse_config(current_config)
+        from ..core.runtime_reliability import sync_config
+        sync_config(self.plugin)
         await self._reinit_vector_manager()
 
         payload = self._embedding_providers_payload()

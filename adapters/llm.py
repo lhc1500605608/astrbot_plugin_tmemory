@@ -15,7 +15,30 @@ async def generate(plugin: Any, **kwargs):
     legacy_model = kwargs.pop("model_id", None)
     if legacy_model:
         kwargs.setdefault("model", legacy_model)
-    return await plugin.context.llm_generate(**kwargs)
+    from ..core.runtime_reliability import reserve, settle
+    import asyncio
+    if getattr(plugin, "_terminating", False):
+        raise RuntimeError("plugin is stopping")
+    reservation = reserve(plugin, kwargs)
+    tasks = getattr(plugin, "_inflight_llm_tasks", None)
+    if tasks is None:
+        tasks = plugin._inflight_llm_tasks = set()
+
+    async def request():
+        try:
+            try:
+                response = await plugin.context.llm_generate(**kwargs)
+            except BaseException:
+                settle(plugin, reservation, error=True)
+                raise
+            settle(plugin, reservation, response)
+            return response
+        finally:
+            tasks.discard(asyncio.current_task())
+
+    task = asyncio.create_task(request())
+    tasks.add(task)
+    return await task
 
 
 def inject_extra_user_temp(req: Any, block: str) -> bool:

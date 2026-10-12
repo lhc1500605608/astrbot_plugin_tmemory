@@ -309,6 +309,9 @@ class DistillOpsMixin:
                         )
                         continue
 
+                    from .runtime_reliability import claim, fail
+                    if not claim(self.plugin, rows):
+                        continue
                     llm_items, tok_in, tok_out, distill_errors = await self.plugin._distill_rows_with_llm(rows_for_llm)
 
                     # 收集结构化错误
@@ -332,6 +335,10 @@ class DistillOpsMixin:
                     if tok_out >= 0:
                         cycle_tok_out = max(cycle_tok_out, 0) + tok_out
 
+                    if not llm_items and distill_errors:
+                        fail(self.plugin, rows, "distill_failed", waiting=any(e.category == DistillErrorCategory.NO_PROVIDER for e in distill_errors))
+                        processed_users += 1
+                        continue
                     if not llm_items:
                         self.plugin._mark_rows_distilled([int(r["id"]) for r in rows])
                         self.plugin._user_last_distilled_ts[canonical_id] = now_ts
@@ -360,46 +367,58 @@ class DistillOpsMixin:
                         processed_users += 1
                         continue
 
-                    for item in valid_items:
-                        memory_type = str(item.get("memory_type", "fact"))
-                        mem_text = self.plugin._sanitize_text(
-                            self.plugin._normalize_text(str(item.get("memory", "")))
-                        )
-                        if not mem_text:
-                            continue
-                        row_scope = str(rows[0].get("scope", "user"))
-                        row_persona = str(rows[0].get("persona_id", ""))
-                        # 规则兜底项标记 source=rule_fallback，入库时以独立来源区分。
-                        item_source = str(item.get("source", ""))
-                        insert_channel = (
-                            "rule_fallback"
-                            if item_source == "rule_fallback"
-                            else "scheduled_distill"
-                        )
-                        new_id = self.plugin._insert_memory(
-                            canonical_id=canonical_id,
-                            adapter=str(rows[0]["source_adapter"]),
-                            adapter_user=str(rows[0]["source_user_id"]),
-                            memory=mem_text,
-                            score=self.plugin._clamp01(item.get("score", 0.7)),
-                            memory_type=memory_type,
-                            importance=self.plugin._clamp01(item.get("importance", 0.6)),
-                            confidence=self.plugin._clamp01(item.get("confidence", 0.7)),
-                            source_channel=insert_channel,
-                            scope=row_scope,
-                            persona_id=row_persona,
-                            event_date=str(item.get("event_date", "") or "").strip(),
-                            valid_until=str(item.get("valid_until", "") or "").strip(),
-                        )
-                        if self.plugin._vec_available and new_id:
-                            await self.plugin._upsert_vector(new_id, mem_text)
-                        total_memories += 1
+                    with self.plugin._db():
+                        vectors = []
+                        for item in valid_items:
+                            memory_type = str(item.get("memory_type", "fact"))
+                            mem_text = self.plugin._sanitize_text(
+                                self.plugin._normalize_text(str(item.get("memory", "")))
+                            )
+                            if not mem_text:
+                                continue
+                            row_scope = str(rows[0].get("scope", "user"))
+                            row_persona = str(rows[0].get("persona_id", ""))
+                            # 规则兜底项标记 source=rule_fallback，入库时以独立来源区分。
+                            item_source = str(item.get("source", ""))
+                            insert_channel = (
+                                "rule_fallback"
+                                if item_source == "rule_fallback"
+                                else "scheduled_distill"
+                            )
+                            new_id = self.plugin._insert_memory(
+                                canonical_id=canonical_id,
+                                adapter=str(rows[0]["source_adapter"]),
+                                adapter_user=str(rows[0]["source_user_id"]),
+                                memory=mem_text,
+                                score=self.plugin._clamp01(item.get("score", 0.7)),
+                                memory_type=memory_type,
+                                importance=self.plugin._clamp01(item.get("importance", 0.6)),
+                                confidence=self.plugin._clamp01(item.get("confidence", 0.7)),
+                                source_channel=insert_channel,
+                                scope=row_scope,
+                                persona_id=row_persona,
+                                event_date=str(item.get("event_date", "") or "").strip(),
+                                valid_until=str(item.get("valid_until", "") or "").strip(),
+                            )
+                            if self.plugin._vec_available and new_id:
+                                vectors.append((new_id, mem_text))
+                            total_memories += 1
 
-                    self.plugin._mark_rows_distilled([int(r["id"]) for r in rows])
+                        self.plugin._mark_rows_distilled([int(r["id"]) for r in rows])
+                    for vector_id, vector_text in vectors:
+                        try:
+                            await self.plugin._upsert_vector(vector_id, vector_text)
+                        except Exception:
+                            logger.warning("[tmemory] vector retry required id=%s", vector_id)
                     self.plugin._optimize_context(canonical_id)
                     processed_users += 1
                     self.plugin._user_last_distilled_ts[canonical_id] = now_ts
                 except Exception as e:
+                    from .runtime_reliability import fail
+                    try:
+                        fail(self.plugin, rows, type(e).__name__)
+                    except (RuntimeError, UnboundLocalError):
+                        pass
                     # 整用户处理异常（不属于 LLM 调用的异常）
                     failed_users += 1
                     user_err = classify_llm_error(

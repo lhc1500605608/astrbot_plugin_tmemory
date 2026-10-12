@@ -126,6 +126,8 @@ class ProfileItemOps:
                 {"profile_item_id": new_id, "facet_type": facet_type},
                 conn=conn,
             )
+            from .runtime_reliability import retain
+            retain(self.plugin, canonical_id)
             return new_id
 
     # ── Evidence ───────────────────────────────────────────────────────────
@@ -146,6 +148,8 @@ class ProfileItemOps:
             if not target or target["canonical_user_id"] != canonical_user_id:
                 raise ValueError("invalid evidence owner")
             for cid in source_ids:
+                if conn.execute("SELECT 1 FROM profile_item_evidence WHERE profile_item_id=? AND conversation_cache_id=?", (profile_item_id, cid)).fetchone():
+                    continue
                 source = conn.execute("SELECT canonical_user_id,scope,persona_id FROM conversation_cache WHERE id=?", (cid,)).fetchone()
                 if not source or tuple(source) != tuple(target):
                     continue

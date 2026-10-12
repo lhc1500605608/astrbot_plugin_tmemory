@@ -235,6 +235,8 @@ class DistillRuntimeMixin:
             try:
                 from .config import parse_config
                 self._cfg = parse_config(self.config)
+                from .runtime_reliability import sync_config
+                sync_config(self)
             except Exception:
                 pass
 
@@ -327,12 +329,16 @@ class DistillRuntimeMixin:
                     except Exception as _qe:
                         logger.warning("[tmemory] memory purify error: %s", _qe)
 
-            await asyncio.sleep(max(3600, self._cfg.distill_interval_sec))
+            from .runtime_reliability import retry_vectors, next_poll
+            await retry_vectors(self)
+            await asyncio.sleep(next_poll(self))
 
     async def _run_distill_cycle(
         self, force: bool = False, trigger: str = "manual"
     ) -> Tuple[int, int, List[DistillErrorRecord]]:
         from .memory_ops import MemoryOps
+        from .runtime_reliability import recover
+        recover(self, manual=force)
         return await MemoryOps(self).run_distill_cycle(force, trigger)
 
     def _prefilter_distill_rows(self, rows: List[Dict]) -> List[Dict]:

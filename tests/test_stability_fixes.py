@@ -329,7 +329,7 @@ async def test_distill_cycle_integrates_cache_llm_memory_and_history(plugin_with
     assert total_memories == 1
     assert pending == 0
     assert seen_kwargs["chat_provider_id"] == "mock-provider"
-    assert seen_kwargs["model_id"] == "mock-model"
+    assert seen_kwargs["model"] == "mock-model"
     assert "周三晚上" in seen_kwargs["prompt"]
     assert memory["memory"] == "用户每周三晚上练羽毛球，提醒事项需避开该时间"
     assert memory["memory_type"] == "preference"
@@ -387,7 +387,7 @@ async def test_distill_cycle_no_fallback_by_default(plugin_with_ctx):
     assert processed_users == 1
     assert total_memories == 0
     assert mem_count == 0
-    assert pending == 0
+    assert pending == 1
     assert errs, "结构化错误应被记录"
     assert any(e.category.value == "llm_error" for e in errs)
     assert "llm_error" in str(history["errors"])

@@ -322,9 +322,9 @@ class PluginHandlersMixin(CommandHandlersMixin):
     @staticmethod
     def _parse_umo(umo: str) -> tuple[str, str]:
         """解析 ``platform:message_type:session_id``，返回 (adapter, session_id)。"""
-        parts = str(umo or "").split(":")
+        parts = str(umo or "").split(":", 2)
         if len(parts) >= 3:
-            return parts[0], parts[-1]
+            return parts[0], parts[2]
         if len(parts) == 1 and parts[0]:
             return "", parts[0]
         return "", ""

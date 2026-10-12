@@ -5,8 +5,7 @@
 
 - ``probe_sqlite_environment()``：纯探测，不抛异常，返回不可变 ``SqliteEnvReport``。
 - ``install_sqlite3_shim()``：stdlib 缺 load_extension/FTS5 且 ``pysqlite3`` 可导入时
-  把 ``sys.modules["sqlite3"]`` 切换到 pysqlite3。**必须在其它 ``.core.*`` import 之前
-  调用**（main.py / web/legacy_server.py 入口），否则 db.py 等模块已绑定旧 sqlite3。
+  仅选择插件自己的连接后端。不会替换宿主的 ``sys.modules["sqlite3"]``。
 
 只依赖标准库，不 import astrbot / 其它插件模块（R1 边界约束）。
 """

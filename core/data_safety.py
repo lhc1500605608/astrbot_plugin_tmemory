@@ -67,6 +67,39 @@ def check_generation(conn, db_path):
         raise RuntimeError("user data was purged; stale task cancelled")
 
 
+def user_task(parameter="user"):
+    """Protect user-scoped administrative model operations across awaits."""
+    import inspect
+    from functools import wraps
+    def decorate(function):
+        signature = inspect.signature(function)
+        @wraps(function)
+        async def wrapped(*args, **kwargs):
+            bound = signature.bind(*args, **kwargs)
+            owner = args[0]
+            plugin = getattr(owner, "_plugin", getattr(owner, "plugin", owner))
+            uid = bound.arguments[parameter]
+            with generation_guard(plugin, uid):
+                return await function(*args, **kwargs)
+        return wrapped
+    return decorate
+
+
+def vector_task(table):
+    from functools import wraps
+    def decorate(function):
+        @wraps(function)
+        async def wrapped(plugin, item_id, text):
+            with plugin._db() as conn:
+                row = conn.execute(f"SELECT canonical_user_id FROM {table} WHERE id=?", (item_id,)).fetchone()
+            if not row:
+                return False
+            with generation_guard(plugin, row[0]):
+                return await function(plugin, item_id, text)
+        return wrapped
+    return decorate
+
+
 DDL = (
     "CREATE TABLE IF NOT EXISTS user_generations(canonical_user_id TEXT PRIMARY KEY,generation INTEGER NOT NULL DEFAULT 0)",
     "CREATE TABLE IF NOT EXISTS memory_quarantine(id INTEGER PRIMARY KEY AUTOINCREMENT,"

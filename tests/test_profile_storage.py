@@ -678,7 +678,7 @@ async def test_profile_extraction_empty_llm_result(plugin_with_ctx):
 
 @pytest.mark.asyncio
 async def test_profile_extraction_llm_failure(plugin_with_ctx):
-    """When LLM throws, rows should still be marked distilled to avoid retry loops."""
+    """When LLM throws, preserve rows and persist bounded retry state."""
     plugin, ctx = plugin_with_ctx
 
     plugin._cfg.profile_extraction_enabled = True
@@ -716,4 +716,4 @@ async def test_profile_extraction_llm_failure(plugin_with_ctx):
         pending = conn.execute(
             "SELECT COUNT(*) FROM conversation_cache WHERE canonical_user_id='test-user' AND distilled=0"
         ).fetchone()[0]
-        assert pending == 0
+        assert pending == 2

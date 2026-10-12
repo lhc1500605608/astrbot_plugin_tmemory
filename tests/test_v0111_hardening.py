@@ -20,7 +20,11 @@ from core.db import (
     _DDL_TRIGGER_AI,
     _DDL_TRIGGER_AU,
 )
-from core.distill import _coerce_cycle_result
+def _coerce_cycle_result(*args):
+    from conftest import _install_astrbot_stubs, _load_package_module
+    _install_astrbot_stubs()
+    module = _load_package_module("core.distill", "core/distill.py")
+    return module._coerce_cycle_result(*args)
 
 
 # ── 1. distill worker 解包容错 ─────────────────────────────────────────────

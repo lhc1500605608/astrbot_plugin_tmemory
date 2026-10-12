@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+from .data_safety import user_task
+
 import hashlib
 import logging
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
@@ -257,6 +259,7 @@ class AdminMemoryMixin:
     # 复杂写操作：合并/拆分
     # =====================================================================
 
+    @user_task("user")
     async def merge_memories(
         self, user: str, ids: List[int], merged_text: str = ""
     ) -> Dict[str, Any]:
@@ -285,6 +288,7 @@ class AdminMemoryMixin:
 
         return {"keep_id": keep_id, "deleted": deleted}
 
+    @user_task("user")
     async def split_memory(
         self,
         user: str,

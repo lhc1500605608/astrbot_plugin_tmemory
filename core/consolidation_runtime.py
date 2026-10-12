@@ -52,6 +52,8 @@ class ConsolidationRuntimeMixin:
         if self._cfg.distill_pause or self._cfg.memory_mode == "active_only":
             return 0, 0
 
+        from .runtime_reliability import recover
+        recover(self, manual=force)
         episodes_created = 0
         memories_extracted = 0
 
@@ -113,11 +115,15 @@ class ConsolidationRuntimeMixin:
                             if len(session_rows) < min_msgs:
                                 continue
 
+                            from .runtime_reliability import claim, fail
+                            if not claim(self, session_rows):
+                                continue
                             transcript = _build_transcript(session_rows)
                             episode = await self._summarize_session(
                                 ep_mgr, transcript, session_rows
                             )
                             if episode is None:
+                                fail(self, session_rows, "episode_summary_failed")
                                 continue
 
                             ep_id = self._insert_episode(
@@ -238,7 +244,7 @@ class ConsolidationRuntimeMixin:
                 )
             placeholders = ",".join(["?"] * len(source_ids))
             conn.execute(
-                f"UPDATE conversation_cache SET episode_id=? WHERE id IN ({placeholders})",
+                f"UPDATE conversation_cache SET episode_id=?,processing_status='success' WHERE id IN ({placeholders})",
                 [ep_id] + source_ids,
             )
             return ep_id
@@ -252,108 +258,123 @@ class ConsolidationRuntimeMixin:
         total_memories = 0
 
         for ep in episodes:
-            ep_id = int(ep["id"])
-            try:
-                sources = self._fetch_episode_sources(ep_id, limit=5)
-                snippets = _build_transcript(sources) if sources else ""
-
-                prompt = extractor.build_extraction_prompt(
-                    str(ep["episode_summary"]), snippets
-                )
-
-                provider_id, model_id = await self._resolve_consolidation_model(sources or [ep])
-                if not provider_id:
-                    self._mark_episode_semantic_done(ep_id, "no_provider")
-                    continue
-
+            from .data_safety import generation_guard
+            with generation_guard(self, str(ep["canonical_user_id"])):
+                ep_id = int(ep["id"])
                 try:
-                    llm_kwargs = {"chat_provider_id": provider_id, "prompt": prompt}
-                    if model_id:
-                        llm_kwargs["model_id"] = model_id
+                    sources = self._fetch_episode_sources(ep_id, limit=5)
+                    snippets = _build_transcript(sources) if sources else ""
 
-                    llm_resp = await generate_llm(self, **llm_kwargs)
-                    completion = self._normalize_text(
-                        getattr(llm_resp, "completion_text", "") or ""
+                    prompt = extractor.build_extraction_prompt(
+                        str(ep["episode_summary"]), snippets
                     )
-                    items = extractor.parse_memories_json(
-                        completion,
-                        self._normalize_text,
-                        self._safe_memory_type,
-                        self._clamp01,
+
+                    provider_id, model_id = await self._resolve_consolidation_model(sources or [ep])
+                    if not provider_id:
+                        from .runtime_reliability import fail_episode
+                        fail_episode(self, ep_id, waiting=True)
+                        continue
+
+                    try:
+                        llm_kwargs = {"chat_provider_id": provider_id, "prompt": prompt}
+                        if model_id:
+                            llm_kwargs["model_id"] = model_id
+
+                        llm_resp = await generate_llm(self, **llm_kwargs)
+                        completion = self._normalize_text(
+                            getattr(llm_resp, "completion_text", "") or ""
+                        )
+                        items = extractor.parse_memories_json(
+                            completion,
+                            self._normalize_text,
+                            self._safe_memory_type,
+                            self._clamp01,
+                        )
+                    except Exception as e:
+                        err = classify_llm_error(
+                            e,
+                            pipeline="consolidation",
+                            user_id=str(ep.get("canonical_user_id", "")),
+                            context_message=f"semantic extraction LLM failed for episode {ep_id}",
+                        )
+                        err.log()
+                        self._mark_episode_semantic_failed(ep_id)
+                        continue
+
+                    from .semantic_extractor import _extract_json_object, _strip_think_tags
+                    parsed = _extract_json_object(_strip_think_tags(completion))
+                    if not isinstance(parsed, dict) or not isinstance(parsed.get("memories"), list):
+                        self._mark_episode_semantic_failed(ep_id)
+                        continue
+                    if not items:
+                        self._mark_episode_semantic_done(ep_id, "empty_result")
+                        continue
+
+                    valid_items = self._validate_distill_output(items, snippets)
+                    if valid_items and sources:
+                        from .attribution import filter_assistant_attributed
+                        valid_items = filter_assistant_attributed(valid_items, sources)
+                    if not valid_items:
+                        self._mark_episode_semantic_done(ep_id, "all_invalid")
+                        continue
+
+                    canonical_id = str(ep["canonical_user_id"])
+                    scope = str(ep.get("scope", "user"))
+                    persona_id = str(ep.get("persona_id", ""))
+                    evidence = json.dumps(
+                        {"episode_id": ep_id, "episode_title": str(ep["episode_title"])},
+                        ensure_ascii=False,
                     )
+
+                    vectors = []
+                    with self._db():
+                        for item in valid_items:
+                            mem_text = self._sanitize_text(
+                                self._normalize_text(str(item.get("memory", "")))
+                            )
+                            if not mem_text:
+                                continue
+
+                            from .memory_ops import MemoryOps
+                            ops = MemoryOps(self)
+                            new_id = ops.insert_memory(
+                                canonical_id=canonical_id,
+                                adapter=str(sources[0]["source_adapter"]) if sources else "consolidation",
+                                adapter_user=str(sources[0]["source_user_id"]) if sources else canonical_id,
+                                memory=mem_text,
+                                score=self._clamp01(item.get("score", 0.7)),
+                                memory_type=str(item.get("memory_type", "fact")),
+                                importance=self._clamp01(item.get("importance", 0.6)),
+                                confidence=self._clamp01(item.get("confidence", 0.7)),
+                                source_channel="episode_distill",
+                                scope=scope,
+                                persona_id=persona_id,
+                            )
+                            if new_id:
+                                with self._db() as conn:
+                                    conn.execute(
+                                        "UPDATE memories SET episode_id=?, derived_from='episode', evidence_json=? WHERE id=?",
+                                        (ep_id, evidence, new_id),
+                                    )
+                                vectors.append((new_id, mem_text))
+                                total_memories += 1
+
+                        self._mark_episode_semantic_done(ep_id, "done")
+                    for new_id, mem_text in vectors:
+                        if self._vec_available:
+                            try:
+                                await self._upsert_vector(new_id, mem_text)
+                            except Exception:
+                                logger.warning("[tmemory] deferred vector indexing for %s", new_id)
                 except Exception as e:
                     err = classify_llm_error(
                         e,
                         pipeline="consolidation",
                         user_id=str(ep.get("canonical_user_id", "")),
-                        context_message=f"semantic extraction LLM failed for episode {ep_id}",
+                        context_message=f"semantic extraction failed for episode {ep_id}",
                     )
                     err.log()
                     self._mark_episode_semantic_failed(ep_id)
-                    continue
-
-                if not items:
-                    self._mark_episode_semantic_done(ep_id, "empty_result")
-                    continue
-
-                valid_items = self._validate_distill_output(items, snippets)
-                if valid_items and sources:
-                    from .attribution import filter_assistant_attributed
-                    valid_items = filter_assistant_attributed(valid_items, sources)
-                if not valid_items:
-                    self._mark_episode_semantic_done(ep_id, "all_invalid")
-                    continue
-
-                canonical_id = str(ep["canonical_user_id"])
-                scope = str(ep.get("scope", "user"))
-                persona_id = str(ep.get("persona_id", ""))
-                evidence = json.dumps(
-                    {"episode_id": ep_id, "episode_title": str(ep["episode_title"])},
-                    ensure_ascii=False,
-                )
-
-                for item in valid_items:
-                    mem_text = self._sanitize_text(
-                        self._normalize_text(str(item.get("memory", "")))
-                    )
-                    if not mem_text:
-                        continue
-
-                    from .memory_ops import MemoryOps
-                    ops = MemoryOps(self)
-                    new_id = ops.insert_memory(
-                        canonical_id=canonical_id,
-                        adapter=str(sources[0]["source_adapter"]) if sources else "consolidation",
-                        adapter_user=str(sources[0]["source_user_id"]) if sources else canonical_id,
-                        memory=mem_text,
-                        score=self._clamp01(item.get("score", 0.7)),
-                        memory_type=str(item.get("memory_type", "fact")),
-                        importance=self._clamp01(item.get("importance", 0.6)),
-                        confidence=self._clamp01(item.get("confidence", 0.7)),
-                        source_channel="episode_distill",
-                        scope=scope,
-                        persona_id=persona_id,
-                    )
-                    if new_id:
-                        with self._db() as conn:
-                            conn.execute(
-                                "UPDATE memories SET episode_id=?, derived_from='episode', evidence_json=? WHERE id=?",
-                                (ep_id, evidence, new_id),
-                            )
-                        if self._vec_available:
-                            await self._upsert_vector(new_id, mem_text)
-                        total_memories += 1
-
-                self._mark_episode_semantic_done(ep_id, "done")
-            except Exception as e:
-                err = classify_llm_error(
-                    e,
-                    pipeline="consolidation",
-                    user_id=str(ep.get("canonical_user_id", "")),
-                    context_message=f"semantic extraction failed for episode {ep_id}",
-                )
-                err.log()
-                self._mark_episode_semantic_failed(ep_id)
 
         return total_memories
 
@@ -365,7 +386,7 @@ class ConsolidationRuntimeMixin:
                 """
                 SELECT canonical_user_id, COUNT(*) as cnt
                 FROM conversation_cache
-                WHERE distilled=0 AND episode_id=0
+                WHERE distilled=0 AND episode_id=0 AND processing_status IN ('pending','retry','waiting_provider') AND next_retry_at<=strftime('%s','now')
                 GROUP BY canonical_user_id
                 HAVING cnt >= ?
                 ORDER BY cnt DESC
@@ -384,7 +405,7 @@ class ConsolidationRuntimeMixin:
                 SELECT id, canonical_user_id, role, content, source_adapter, source_user_id,
                        unified_msg_origin, scope, persona_id, created_at
                 FROM conversation_cache
-                WHERE canonical_user_id=? AND distilled=0 AND episode_id=0
+                WHERE canonical_user_id=? AND distilled=0 AND episode_id=0 AND processing_status IN ('pending','retry','waiting_provider') AND next_retry_at<=strftime('%s','now')
                 ORDER BY created_at ASC
                 LIMIT ?
                 """,
@@ -397,7 +418,7 @@ class ConsolidationRuntimeMixin:
             rows = conn.execute(
                 """
                 SELECT * FROM memory_episodes
-                WHERE consolidation_status='pending_semantic'
+                WHERE consolidation_status='pending_semantic' AND next_semantic_retry_at<=strftime('%s','now')
                 ORDER BY created_at ASC
                 LIMIT ?
                 """,
@@ -428,15 +449,9 @@ class ConsolidationRuntimeMixin:
             )
         logger.debug("[tmemory] episode %s semantic_done: %s", episode_id, reason)
 
-    def _mark_episode_semantic_failed(self, episode_id: int) -> None:
-        now = self._now()
-        with self._db() as conn:
-            conn.execute(
-                "UPDATE memory_episodes SET consolidation_status='semantic_failed', updated_at=? WHERE id=?",
-                (now, episode_id),
-            )
-
-    # ── Model resolution ────────────────────────────────────────────────────
+    def _mark_episode_semantic_failed(self, episode_id: int):
+        from .runtime_reliability import fail_episode
+        fail_episode(self, episode_id)
 
     async def _resolve_consolidation_model(
         self, rows: List[Dict]
@@ -452,3 +467,4 @@ class ConsolidationRuntimeMixin:
             await self._distill_mgr.resolve_distill_provider_id(rows, self.context),
             await self._distill_mgr.resolve_distill_model_id(rows),
         )
+

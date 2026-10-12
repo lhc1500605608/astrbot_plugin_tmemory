@@ -254,15 +254,9 @@ def get_daily_token_usage(plugin) -> int:
 
     tokens_total < 0 的记录（provider 未返回用量）不参与累加。
     """
-    today = plugin._now()[:10]
+    from .runtime_reliability import daily_usage
     with plugin._db() as conn:
-        row = conn.execute(
-            "SELECT COALESCE(SUM(tokens_total), 0) AS total"
-            " FROM distill_history"
-            " WHERE started_at >= ? AND tokens_total >= 0",
-            (today + " 00:00:00",),
-        ).fetchone()
-    return int(row["total"])
+        return daily_usage(conn, plugin._now()[:10])
 
 
 def is_token_budget_exceeded(plugin) -> bool:
@@ -294,8 +288,16 @@ def get_distill_cost_summary(plugin, last_n: int = 10) -> Dict:
             total_out += to_
         if tt >= 0:
             total_total += tt
+    with plugin._db() as conn:
+        usage = [dict(r) for r in conn.execute("SELECT * FROM llm_usage ORDER BY id DESC LIMIT ?", (last_n,))]
+    if usage:
+        total_in = sum(r["tokens_input"] for r in usage)
+        total_out = sum(r["tokens_output"] for r in usage)
+        total_total = sum(r["tokens_total"] for r in usage)
+        has_usage = True
     return {
-        "runs": len(rows),
+        "estimated_runs": sum(r["estimated"] for r in usage),
+        "runs": len(usage) if usage else len(rows),
         "has_usage": has_usage,
         "tokens_input": total_in,
         "tokens_output": total_out,

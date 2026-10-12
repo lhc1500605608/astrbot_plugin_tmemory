@@ -67,146 +67,97 @@ class ProfileExtractionRuntimeMixin:
             return 0
 
     async def _extract_profiles(self, force: bool = False) -> int:
+        from .data_safety import generation_guard
+        from .runtime_reliability import claim, fail, recover, retain, BudgetExceeded
+        from .profile_ops import ProfileItemOps
+        from .attribution import filter_assistant_attributed
+        recover(self, manual=force)
         extractor = ProfileExtractor(self._cfg)
         min_msgs = 1 if force else self._cfg.profile_extraction_min_messages
-        max_users = self._cfg.profile_extraction_max_users_per_cycle
-
-        pending_users = self._pending_profile_users(limit=max_users, min_batch=min_msgs)
+        users = self._pending_profile_users(self._cfg.profile_extraction_max_users_per_cycle, min_msgs)
         total_items = 0
-
-        for canonical_id in pending_users:
-            from .data_safety import generation_guard
-            with generation_guard(self, canonical_id):
+        for uid in users:
+            rows = []
+            with generation_guard(self, uid):
                 try:
-                    rows = self._fetch_pending_profile_rows(canonical_id, limit=150)
+                    rows = self._fetch_pending_profile_rows(uid, 150)
                     if len(rows) < min_msgs:
                         continue
-
-                    if not any(str(r.get("role", "")) == "user" for r in rows):
-                        self._mark_rows_distilled([int(r["id"]) for r in rows])
+                    ids = [int(r["id"]) for r in rows]
+                    if not any(r.get("role") == "user" for r in rows):
+                        self._mark_rows_distilled(ids)
                         continue
-
-                    transcript = _build_transcript(rows)
-                    time_anchor = _earliest_date(r.get("created_at", "") for r in rows)
-                    prompt = extractor.build_extraction_prompt(transcript, time_anchor)
-
-                    provider_id, model_id = await self._resolve_consolidation_model(rows)
-                    if not provider_id:
-                        self._mark_rows_distilled([int(r["id"]) for r in rows])
+                    provider, model = await self._resolve_consolidation_model(rows)
+                    if not provider:
+                        fail(self, rows, "no_provider", waiting=True)
                         continue
-
-                    row_scope = str(rows[0].get("scope", "user"))
-                    row_persona = str(rows[0].get("persona_id", ""))
-
-                    try:
-                        llm_kwargs = {"chat_provider_id": provider_id, "prompt": prompt}
-                        if model_id:
-                            llm_kwargs["model_id"] = model_id
-
-                        llm_resp = await generate_llm(self, **llm_kwargs)
-                        completion = self._normalize_text(
-                            getattr(llm_resp, "completion_text", "") or ""
-                        )
-                        items = extractor.parse_profile_json(
-                            completion,
-                            self._normalize_text,
-                            ProfileExtractor.safe_facet_type,
-                            self._clamp01,
-                        )
-                    except Exception as e:
-                        err = classify_llm_error(
-                            e,
-                            pipeline="profile_extraction",
-                            user_id=canonical_id,
-                            context_message="profile extraction LLM call failed",
-                        )
-                        err.log()
-                        self._mark_rows_distilled([int(r["id"]) for r in rows])
+                    if not claim(self, rows):
                         continue
-
-                    if not items:
-                        self._mark_rows_distilled([int(r["id"]) for r in rows])
-                        continue
-
-                    valid_items = self._validate_profile_items(items)
-                    if valid_items:
-                        from .attribution import filter_assistant_attributed
-                        valid_items = filter_assistant_attributed(
-                            valid_items, rows, key="content"
-                        )
-                    if not valid_items:
-                        self._mark_rows_distilled([int(r["id"]) for r in rows])
-                        continue
-
-                    source_ids = [int(r["id"]) for r in rows]
-                    adapter = str(rows[0].get("source_adapter", "profile_extraction"))
-                    adapter_user = str(rows[0].get("source_user_id", canonical_id))
-
-                    for item in valid_items:
-                        mem_text = self._sanitize_text(
-                            self._normalize_text(str(item.get("content", "")))
-                        )
-                        if not mem_text:
-                            continue
-                        facet = ProfileExtractor.safe_facet_type(
-                            str(item.get("facet_type", "fact"))
-                        )
-
-                        if item.get("memory_type") in ("event", "task"):
-                            event_id = self._insert_memory(canonical_id, adapter, adapter_user, mem_text, .8,
-                                item["memory_type"], self._clamp01(item.get("importance", .6)),
-                                self._clamp01(item.get("confidence", .7)), source_channel="profile_extraction",
-                                persona_id=row_persona, scope=row_scope, event_date=item.get("event_date", ""),
-                                valid_until=item.get("valid_until", ""))
-                            if getattr(self, "_canonical_store_active", False):
-                                with self._db() as conn:
-                                    obj = conn.execute("SELECT object_id FROM memory_record_ids WHERE id=? AND kind='e'", (event_id,)).fetchone()
-                                    if obj:
-                                        state = item.get("task_status", "pending")
-                                        state = state if state in ("pending", "completed", "cancelled") else "pending"
-                                        conn.execute("UPDATE event_items SET task_status=? WHERE id=?", (state, obj[0]))
-                                        for sid in source_ids:
-                                            conn.execute("INSERT OR IGNORE INTO event_item_evidence(event_item_id,conversation_cache_id,canonical_user_id,created_at) VALUES(?,?,?,?)", (obj[0], sid, canonical_id, self._now()))
-                            total_items += bool(event_id)
-                            continue
-
-                        from .memory_ops import ProfileItemOps
+                    prompt = extractor.build_extraction_prompt(_build_transcript(rows), _earliest_date(r.get("created_at", "") for r in rows))
+                    response = await generate_llm(self, chat_provider_id=provider, prompt=prompt, **({"model": model} if model else {}))
+                    completion = self._strip_think_tags(self._normalize_text(getattr(response, "completion_text", "") or ""))
+                    parsed = self._parse_json_object(completion)
+                    if not parsed or not any(isinstance(parsed.get(k), list) for k in ("profile_items", "event_items")):
+                        raise ValueError("invalid extraction response")
+                    items = extractor.parse_profile_json(completion, self._normalize_text, extractor.safe_facet_type, self._clamp01)
+                    items = filter_assistant_attributed(self._validate_profile_items(items), rows, key="content")
+                    scope, persona = rows[0].get("scope", "user"), rows[0].get("persona_id", "")
+                    evidence = [int(r["id"]) for r in rows if r.get("role") == "user"]
+                    vectors = []
+                    written = 0
+                    # All object writes, evidence and queue completion commit together.
+                    with self._db() as conn:
                         ops = ProfileItemOps(self)
-                        item_id = ops.upsert_profile_item(
-                            canonical_id=canonical_id,
-                            facet_type=facet,
-                            title=str(item.get("title", ""))[:100],
-                            content=mem_text,
-                            confidence=self._clamp01(item.get("confidence", 0.7)),
-                            importance=self._clamp01(item.get("importance", 0.6)),
-                            source_scope=row_scope,
-                            persona_id=row_persona,
-                        )
-                        if item_id:
-                            ops.add_evidence(
-                                profile_item_id=item_id,
-                                canonical_user_id=canonical_id,
-                                source_ids=source_ids,
-                                source_role="user",
-                                evidence_kind="conversation",
-                                confidence_delta=0.1,
-                            )
-                            if self._vec_available:
-                                await self._upsert_profile_vector(item_id, mem_text)
-                            total_items += 1
-
-                    self._mark_rows_distilled(source_ids)
-                    self._optimize_context(canonical_id)
-
-                except Exception as e:
-                    err = classify_llm_error(
-                        e,
-                        pipeline="profile_extraction",
-                        user_id=canonical_id,
-                        context_message="profile extraction failed for user",
-                    )
-                    err.log()
-
+                        for item in items:
+                            text = self._sanitize_text(self._normalize_text(item["content"]))
+                            kind = item.get("memory_type", "")
+                            if kind in ("event", "task"):
+                                from .data_safety import review_reason, quarantine
+                                reason = review_reason(text)
+                                if reason:
+                                    quarantine(conn, uid, text, reason, self._now(), scope, persona)
+                                    continue
+                                alias = self._insert_memory(uid, rows[0].get("source_adapter", ""), rows[0].get("source_user_id", uid), text,
+                                    .8, kind, item["importance"], item["confidence"], source_channel="profile_extraction", persona_id=persona,
+                                    scope=scope, event_date=item.get("event_date", ""), valid_until=item.get("valid_until", ""))
+                                obj = conn.execute("SELECT object_id FROM memory_record_ids WHERE id=? AND kind='e'", (alias,)).fetchone()
+                                if obj:
+                                    state = item.get("task_status", "pending")
+                                    conn.execute("UPDATE event_items SET task_status=? WHERE id=?", (state if state in ("pending", "completed", "cancelled") else "pending", obj[0]))
+                                    for sid in evidence:
+                                        conn.execute("INSERT OR IGNORE INTO event_item_evidence(event_item_id,conversation_cache_id,canonical_user_id,created_at) VALUES(?,?,?,?)", (obj[0], sid, uid, self._now()))
+                                written += bool(alias)
+                            else:
+                                item_id = ops.upsert_profile_item(uid, extractor.safe_facet_type(item["facet_type"]), item.get("title", ""), text,
+                                    item["confidence"], item["importance"], scope, persona)
+                                if item_id:
+                                    ops.add_evidence(item_id, uid, evidence)
+                                    vectors.append((item_id, text))
+                                    written += 1
+                        self._mark_rows_distilled(ids)
+                        retain(self, uid)
+                    total_items += written
+                    for item_id, text in vectors:
+                        if self._vec_available:
+                            try:
+                                await self._upsert_profile_vector(item_id, text)
+                            except Exception:
+                                with self._db() as conn:
+                                    conn.execute("UPDATE profile_items SET embedding_status='failed' WHERE id=?", (item_id,))
+                except asyncio.CancelledError:
+                    if rows:
+                        try:
+                            fail(self, rows, "cancelled")
+                        except RuntimeError:
+                            pass
+                    raise
+                except Exception as exc:
+                    if rows:
+                        try:
+                            fail(self, rows, "budget" if isinstance(exc, BudgetExceeded) else type(exc).__name__, waiting=isinstance(exc, BudgetExceeded))
+                        except RuntimeError:
+                            pass
+                    logger.warning("[tmemory] extraction deferred user=%s reason=%s", uid, type(exc).__name__)
         return total_items
 
     @staticmethod
@@ -233,7 +184,7 @@ class ProfileExtractionRuntimeMixin:
                 """
                 SELECT canonical_user_id, COUNT(*) as cnt
                 FROM conversation_cache
-                WHERE distilled=0 AND episode_id=0
+                WHERE distilled=0 AND episode_id=0 AND processing_status IN ('pending','retry','waiting_provider') AND next_retry_at<=strftime('%s','now')
                 GROUP BY canonical_user_id
                 HAVING cnt >= ?
                 ORDER BY cnt DESC
@@ -252,7 +203,7 @@ class ProfileExtractionRuntimeMixin:
                 SELECT id, canonical_user_id, role, content, source_adapter, source_user_id,
                        unified_msg_origin, scope, persona_id, created_at
                 FROM conversation_cache
-                WHERE canonical_user_id=? AND distilled=0 AND episode_id=0
+                WHERE canonical_user_id=? AND distilled=0 AND episode_id=0 AND processing_status IN ('pending','retry','waiting_provider') AND next_retry_at<=strftime('%s','now')
                 ORDER BY created_at ASC
                 LIMIT ?
                 """,
