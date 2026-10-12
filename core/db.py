@@ -379,6 +379,8 @@ class DatabaseManager(DbFtsMixin):
             conn.execute(_DDL_PROFILE_RELATIONS)
             conn.execute(_DDL_QUERY_EMBEDDING_CACHE)
             conn.execute(_DDL_DISTILL_PROMPT_CACHE)
+            from .canonical_store import ensure_schema
+            ensure_schema(conn)
 
             conn.execute("CREATE INDEX IF NOT EXISTS idx_identity_bindings_canonical ON identity_bindings (canonical_user_id)")
 

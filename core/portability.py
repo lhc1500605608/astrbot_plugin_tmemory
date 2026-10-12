@@ -35,7 +35,7 @@ from .utils_shared import (
 
 logger = logging.getLogger("astrbot")
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 GENERATOR = "astrbot_plugin_tmemory"
 DEFAULT_SOURCE_ADAPTER = "import"
 DEFAULT_SOURCE_USER = "import"
@@ -106,13 +106,19 @@ def _list_export_users(plugin) -> List[str]:
         rows = conn.execute(
             "SELECT DISTINCT canonical_user_id FROM memories "
             "UNION SELECT DISTINCT canonical_user_id FROM identity_bindings "
+            "UNION SELECT DISTINCT canonical_user_id FROM profile_items "
+            "UNION SELECT DISTINCT canonical_user_id FROM event_items "
+            "UNION SELECT DISTINCT canonical_user_id FROM conversation_cache "
+            "UNION SELECT DISTINCT canonical_user_id FROM memory_quarantine "
             "ORDER BY canonical_user_id"
         ).fetchall()
     return [str(r[0]) for r in rows]
 
 
 def _export_user(plugin, canonical_id: str) -> Dict[str, Any]:
+    from .portability_v2 import export_user
     with plugin._db() as conn:
+        tables = export_user(conn, canonical_id)
         memory_rows = conn.execute(
             """
             SELECT canonical_user_id, memory, memory_type, score, importance,
@@ -148,6 +154,7 @@ def _export_user(plugin, canonical_id: str) -> Dict[str, Any]:
     ]
     return {
         "canonical_user_id": canonical_id,
+        "tables": tables,
         "memories": memories,
         "bindings": [
             {"adapter": str(b["adapter"]), "adapter_user_id": str(b["adapter_user_id"])}
@@ -188,7 +195,7 @@ def _schema_version_error(payload: Any) -> Optional[str]:
         version = int(raw)
     except (TypeError, ValueError):
         return "schema_version must be an integer"
-    if version != SCHEMA_VERSION:
+    if version not in (1, SCHEMA_VERSION):
         return f"unsupported schema_version {version} (expected {SCHEMA_VERSION})"
     return None
 
@@ -289,6 +296,8 @@ def _validate_memory(entry: Any, fallback_user: Any, index: int) -> Tuple[Option
         "source_adapter": source_adapter or DEFAULT_SOURCE_ADAPTER,
         "source_user_id": source_user_id or DEFAULT_SOURCE_USER,
         "is_pinned": 1 if entry.get("is_pinned") else 0,
+        "event_date": str(entry.get("event_date", "") or ""),
+        "valid_until": str(entry.get("valid_until", "") or ""),
     }, None
 
 
@@ -323,6 +332,9 @@ def parse_records(payload: Any) -> Tuple[List[Dict[str, Any]], List[Dict[str, An
 
 def plan_import(plugin, payload: Any) -> Dict[str, Any]:
     """解析 + 校验 + 去重 + 冲突检测，**不写库**。"""
+    if isinstance(payload, dict) and payload.get("schema_version") == 2:
+        from .portability_v2 import plan_import as plan_v2
+        return plan_v2(plugin, payload)
     valid, errors = parse_records(payload)
     schema_error = _schema_version_error(payload)
     if schema_error:
@@ -407,56 +419,8 @@ def _backup_dir(plugin) -> str:
 
 def write_backup(plugin, users: List[str]) -> str:
     """落库前把受影响用户的完整记忆快照写入 JSON 备份文件，返回路径。"""
-    snapshot: Dict[str, Any] = {
-        "schema_version": SCHEMA_VERSION,
-        "generator": GENERATOR,
-        "kind": "tmemory_import_backup",
-        "created_at": plugin._now(),
-        "users": [],
-    }
-    with plugin._db() as conn:
-        for user in users:
-            rows = conn.execute(
-                "SELECT canonical_user_id, source_adapter, source_user_id, memory, "
-                "memory_type, score, importance, confidence, is_pinned, is_active, "
-                "persona_id, scope FROM memories WHERE canonical_user_id = ?",
-                (user,),
-            ).fetchall()
-            bindings = conn.execute(
-                "SELECT adapter, adapter_user_id FROM identity_bindings "
-                "WHERE canonical_user_id = ?",
-                (user,),
-            ).fetchall()
-            snapshot["users"].append(
-                {
-                    "canonical_user_id": user,
-                    "memories": [
-                        {
-                            "canonical_user_id": str(r["canonical_user_id"]),
-                            "memory": str(r["memory"]),
-                            "memory_type": str(r["memory_type"]),
-                            "score": float(r["score"]),
-                            "importance": float(r["importance"]),
-                            "confidence": float(r["confidence"]),
-                            "source_adapter": str(r["source_adapter"]),
-                            "source_user_id": str(r["source_user_id"]),
-                            "persona_id": str(r["persona_id"]),
-                            "scope": str(r["scope"]),
-                            "is_pinned": int(r["is_pinned"] or 0),
-                            "is_active": int(r["is_active"] or 0),
-                        }
-                        for r in rows
-                    ],
-                    "bindings": [
-                        {
-                            "adapter": str(b["adapter"]),
-                            "adapter_user_id": str(b["adapter_user_id"]),
-                        }
-                        for b in bindings
-                    ],
-                }
-            )
-
+    snapshot = build_export(plugin, users)
+    snapshot["kind"] = "tmemory_import_backup"
     backup_dir = _backup_dir(plugin)
     os.makedirs(backup_dir, exist_ok=True)
     path = os.path.join(backup_dir, f"tm_import_{time.strftime('%Y%m%d-%H%M%S')}.json")
@@ -470,6 +434,8 @@ def write_backup(plugin, users: List[str]) -> str:
 
 
 def _insert_record(conn, record: Dict[str, Any], now: str) -> None:
+    from .data_safety import require_safe
+    require_safe(record["memory"])
     user = record["canonical_user_id"]
     persona_id = record["persona_id"]
     scope = record["scope"]
@@ -484,8 +450,8 @@ def _insert_record(conn, record: Dict[str, Any], now: str) -> None:
             canonical_user_id, source_adapter, source_user_id, source_channel,
             memory_type, summary_channel, memory, tokenized_memory, memory_hash,
             score, importance, confidence, reinforce_count, attention_score,
-            is_active, is_pinned, last_seen_at, created_at, updated_at, persona_id, scope
-        ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            is_active, is_pinned, last_seen_at, created_at, updated_at, persona_id, scope, event_date, valid_until
+        ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             user,
@@ -509,6 +475,8 @@ def _insert_record(conn, record: Dict[str, Any], now: str) -> None:
             now,
             persona_id,
             scope,
+            record.get("event_date", ""),
+            record.get("valid_until", ""),
         ),
     )
 
@@ -532,6 +500,9 @@ def import_dataset(
     backup:
         落库前是否写备份文件（默认开启）。
     """
+    if isinstance(payload, dict) and payload.get("schema_version") == 2:
+        from .portability_v2 import import_dataset as import_v2
+        return import_v2(plugin, payload, dry_run, on_conflict, backup)
     policy = str(on_conflict or "skip").strip().lower()
     if policy not in _ALLOWED_POLICIES:
         raise ValueError(

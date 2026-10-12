@@ -333,21 +333,9 @@ def auto_prune_low_quality(plugin) -> None:
 
 
 def export_user_data(plugin, canonical_id: str) -> Dict:
-    memories = plugin._list_memories(canonical_id, limit=500)
-    with plugin._db() as conn:
-        bindings = [
-            dict(r)
-            for r in conn.execute(
-                "SELECT adapter, adapter_user_id FROM identity_bindings WHERE canonical_user_id = ?",
-                (canonical_id,),
-            ).fetchall()
-        ]
-    return {
-        "canonical_user_id": canonical_id,
-        "memories": memories,
-        "bindings": bindings,
-        "exported_at": plugin._now(),
-    }
+    from .portability import build_export
+    envelope = build_export(plugin, [canonical_id])
+    return {**envelope, **envelope["users"][0]}
 
 
 def purge_user_data(plugin, canonical_id: str) -> Dict[str, int]:
