@@ -291,6 +291,10 @@ class PluginHelpersMixin(DataAccessMixin):
         return _event_adapter.get_adapter_user_id(event)
 
     def _get_memory_scope(self, event: AstrMessageEvent) -> str:
+        if getattr(self, "_canonical_store_active", False):
+            scope = _event_adapter.get_memory_scope(event, "session")
+            platform = _event_adapter.get_identity_adapter_name(event)
+            return f"{platform}|{scope}"
         return _event_adapter.get_memory_scope(event, self._cfg.memory_scope)
 
     async def _get_current_persona_async(self, event: AstrMessageEvent) -> str:

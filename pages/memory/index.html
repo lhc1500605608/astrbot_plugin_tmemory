@@ -1080,7 +1080,7 @@ function renderProfileItemTable() {
     var statusCls = item.status === 'active' ? 'status-active' : item.status === 'contradicted' ? 'status-contra' : 'status-other';
     var statusText = STATUS_LABELS[item.status] || item.status;
     return '<tr>' +
-      '<td>' + item.id + '</td>' +
+      '<td>' + escHtml(item.public_id || String(item.id)) + '</td>' +
       '<td><span class="type-badge type-' + (item.facet_type === 'task_pattern' ? 'task' : item.facet_type) + '">' + (FACET_LABELS[item.facet_type] || item.facet_type) + '</span></td>' +
       '<td><div class="item-title">' + escHtml(item.title || '') + '</div><div class="item-content">' + escHtml(item.content) + '</div></td>' +
       '<td><span class="' + statusCls + '">' + statusText + '</span></td>' +
@@ -1089,6 +1089,7 @@ function renderProfileItemTable() {
       '<td style="font-size:11px;color:var(--text2)">' + item.evidence_count + ' 条</td>' +
       '<td style="white-space:nowrap">' +
         '<input type="checkbox" class="profile-merge-chk" value="' + item.id + '" title="选择合并"> ' +
+        (item.review_status === 'pending' ? '<button class="btn btn-sm" onclick="reviewProfileItem(' + item.id + ')">复核</button> ' : '') +
         '<button class="btn btn-sm" onclick="openProfileEditModal(' + item.id + ')" title="编辑">' + '\u270f\ufe0f' + '</button> ' +
         '<button class="btn btn-sm" onclick="openEvidenceModal(' + item.id + ')" title="证据">' + '\ud83d\udd17' + '</button> ' +
         '<button class="btn btn-sm btn-danger" onclick="archiveProfileItem(' + item.id + ')" title="归档">' + '\ud83d\udce6' + '</button>' +
@@ -1133,6 +1134,15 @@ async function saveProfileItem() {
     await loadProfileSummary(currentUser);
     toast('画像条目已更新', 'success');
   }
+}
+
+async function reviewProfileItem(itemId) {
+  var scope = prompt('填写可见范围：平台实例ID|private 或 平台实例ID|group:群号。输入 global 表示明确共享给该用户的所有会话。');
+  if (!scope) return;
+  var persona = prompt('填写人格ID；留空表示默认人格', '');
+  if (persona === null) return;
+  var res = await api('/memory/review', {method:'POST', body:JSON.stringify({id:'p:' + itemId,scope:scope,persona_id:persona,approve:true})});
+  if (res && res.ok) await loadProfileItems(currentUser);
 }
 
 async function archiveProfileItem(itemId) {

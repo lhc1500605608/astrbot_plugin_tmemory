@@ -199,6 +199,10 @@ class AdminMemoryMixin:
         """更新记忆字段（memory, memory_type, score, importance, confidence, is_pinned）。"""
         from .utils_shared import _now, _safe_memory_type, _clamp01, _normalize_text
 
+        from .data_safety import require_safe
+        if "memory" in data:
+            require_safe(data["memory"])
+        mem_id = self._plugin._resolve_memory_id(mem_id)
         now = _now()
         fields: list = []
         params: list = []
@@ -244,32 +248,10 @@ class AdminMemoryMixin:
 
     def delete_memory(self, memory_id: int) -> bool:
         """删除一条记忆（含向量索引清理和审计）。"""
-        with self._db() as conn:
-            row = conn.execute(
-                "SELECT canonical_user_id FROM memories WHERE id=?",
-                (memory_id,),
-            ).fetchone()
-            cur = conn.execute("DELETE FROM memories WHERE id=?", (memory_id,))
-            deleted = cur.rowcount > 0
-            if deleted and row:
-                self._memory_logger.log_memory_event(
-                    canonical_user_id=str(row["canonical_user_id"]),
-                    event_type="delete",
-                    payload={"memory_id": memory_id},
-                    conn=conn,
-                )
-                from .vector import delete_vector
-                delete_vector(self._plugin, memory_id, conn=conn)
-            return deleted
+        return self._plugin._delete_memory(memory_id)
 
     def set_pinned(self, memory_id: int, pinned: bool) -> bool:
-        """设置/取消记忆常驻。"""
-        with self._db() as conn:
-            cur = conn.execute(
-                "UPDATE memories SET is_pinned = ? WHERE id = ?",
-                (1 if pinned else 0, memory_id),
-            )
-            return cur.rowcount > 0
+        return self._plugin._set_pinned(memory_id, pinned)
 
     # =====================================================================
     # 复杂写操作：合并/拆分

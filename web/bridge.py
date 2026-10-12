@@ -256,6 +256,7 @@ class PluginPagesBridge:
             "画像证据",
         ),
         BridgeRoute(("POST",), "/profile/item/update", "profile_item_update", "更新画像"),
+        BridgeRoute(("POST",), "/memory/review", "memory_review", "复核记忆可见范围"),
         BridgeRoute(("POST",), "/profile/item/archive", "profile_item_archive", "归档画像"),
         BridgeRoute(
             ("POST",), "/profile/items/merge", "profile_items_merge", "合并画像条目"
@@ -452,18 +453,18 @@ class PluginPagesBridge:
 
     async def memory_update(self, request: Any) -> BridgeResult:
         data = await _json_object(request)
-        data["id"] = _require_positive_int(data.get("id"), field="id")
+        data["id"] = _require_positive_int(self.plugin._resolve_memory_id(data.get("id")), field="id")
         self.admin().update_memory(data["id"], data)
         return {"ok": True}, 200
 
     async def memory_delete(self, request: Any) -> BridgeResult:
         data = await _json_object(request)
-        mem_id = _require_positive_int(data.get("id"), field="id")
+        mem_id = _require_positive_int(self.plugin._resolve_memory_id(data.get("id")), field="id")
         return {"ok": self.admin().delete_memory(mem_id)}, 200
 
     async def memory_pin(self, request: Any) -> BridgeResult:
         data = await _json_object(request)
-        mem_id = _require_positive_int(data.get("id"), field="id")
+        mem_id = _require_positive_int(self.plugin._resolve_memory_id(data.get("id")), field="id")
         pinned = bool(data.get("pinned", True))
         return {"ok": self.admin().set_pinned(mem_id, pinned), "pinned": pinned}, 200
 
@@ -615,6 +616,12 @@ class PluginPagesBridge:
         data["id"] = _require_positive_int(data.get("id"), field="id")
         self.admin().update_profile_item(data["id"], data)
         return {"ok": True}, 200
+
+    async def memory_review(self, request: Any) -> BridgeResult:
+        data = await _json_object(request)
+        result = self.admin().review_memory(data.get("id"), str(data.get("scope", "")),
+                                          str(data.get("persona_id", "")), bool(data.get("approve", True)))
+        return {"ok": result}, 200
 
     async def profile_item_archive(self, request: Any) -> BridgeResult:
         data = await _json_object(request)

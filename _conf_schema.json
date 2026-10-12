@@ -415,7 +415,7 @@
     "items": {
       "profile_extraction_enabled": {
         "type": "bool",
-        "default": false,
+        "default": true,
         "description": "启用画像提取",
         "hint": "开启后后台从对话缓存中提取用户画像条目。默认关闭。"
       },

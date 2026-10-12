@@ -115,6 +115,9 @@ class ProfileItemOps:
                 ),
             )
             new_id = int(cur.lastrowid or 0)
+            if "|" in source_scope:
+                platform = source_scope.split("|", 1)[0]
+                conn.execute("UPDATE profile_items SET platform_id=?,source_adapter=? WHERE id=?", (platform, platform, new_id))
 
             self._ensure_user_profile(conn, canonical_id, now)
             log_memory_event(

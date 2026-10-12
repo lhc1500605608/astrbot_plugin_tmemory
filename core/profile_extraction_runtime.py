@@ -152,6 +152,24 @@ class ProfileExtractionRuntimeMixin:
                             str(item.get("facet_type", "fact"))
                         )
 
+                        if item.get("memory_type") in ("event", "task"):
+                            event_id = self._insert_memory(canonical_id, adapter, adapter_user, mem_text, .8,
+                                item["memory_type"], self._clamp01(item.get("importance", .6)),
+                                self._clamp01(item.get("confidence", .7)), source_channel="profile_extraction",
+                                persona_id=row_persona, scope=row_scope, event_date=item.get("event_date", ""),
+                                valid_until=item.get("valid_until", ""))
+                            if getattr(self, "_canonical_store_active", False):
+                                with self._db() as conn:
+                                    obj = conn.execute("SELECT object_id FROM memory_record_ids WHERE id=? AND kind='e'", (event_id,)).fetchone()
+                                    if obj:
+                                        state = item.get("task_status", "pending")
+                                        state = state if state in ("pending", "completed", "cancelled") else "pending"
+                                        conn.execute("UPDATE event_items SET task_status=? WHERE id=?", (state, obj[0]))
+                                        for sid in source_ids:
+                                            conn.execute("INSERT OR IGNORE INTO event_item_evidence(event_item_id,conversation_cache_id,canonical_user_id,created_at) VALUES(?,?,?,?)", (obj[0], sid, canonical_id, self._now()))
+                            total_items += bool(event_id)
+                            continue
+
                         from .memory_ops import ProfileItemOps
                         ops = ProfileItemOps(self)
                         item_id = ops.upsert_profile_item(

@@ -142,7 +142,9 @@ class MemoryOps(DistillOpsMixin):
                     str(valid_until or ""),
                 ),
             )
-            new_id = int(cur.lastrowid or 0)
+            # INSTEAD OF view triggers do not expose their insert lastrowid.
+            created = conn.execute("SELECT id FROM memories WHERE canonical_user_id=? AND memory_hash=? AND scope=? AND persona_id=?", (canonical_id, mhash, scope, persona_id)).fetchone()
+            new_id = int(created[0]) if created else int(cur.lastrowid or 0)
 
             if deactivated > 0:
                 self.plugin._memory_logger.log_memory_event(

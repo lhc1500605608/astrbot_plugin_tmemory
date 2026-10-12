@@ -54,13 +54,24 @@ class DataAccessMixin:
             valid_until=valid_until,
         )
 
+    def _resolve_memory_id(self, value):
+        from .canonical_store import resolve_id
+        with self._db() as conn:
+            return resolve_id(conn, value)
+
+    def _public_memory_id(self, value):
+        with self._db() as conn:
+            row = conn.execute("SELECT kind,object_id FROM memory_record_ids WHERE id=?", (value,)).fetchone()
+        return f"{row[0]}:{row[1]}" if row else str(value)
+
     def _delete_memory(self, memory_id: int) -> bool:
+        memory_id = self._resolve_memory_id(memory_id)
         with self._db() as conn:
             row = conn.execute(
                 "SELECT canonical_user_id FROM memories WHERE id=?", (memory_id,)
             ).fetchone()
             cur = conn.execute("DELETE FROM memories WHERE id=?", (memory_id,))
-            deleted = cur.rowcount > 0
+            deleted = bool(row)
             if deleted and row:
                 self._memory_logger.log_memory_event(
                     canonical_user_id=str(row["canonical_user_id"]),
@@ -262,13 +273,17 @@ class DataAccessMixin:
         placeholders = ",".join(["?"] * len(ids))
         with self._db() as conn:
             rows = conn.execute(
-                f"SELECT id, memory, memory_type, score, importance, confidence, source_adapter, source_user_id "
+                f"SELECT id, memory, memory_type, score, importance, confidence, source_adapter, source_user_id, scope, persona_id "
                 f"FROM memories WHERE canonical_user_id=? AND id IN ({placeholders}) ORDER BY id",
                 [canonical_id, *ids],
             ).fetchall()
+        if len({(r["scope"], r["persona_id"], r["source_adapter"]) for r in rows}) > 1:
+            raise ValueError("cannot merge across isolation boundaries")
         return [dict(r) for r in rows]
 
     def _update_memory_text(self, memory_id: int, memory: str) -> None:
+        from .data_safety import require_safe
+        require_safe(memory)
         now = self._now()
         mhash = hashlib.sha256(self._normalize_text(memory).encode("utf-8")).hexdigest()
         tokenized_memory = " ".join(jieba.cut_for_search(memory))
@@ -462,12 +477,14 @@ class DataAccessMixin:
         _maintenance.optimize_context(self, canonical_id)
 
     def _set_pinned(self, memory_id: int, pinned: bool) -> bool:
+        memory_id = self._resolve_memory_id(memory_id)
         with self._db() as conn:
+            exists = conn.execute("SELECT 1 FROM memories WHERE id=?", (memory_id,)).fetchone()
             cur = conn.execute(
                 "UPDATE memories SET is_pinned = ? WHERE id = ?",
                 (1 if pinned else 0, memory_id),
             )
-            return cur.rowcount > 0
+            return bool(exists)
 
     def _export_user_data(self, canonical_id: str) -> Dict:
         return _maintenance.export_user_data(self, canonical_id)

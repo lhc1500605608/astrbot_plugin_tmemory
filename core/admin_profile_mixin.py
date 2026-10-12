@@ -98,6 +98,9 @@ class AdminProfileMixin:
             {
                 "id": int(r["id"]),
                 "facet_type": str(r["facet_type"]),
+                "public_id": f"p:{r['id']}",
+                "review_status": str(r["review_status"]),
+                "is_pinned": int(r["is_pinned"]),
                 "title": str(r["title"] or ""),
                 "content": str(r["content"]),
                 "status": str(r["status"]),
@@ -203,6 +206,28 @@ class AdminProfileMixin:
         from .memory_ops import ProfileItemOps
         return ProfileItemOps(self._plugin).archive_item(item_id)
 
+    def review_memory(self, value, scope, persona_id="", approve=True):
+        """Admin-only callers explicitly choose a restored record's visibility."""
+        from .canonical_store import resolve_id
+        from .data_safety import require_safe
+        if approve and not (scope == "global" or re.fullmatch(r"[^|\s]+\|(?:private|group:[^\s]+)", str(scope))):
+            raise ValueError("an explicit platform/private/group scope is required")
+        with self._db() as conn:
+            alias = resolve_id(conn, value)
+            ref = conn.execute("SELECT kind,object_id FROM memory_record_ids WHERE id=?", (alias,)).fetchone()
+            if not ref:
+                raise ValueError("memory not found")
+            table = "profile_items" if ref[0] == "p" else "event_items"
+            row = conn.execute(f"SELECT content FROM {table} WHERE id=?", (ref[1],)).fetchone()
+            if approve:
+                require_safe(row[0])
+                if row[0] == "[credential redacted]":
+                    raise ValueError("redacted credentials cannot be activated")
+            conn.execute(f"UPDATE {table} SET review_status=?,status=?,is_active=?,source_scope=?,persona_id=?,platform_id=?,updated_at=? WHERE id=?",
+                         ("approved" if approve else "rejected", "active" if approve else "archived", int(approve), scope, persona_id,
+                          scope.split("|", 1)[0] if "|" in scope else "", self._plugin._now(), ref[1]))
+        return True
+
     def merge_profile_items(self, user: str, ids: List[int]) -> Dict[str, Any]:
         """合并多条画像条目（同 facet_type + 同 profile item 语义合并）。
 
@@ -217,7 +242,7 @@ class AdminProfileMixin:
         placeholders = ",".join(["?"] * len(safe_ids))
         with self._db() as conn:
             rows = conn.execute(
-                f"SELECT id, content, facet_type "
+                f"SELECT id, content, facet_type, source_scope, persona_id "
                 f"FROM profile_items WHERE id IN ({placeholders}) AND canonical_user_id=?",
                 [*safe_ids, user],
             ).fetchall()
@@ -227,6 +252,8 @@ class AdminProfileMixin:
 
         rows_by_id = {int(r["id"]): r for r in rows}
 
+        if len({(r["source_scope"], r["persona_id"]) for r in rows}) > 1:
+            raise ValueError("cannot merge across isolation boundaries")
         facet_types = {r["facet_type"] for r in rows}
         if len(facet_types) > 1:
             raise ValueError(
@@ -268,6 +295,8 @@ class AdminProfileMixin:
 
             merged_text = "; ".join(merged_parts)
             normalized = re.sub(r"\s+", " ", merged_text).lower()
+            from .data_safety import require_safe
+            require_safe("；".join(merged_parts))
             conn.execute(
                 "UPDATE profile_items SET content=?, normalized_content=?, updated_at=? WHERE id=?",
                 (merged_text[:500], normalized, now, keep_id),

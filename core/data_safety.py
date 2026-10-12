@@ -88,7 +88,7 @@ def purge_user(plugin, uid):
                 conn.execute(f"DELETE FROM {vector} WHERE {column} IN "
                              f"(SELECT id FROM {source} WHERE canonical_user_id=?)", (uid,))
         # Discover legacy archival tables too; table names come exclusively from SQLite.
-        preferred = ["profile_relations", "profile_item_evidence", "episode_sources"]
+        preferred = ["profile_relations", "profile_item_evidence", "event_item_evidence", "episode_sources", "profile_items", "event_items"]
         for table in preferred + sorted(tables - set(preferred)):
             if table not in tables or table == "user_generations" or table.startswith("sqlite_"):
                 continue

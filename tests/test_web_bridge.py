@@ -86,6 +86,7 @@ def test_route_table_covers_every_legacy_capability(bridge_module):
         ("GET", "/embedding/providers"),
         ("POST", "/embedding/provider"),
         ("POST", "/memory/redistill"),
+        ("POST", "/memory/review"),
         ("POST", "/identity/bind"),
         ("GET", "/identity/list"),
         ("POST", "/identity/unbind"),

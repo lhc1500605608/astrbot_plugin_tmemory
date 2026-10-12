@@ -133,6 +133,8 @@ class DatabaseManager(DbFtsMixin):
                 if self._conn is None:
                     conn = sqlite3.connect(self.db_path, check_same_thread=False)
                     conn.row_factory = sqlite3.Row
+                    from .canonical_store import install_functions
+                    install_functions(conn)
                     if self._is_malformed(conn):
                         # SQLite 文件损坏（database disk image is malformed）会中断
                         # 插件加载。备份损坏文件并重建空库，保证插件可启动；
@@ -361,6 +363,12 @@ class DatabaseManager(DbFtsMixin):
             from .data_safety import DDL
             for ddl in DDL:
                 conn.execute(ddl)
+            from .canonical_store import is_active, ensure_schema, init_search
+            if is_active(conn):
+                ensure_schema(conn)
+                init_search(conn)
+                self._init_vector_tables(conn, embed_dim, vec_available)
+                return
             conn.execute(_DDL_MEMORIES)
             conn.execute(_DDL_MEMORY_EVENTS)
             conn.execute(_DDL_PROACTIVE_USER_POLICY)

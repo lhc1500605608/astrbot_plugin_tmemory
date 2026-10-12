@@ -258,7 +258,7 @@ def _validate_memory(entry: Any, fallback_user: Any, index: int) -> Tuple[Option
         return _err(reason)
 
     scope = str(entry.get("scope", "user") or "user").strip().lower()
-    if scope not in _ALLOWED_SCOPES:
+    if scope not in _ALLOWED_SCOPES and not scope.startswith("group:") and not ("|" in scope and (scope.endswith("|private") or "|group:" in scope)):
         return _err("scope must be one of: " + ", ".join(sorted(_ALLOWED_SCOPES)))
 
     persona_id, reason = _clean_str(

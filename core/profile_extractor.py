@@ -92,6 +92,7 @@ class ProfileExtractor:
             "8. 相对时间词(今天/明天/这周末/下周X/月底等)必须结合当前时间基准理解为绝对日期；不得把相对表述当作长期事实。",
             "9. 一次性、日期限定或时效性内容(如某天要做的事、节日安排)属于事件，**不得**写成任何 facet；profile_items 只放跨对话稳定的持久画像。",
             "",
+            '另用 event_items 数组输出一次性事件或任务，每项包含 memory_type(event/task)、content、event_date(YYYY-MM-DD或空)、valid_until、task_status(pending/completed/cancelled)、importance、confidence。禁止放入 profile_items。',
             "对话:",
             transcript,
         ]
@@ -107,9 +108,12 @@ class ProfileExtractor:
         if not isinstance(data, dict):
             return []
 
-        items = data.get("profile_items")
+        items = data.get("profile_items", [])
         if not isinstance(items, list):
-            return []
+            items = []
+        events = data.get("event_items", [])
+        if isinstance(events, list):
+            items = items + [dict(e, memory_type=e.get("memory_type", "event")) for e in events if isinstance(e, dict)]
 
         result = []
         for item in items[:9]:
@@ -121,6 +125,10 @@ class ProfileExtractor:
             title = normalize_text_func(str(item.get("title", "")))[:100]
             result.append({
                 "facet_type": safe_facet_func(item.get("facet_type", "fact")),
+                "memory_type": str(item.get("memory_type", "")),
+                "event_date": str(item.get("event_date", "") or ""),
+                "valid_until": str(item.get("valid_until", "") or ""),
+                "task_status": str(item.get("task_status", "pending")),
                 "title": title,
                 "content": content,
                 "importance": clamp01_func(item.get("importance", 0.6)),

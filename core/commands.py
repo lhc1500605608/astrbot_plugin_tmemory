@@ -115,11 +115,12 @@ class CommandHandlersMixin:
     async def _handle_tm_forget(self, event: AstrMessageEvent):
         raw = (event.message_str or "").strip()
         arg = re.sub(r"^/tm_forget\s*", "", raw, flags=re.IGNORECASE).strip()
-        if not arg.isdigit():
+        resolved_id = self._resolve_memory_id(arg)
+        if not resolved_id:
             yield event.plain_result("\u7528\u6cd5: /tm_forget <\u8bb0\u5fc6ID>")
             return
 
-        deleted = self._delete_memory(int(arg))
+        deleted = self._delete_memory(resolved_id)
         if deleted:
             yield event.plain_result(f"\u5df2\u5220\u9664\u8bb0\u5fc6 {arg}")
             return
@@ -363,7 +364,7 @@ class CommandHandlersMixin:
         parts = body.split(None, 1)
         ids_part = parts[0]
         merged_text = parts[1].strip() if len(parts) > 1 else ""
-        ids = [int(x) for x in re.split(r"[,,\uff0c]", ids_part) if x.strip().isdigit()]
+        ids = [self._resolve_memory_id(x.strip()) for x in re.split(r"[,,\uff0c]", ids_part) if self._resolve_memory_id(x.strip())]
         if len(ids) < 2:
             yield event.plain_result(
                 "\u8bf7\u81f3\u5c11\u63d0\u4f9b\u4e24\u4e2a\u8bb0\u5fc6ID\uff0c\u4f8b\u5982 /tm_mem_merge 12,18 \u65b0\u8bb0\u5fc6\u5185\u5bb9"
@@ -397,10 +398,11 @@ class CommandHandlersMixin:
             return
 
         parts = body.split(None, 1)
-        if not parts[0].isdigit():
+        resolved_id = self._resolve_memory_id(parts[0])
+        if not resolved_id:
             yield event.plain_result("\u7b2c\u4e00\u4e2a\u53c2\u6570\u5fc5\u987b\u662f\u8bb0\u5fc6ID")
             return
-        mem_id = int(parts[0])
+        mem_id = resolved_id
         custom = parts[1].strip() if len(parts) > 1 else ""
 
         canonical_id, _, _ = self._identity_mgr.resolve_current_identity(event)
@@ -448,10 +450,11 @@ class CommandHandlersMixin:
     async def _handle_tm_pin(self, event: AstrMessageEvent):
         raw = (event.message_str or "").strip()
         arg = re.sub(r"^/tm_pin\s*", "", raw, flags=re.IGNORECASE).strip()
-        if not arg.isdigit():
+        resolved_id = self._resolve_memory_id(arg)
+        if not resolved_id:
             yield event.plain_result("\u7528\u6cd5: /tm_pin <\u8bb0\u5fc6ID>")
             return
-        ok = self._set_pinned(int(arg), True)
+        ok = self._set_pinned(resolved_id, True)
         yield event.plain_result(
             f"\u8bb0\u5fc6 {arg} \u5df2\u8bbe\u4e3a\u5e38\u9a7b" if ok else f"\u672a\u627e\u5230\u8bb0\u5fc6 {arg}"
         )
@@ -459,10 +462,11 @@ class CommandHandlersMixin:
     async def _handle_tm_unpin(self, event: AstrMessageEvent):
         raw = (event.message_str or "").strip()
         arg = re.sub(r"^/tm_unpin\s*", "", raw, flags=re.IGNORECASE).strip()
-        if not arg.isdigit():
+        resolved_id = self._resolve_memory_id(arg)
+        if not resolved_id:
             yield event.plain_result("\u7528\u6cd5: /tm_unpin <\u8bb0\u5fc6ID>")
             return
-        ok = self._set_pinned(int(arg), False)
+        ok = self._set_pinned(resolved_id, False)
         yield event.plain_result(
             f"\u8bb0\u5fc6 {arg} \u5df2\u53d6\u6d88\u5e38\u9a7b" if ok else f"\u672a\u627e\u5230\u8bb0\u5fc6 {arg}"
         )

@@ -146,6 +146,9 @@ class DbFtsMixin:
 
     def _init_fts(self, conn: sqlite3.Connection) -> bool:
         """初始化 FTS5（内置 tokenizer）。失败时清晰降级，绝不留下半成品。"""
+        from .canonical_store import is_active, init_search
+        if is_active(conn):
+            return init_search(conn)
         text_tokenizer = _select_text_fts_tokenizer(conn)
         if text_tokenizer is None:
             logger.warning(

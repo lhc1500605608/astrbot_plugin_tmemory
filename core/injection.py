@@ -79,7 +79,7 @@ class InjectionBuilder:
             blocks.append(event_block)
 
         # ── Working context from recent conversation turns ──
-        context_block = self._build_context_block(canonical_id, session_key)
+        context_block = self._build_context_block(canonical_id, session_key, persona_id)
         if context_block:
             blocks.append(context_block)
 
@@ -126,10 +126,11 @@ class InjectionBuilder:
         self,
         canonical_id: str,
         session_key: str,
+        persona_id: str = "",
     ) -> str:
         """Build [当前对话] block from recent conversation turns."""
         working_turns = self._retrieval.retrieve_working_context(
-            canonical_id, session_key, self._cfg.inject_working_turns
+            canonical_id, session_key, self._cfg.inject_working_turns, persona_id=persona_id
         )
         if not working_turns:
             return ""

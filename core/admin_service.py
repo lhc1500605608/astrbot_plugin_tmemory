@@ -88,7 +88,9 @@ class AdminService(AdminMemoryMixin, AdminProfileMixin, AdminIdentityMixin, Admi
                 "GROUP BY canonical_user_id"
             ).fetchall()
 
-        merged: Dict[str, Dict[str, Any]] = {}
+        with self._db() as conn:
+            extra_users = conn.execute("SELECT canonical_user_id FROM profile_items UNION SELECT canonical_user_id FROM event_items UNION SELECT canonical_user_id FROM memory_quarantine").fetchall()
+        merged: Dict[str, Dict[str, Any]] = {str(r[0]): {"id": str(r[0]), "memory_count": 0, "pending_count": 0} for r in extra_users}
         for r in mem_rows:
             uid = str(r["canonical_user_id"])
             merged[uid] = {"id": uid, "memory_count": int(r["cnt"]), "pending_count": 0}

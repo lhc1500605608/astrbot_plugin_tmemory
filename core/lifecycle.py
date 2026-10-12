@@ -408,6 +408,16 @@ class PluginLifecycleMixin:
         self._init_db()
         self._migrate_schema()
 
+        import json
+        from pathlib import Path
+        snapshot = Path(self._db_mgr.db_path + ".pre-v018.config.json")
+        if not snapshot.exists():
+            snapshot.write_text(json.dumps(dict(self.config or {}), ensure_ascii=False, indent=2), encoding="utf-8")
+        from .canonical_store import activate
+        with self._db() as conn:
+            activate(conn, self._now())
+        self._canonical_store_active = True
+
         # 上游能力探测：集中记录一次，并在 extra_user_temp 不可用时显式告警。
         try:
             from ..adapters import version as _version_adapter

@@ -45,7 +45,15 @@ class RetrievalManager:
             if self._cfg.memory_scope == "session":
                 scope_cond = "AND (scope=? OR scope='user')"
                 scope_params = [scope]
+            from ..core.canonical_store import is_active
+            with self._db_mgr.db() as check:
+                canonical = is_active(check)
+            if canonical:
+                scope_cond = "AND (scope=? OR scope='global')"
+                scope_params = [scope]
             persona_cond = "AND (persona_id=? OR persona_id='')"
+            if canonical:
+                persona_cond = "AND persona_id=?"
             persona_params = [persona_id]
             private_cond = "AND scope != 'private'" if exclude_private else ""
             channel_cond = "AND summary_channel = ?" if summary_channel else ""
@@ -188,6 +196,11 @@ class RetrievalManager:
         private_cond = "AND scope != 'private'" if exclude_private else ""
 
         with self._db_mgr.db() as conn:
+            from ..core.canonical_store import is_active
+            if is_active(conn):
+                scope_cond = "AND (scope=? OR scope='global')"
+                scope_params = [scope]
+                persona_cond = "AND persona_id=?"
             rows = conn.execute(
                 f"""
                 SELECT id, memory_type, memory, event_date, valid_until,
@@ -223,6 +236,7 @@ class RetrievalManager:
         canonical_id: str,
         session_key: str,
         limit: int,
+        persona_id: str = "",
     ) -> List[Dict[str, object]]:
         """Retrieve recent conversation_cache turns for working memory injection.
 
@@ -237,11 +251,11 @@ class RetrievalManager:
                 """
                 SELECT role, content FROM conversation_cache
                 WHERE canonical_user_id = ? AND session_key = ?
-                  AND archived_at = ''
+                  AND archived_at = '' AND persona_id = ?
                 ORDER BY id DESC
                 LIMIT ?
                 """,
-                (canonical_id, session_key, limit),
+                (canonical_id, session_key, persona_id, limit),
             ).fetchall()
         result = [{"role": r["role"], "content": r["content"]} for r in rows]
         result.reverse()
@@ -281,7 +295,12 @@ class RetrievalManager:
         private_cond = "AND pi.source_scope != 'private'" if exclude_private else ""
 
         def _sync_retrieve():
+            nonlocal scope_cond, persona_cond
             with self._db_mgr.db() as conn:
+                from ..core.canonical_store import is_active
+                if is_active(conn):
+                    scope_cond = "AND (pi.source_scope=? OR pi.source_scope='global') AND pi.review_status='approved' AND pi.is_active=1"
+                    persona_cond = "AND pi.persona_id=?"
                 hybrid_system = HybridMemorySystem(
                     conn, self._cfg.embed_dim, table_prefix="profile_item"
                 )

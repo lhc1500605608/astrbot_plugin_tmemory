@@ -184,7 +184,7 @@ class PluginHandlersMixin(CommandHandlersMixin):
             except Exception:
                 pass
 
-        return f"\u5df2\u8bb0\u4f4f\uff08id={new_id}, type={memory_type}\uff09\u3002"
+        return f"\u5df2\u8bb0\u4f4f\uff08id={self._public_memory_id(new_id)}, type={memory_type}\uff09\u3002"
 
     async def _handle_tool_recall(self, event: AstrMessageEvent, query: str):
         if self._cfg.memory_mode == "distill_only":
@@ -308,6 +308,10 @@ class PluginHandlersMixin(CommandHandlersMixin):
         return max(1, min(value, _RECALL_FOR_PROMPT_MAX_LIMIT))
 
     def _recall_scope(self, session_type: str, umo: str) -> str:
+        if getattr(self, "_canonical_store_active", False):
+            platform, session_id = self._parse_umo(umo)
+            local = f"group:{session_id}" if str(session_type).lower() == "group" else "private"
+            return f"{platform}|{local}"
         if getattr(self._cfg, "memory_scope", "user") != "session":
             return "user"
         if str(session_type or "").strip().lower() == "group":
@@ -457,6 +461,8 @@ class PluginHandlersMixin(CommandHandlersMixin):
             items, scope, persona_id, exclude_private
         )
 
+        if getattr(self, "_canonical_store_active", False):
+            visible = [i for i in visible if i.get("source_scope") in (scope, "global") and str(i.get("persona_id") or "") == persona_id and i.get("review_status", "approved") == "approved"]
         facets: dict = {}
         for item in visible:
             facet = str(item.get("facet_type") or "")
@@ -468,6 +474,8 @@ class PluginHandlersMixin(CommandHandlersMixin):
             profile.get("summary_text", ""), _PROFILE_FOR_PROMPT_MAX_SUMMARY_CHARS
         )
 
+        if getattr(self, "_canonical_store_active", False):
+            summary = self._clip_text("；".join(str(i.get("content", "")) for i in visible), _PROFILE_FOR_PROMPT_MAX_SUMMARY_CHARS)
         highlights: list[str] = []
         for item in visible[: self._profile_limit(limit)]:
             text = self._clip_text(
@@ -494,7 +502,7 @@ class PluginHandlersMixin(CommandHandlersMixin):
         out: list[dict] = []
         for item in items or []:
             item_scope = str(item.get("source_scope") or "user")
-            if item_scope != scope and item_scope != "user":
+            if item_scope != scope and item_scope not in ("user", "global"):
                 continue
             if exclude_private and item_scope == "private":
                 continue

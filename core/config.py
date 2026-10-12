@@ -84,7 +84,7 @@ class PluginConfig:
     memory_mode: str = "hybrid"  # distill_only | active_only | hybrid
 
     # ── Profile Storage ──
-    profile_extraction_enabled: bool = False
+    profile_extraction_enabled: bool = True
     profile_extraction_min_messages: int = 8
     profile_extraction_max_users_per_cycle: int = 10
     profile_extraction_timeout_sec: int = 120
@@ -415,7 +415,7 @@ def parse_config(raw_config: dict) -> PluginConfig:
     ps = raw_config.get("profile_storage", {})
     if not isinstance(ps, dict):
         ps = {}
-    c.profile_extraction_enabled = _safe_bool(ps.get("profile_extraction_enabled", False), False, label="profile_extraction_enabled")
+    c.profile_extraction_enabled = _safe_bool(ps.get("profile_extraction_enabled", True), True, label="profile_extraction_enabled")
     c.profile_extraction_min_messages = max(2, _safe_int(ps.get("profile_extraction_min_messages", 8), 8, label="profile_extraction_min_messages"))
     c.profile_extraction_max_users_per_cycle = max(1, _safe_int(ps.get("profile_extraction_max_users_per_cycle", 10), 10, label="profile_extraction_max_users_per_cycle"))
     c.profile_extraction_timeout_sec = max(30, _safe_int(ps.get("profile_extraction_timeout_sec", 120), 120, label="profile_extraction_timeout_sec"))
