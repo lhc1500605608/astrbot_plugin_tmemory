@@ -1309,7 +1309,7 @@ def test_cfg002_schema_exposes_all_consolidation_fields(plugin_module):
     from pathlib import Path
 
     schema_path = Path(__file__).resolve().parents[1] / "_conf_schema.json"
-    schema = json.loads(schema_path.read_text())
+    schema = json.loads(schema_path.read_text(encoding="utf-8"))
 
     # Top-level consolidation sections
     assert "consolidation_pipeline" in schema, "CFG-002 FAIL: consolidation_pipeline section missing"
@@ -1367,7 +1367,7 @@ def test_cfg002_schema_exposes_all_layered_injection_fields(plugin_module):
     from pathlib import Path
 
     schema_path = Path(__file__).resolve().parents[1] / "_conf_schema.json"
-    schema = json.loads(schema_path.read_text())
+    schema = json.loads(schema_path.read_text(encoding="utf-8"))
 
     required = [
         "enable_layered_injection",
@@ -1393,7 +1393,7 @@ def test_cfg002_schema_defaults_match_parse_config_defaults(plugin_module):
     from astrbot_plugin_tmemory.core.config import parse_config
 
     schema_path = Path(__file__).resolve().parents[1] / "_conf_schema.json"
-    schema = json.loads(schema_path.read_text())
+    schema = json.loads(schema_path.read_text(encoding="utf-8"))
     cfg = parse_config({})
 
     # Consolidation pipeline

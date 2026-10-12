@@ -76,11 +76,13 @@ async def run_memory_purify(plugin) -> Tuple[int, int]:
                 continue
 
             ids_to_deactivate = await llm_purify_judge(plugin, provider_id, mem_list)
+            allowed = {int(m["id"]) for m in mem_list}
+            ids_to_deactivate = set(ids_to_deactivate) & allowed
             if ids_to_deactivate:
                 with plugin._db() as conn:
                     for mid in ids_to_deactivate:
                         conn.execute(
-                            "UPDATE memories SET is_active=0 WHERE id=?", (mid,)
+                            "UPDATE memories SET is_active=0 WHERE id=? AND canonical_user_id=? AND is_pinned=0", (mid, uid)
                         )
                 pruned_llm += len(ids_to_deactivate)
         except Exception as e:
@@ -122,7 +124,7 @@ async def llm_purify_judge(
         )
         obj = plugin._parse_json_object(txt)
         if obj and isinstance(obj.get("deactivate"), list):
-            return [int(x) for x in obj["deactivate"] if str(x).isdigit()]
+            return [int(x) for x in obj["deactivate"] if str(x).isdigit() and int(x) in {int(m["id"]) for m in memories}]
     except Exception as e:
         logger.debug("[tmemory] _llm_purify_judge failed: %s", e)
     return []
@@ -348,29 +350,8 @@ def export_user_data(plugin, canonical_id: str) -> Dict:
 
 
 def purge_user_data(plugin, canonical_id: str) -> Dict[str, int]:
-    with plugin._db() as conn:
-        plugin._delete_vectors_for_user(canonical_id, conn=conn)
-        m = conn.execute(
-            "DELETE FROM memories WHERE canonical_user_id = ?", (canonical_id,)
-        ).rowcount
-        c = conn.execute(
-            "DELETE FROM conversation_cache WHERE canonical_user_id = ?",
-            (canonical_id,),
-        ).rowcount
-        conn.execute(
-            "DELETE FROM memory_events WHERE canonical_user_id = ?",
-            (canonical_id,),
-        )
-        conn.execute(
-            "DELETE FROM identity_bindings WHERE canonical_user_id = ?",
-            (canonical_id,),
-        )
-    plugin._memory_logger.log_memory_event(
-        canonical_user_id=canonical_id,
-        event_type="purge",
-        payload={"memories_deleted": m, "cache_deleted": c},
-    )
-    return {"memories": m, "cache": c}
+    from .data_safety import purge_user
+    return purge_user(plugin, canonical_id)
 
 
 def get_global_stats(plugin) -> Dict[str, Any]:

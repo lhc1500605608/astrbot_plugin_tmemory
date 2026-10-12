@@ -91,48 +91,51 @@ class ConsolidationRuntimeMixin:
         total_episodes = 0
 
         for canonical_id in pending_users:
-            try:
-                rows = self._fetch_pending_consolidation_rows(canonical_id, limit=200)
-                if len(rows) < min_msgs:
-                    continue
+            from .data_safety import generation_guard
+            with generation_guard(self, canonical_id):
+                try:
+                    rows = self._fetch_pending_consolidation_rows(canonical_id, limit=200)
+                    if len(rows) < min_msgs:
+                        continue
 
-                # Group by (scope, persona_id), then subdivide into sessions
-                groups: Dict[Tuple[str, str], List[Dict]] = {}
-                for r in rows:
-                    key = (str(r.get("scope", "user")), str(r.get("persona_id", "")))
-                    groups.setdefault(key, []).append(r)
+                    # Group by (scope, persona_id), then subdivide into sessions
+                    groups: Dict[Tuple[str, str], List[Dict]] = {}
+                    for r in rows:
+                        from .data_safety import batch_key
+                        key = batch_key(r)
+                        groups.setdefault(key, []).append(r)
 
-                for (_scope, _persona_id), group_rows in groups.items():
-                    sessions = ep_mgr.group_conversations_into_sessions(group_rows)
-                    for session_rows in sessions:
-                        if len(session_rows) < min_msgs:
-                            continue
+                    for _key, group_rows in groups.items():
+                        sessions = ep_mgr.group_conversations_into_sessions(group_rows)
+                        for session_rows in sessions:
+                            if len(session_rows) < min_msgs:
+                                continue
 
-                        transcript = _build_transcript(session_rows)
-                        episode = await self._summarize_session(
-                            ep_mgr, transcript, session_rows
-                        )
-                        if episode is None:
-                            continue
+                            transcript = _build_transcript(session_rows)
+                            episode = await self._summarize_session(
+                                ep_mgr, transcript, session_rows
+                            )
+                            if episode is None:
+                                continue
 
-                        ep_id = self._insert_episode(
-                            canonical_id=canonical_id,
-                            scope=str(session_rows[0].get("scope", "user")),
-                            persona_id=str(session_rows[0].get("persona_id", "")),
-                            session_key=_derive_session_key(session_rows),
-                            episode=episode,
-                            source_rows=session_rows,
-                        )
-                        if ep_id:
-                            total_episodes += 1
-            except Exception as e:
-                err = classify_llm_error(
-                    e,
-                    pipeline="consolidation",
-                    user_id=canonical_id,
-                    context_message="episode summarization failed for user",
-                )
-                err.log()
+                            ep_id = self._insert_episode(
+                                canonical_id=canonical_id,
+                                scope=str(session_rows[0].get("scope", "user")),
+                                persona_id=str(session_rows[0].get("persona_id", "")),
+                                session_key=_derive_session_key(session_rows),
+                                episode=episode,
+                                source_rows=session_rows,
+                            )
+                            if ep_id:
+                                total_episodes += 1
+                except Exception as e:
+                    err = classify_llm_error(
+                        e,
+                        pipeline="consolidation",
+                        user_id=canonical_id,
+                        context_message="episode summarization failed for user",
+                    )
+                    err.log()
 
         return total_episodes
 

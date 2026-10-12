@@ -42,6 +42,12 @@ class ProfileItemOps:
         persona_id: str = "",
     ) -> int:
         """Insert or reinforce a profile item. Returns the item id."""
+        from .data_safety import review_reason, quarantine
+        reason = review_reason(content) or review_reason(title)
+        if reason:
+            with self.plugin._db() as conn:
+                quarantine(conn, canonical_id, content, reason, self._now(), source_scope, persona_id)
+            return 0
         normalized = self._normalize_content(content)
         now = self._now()
 
@@ -133,7 +139,13 @@ class ProfileItemOps:
         """Add evidence rows linking profile item to conversation_cache sources."""
         now = self._now()
         with self.plugin._db() as conn:
+            target = conn.execute("SELECT canonical_user_id,source_scope,persona_id FROM profile_items WHERE id=?", (profile_item_id,)).fetchone()
+            if not target or target["canonical_user_id"] != canonical_user_id:
+                raise ValueError("invalid evidence owner")
             for cid in source_ids:
+                source = conn.execute("SELECT canonical_user_id,scope,persona_id FROM conversation_cache WHERE id=?", (cid,)).fetchone()
+                if not source or tuple(source) != tuple(target):
+                    continue
                 conn.execute(
                     """
                     INSERT INTO profile_item_evidence(

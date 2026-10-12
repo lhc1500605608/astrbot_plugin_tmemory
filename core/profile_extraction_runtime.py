@@ -73,117 +73,119 @@ class ProfileExtractionRuntimeMixin:
         total_items = 0
 
         for canonical_id in pending_users:
-            try:
-                rows = self._fetch_pending_profile_rows(canonical_id, limit=150)
-                if len(rows) < min_msgs:
-                    continue
-
-                if not any(str(r.get("role", "")) == "user" for r in rows):
-                    self._mark_rows_distilled([int(r["id"]) for r in rows])
-                    continue
-
-                transcript = _build_transcript(rows)
-                time_anchor = _earliest_date(r.get("created_at", "") for r in rows)
-                prompt = extractor.build_extraction_prompt(transcript, time_anchor)
-
-                provider_id, model_id = await self._resolve_consolidation_model(rows)
-                if not provider_id:
-                    self._mark_rows_distilled([int(r["id"]) for r in rows])
-                    continue
-
-                row_scope = str(rows[0].get("scope", "user"))
-                row_persona = str(rows[0].get("persona_id", ""))
-
+            from .data_safety import generation_guard
+            with generation_guard(self, canonical_id):
                 try:
-                    llm_kwargs = {"chat_provider_id": provider_id, "prompt": prompt}
-                    if model_id:
-                        llm_kwargs["model_id"] = model_id
+                    rows = self._fetch_pending_profile_rows(canonical_id, limit=150)
+                    if len(rows) < min_msgs:
+                        continue
 
-                    llm_resp = await self.context.llm_generate(**llm_kwargs)
-                    completion = self._normalize_text(
-                        getattr(llm_resp, "completion_text", "") or ""
-                    )
-                    items = extractor.parse_profile_json(
-                        completion,
-                        self._normalize_text,
-                        ProfileExtractor.safe_facet_type,
-                        self._clamp01,
-                    )
+                    if not any(str(r.get("role", "")) == "user" for r in rows):
+                        self._mark_rows_distilled([int(r["id"]) for r in rows])
+                        continue
+
+                    transcript = _build_transcript(rows)
+                    time_anchor = _earliest_date(r.get("created_at", "") for r in rows)
+                    prompt = extractor.build_extraction_prompt(transcript, time_anchor)
+
+                    provider_id, model_id = await self._resolve_consolidation_model(rows)
+                    if not provider_id:
+                        self._mark_rows_distilled([int(r["id"]) for r in rows])
+                        continue
+
+                    row_scope = str(rows[0].get("scope", "user"))
+                    row_persona = str(rows[0].get("persona_id", ""))
+
+                    try:
+                        llm_kwargs = {"chat_provider_id": provider_id, "prompt": prompt}
+                        if model_id:
+                            llm_kwargs["model_id"] = model_id
+
+                        llm_resp = await self.context.llm_generate(**llm_kwargs)
+                        completion = self._normalize_text(
+                            getattr(llm_resp, "completion_text", "") or ""
+                        )
+                        items = extractor.parse_profile_json(
+                            completion,
+                            self._normalize_text,
+                            ProfileExtractor.safe_facet_type,
+                            self._clamp01,
+                        )
+                    except Exception as e:
+                        err = classify_llm_error(
+                            e,
+                            pipeline="profile_extraction",
+                            user_id=canonical_id,
+                            context_message="profile extraction LLM call failed",
+                        )
+                        err.log()
+                        self._mark_rows_distilled([int(r["id"]) for r in rows])
+                        continue
+
+                    if not items:
+                        self._mark_rows_distilled([int(r["id"]) for r in rows])
+                        continue
+
+                    valid_items = self._validate_profile_items(items)
+                    if valid_items:
+                        from .attribution import filter_assistant_attributed
+                        valid_items = filter_assistant_attributed(
+                            valid_items, rows, key="content"
+                        )
+                    if not valid_items:
+                        self._mark_rows_distilled([int(r["id"]) for r in rows])
+                        continue
+
+                    source_ids = [int(r["id"]) for r in rows]
+                    adapter = str(rows[0].get("source_adapter", "profile_extraction"))
+                    adapter_user = str(rows[0].get("source_user_id", canonical_id))
+
+                    for item in valid_items:
+                        mem_text = self._sanitize_text(
+                            self._normalize_text(str(item.get("content", "")))
+                        )
+                        if not mem_text:
+                            continue
+                        facet = ProfileExtractor.safe_facet_type(
+                            str(item.get("facet_type", "fact"))
+                        )
+
+                        from .memory_ops import ProfileItemOps
+                        ops = ProfileItemOps(self)
+                        item_id = ops.upsert_profile_item(
+                            canonical_id=canonical_id,
+                            facet_type=facet,
+                            title=str(item.get("title", ""))[:100],
+                            content=mem_text,
+                            confidence=self._clamp01(item.get("confidence", 0.7)),
+                            importance=self._clamp01(item.get("importance", 0.6)),
+                            source_scope=row_scope,
+                            persona_id=row_persona,
+                        )
+                        if item_id:
+                            ops.add_evidence(
+                                profile_item_id=item_id,
+                                canonical_user_id=canonical_id,
+                                source_ids=source_ids,
+                                source_role="user",
+                                evidence_kind="conversation",
+                                confidence_delta=0.1,
+                            )
+                            if self._vec_available:
+                                await self._upsert_profile_vector(item_id, mem_text)
+                            total_items += 1
+
+                    self._mark_rows_distilled(source_ids)
+                    self._optimize_context(canonical_id)
+
                 except Exception as e:
                     err = classify_llm_error(
                         e,
                         pipeline="profile_extraction",
                         user_id=canonical_id,
-                        context_message="profile extraction LLM call failed",
+                        context_message="profile extraction failed for user",
                     )
                     err.log()
-                    self._mark_rows_distilled([int(r["id"]) for r in rows])
-                    continue
-
-                if not items:
-                    self._mark_rows_distilled([int(r["id"]) for r in rows])
-                    continue
-
-                valid_items = self._validate_profile_items(items)
-                if valid_items:
-                    from .attribution import filter_assistant_attributed
-                    valid_items = filter_assistant_attributed(
-                        valid_items, rows, key="content"
-                    )
-                if not valid_items:
-                    self._mark_rows_distilled([int(r["id"]) for r in rows])
-                    continue
-
-                source_ids = [int(r["id"]) for r in rows]
-                adapter = str(rows[0].get("source_adapter", "profile_extraction"))
-                adapter_user = str(rows[0].get("source_user_id", canonical_id))
-
-                for item in valid_items:
-                    mem_text = self._sanitize_text(
-                        self._normalize_text(str(item.get("content", "")))
-                    )
-                    if not mem_text:
-                        continue
-                    facet = ProfileExtractor.safe_facet_type(
-                        str(item.get("facet_type", "fact"))
-                    )
-
-                    from .memory_ops import ProfileItemOps
-                    ops = ProfileItemOps(self)
-                    item_id = ops.upsert_profile_item(
-                        canonical_id=canonical_id,
-                        facet_type=facet,
-                        title=str(item.get("title", ""))[:100],
-                        content=mem_text,
-                        confidence=self._clamp01(item.get("confidence", 0.7)),
-                        importance=self._clamp01(item.get("importance", 0.6)),
-                        source_scope=row_scope,
-                        persona_id=row_persona,
-                    )
-                    if item_id:
-                        ops.add_evidence(
-                            profile_item_id=item_id,
-                            canonical_user_id=canonical_id,
-                            source_ids=source_ids,
-                            source_role="user",
-                            evidence_kind="conversation",
-                            confidence_delta=0.1,
-                        )
-                        if self._vec_available:
-                            await self._upsert_profile_vector(item_id, mem_text)
-                        total_items += 1
-
-                self._mark_rows_distilled(source_ids)
-                self._optimize_context(canonical_id)
-
-            except Exception as e:
-                err = classify_llm_error(
-                    e,
-                    pipeline="profile_extraction",
-                    user_id=canonical_id,
-                    context_message="profile extraction failed for user",
-                )
-                err.log()
 
         return total_items
 
@@ -236,4 +238,5 @@ class ProfileExtractionRuntimeMixin:
                 """,
                 (canonical_id, limit),
             ).fetchall()
-            return [dict(r) for r in rows]
+            from .data_safety import first_isolated_batch
+            return first_isolated_batch([dict(r) for r in rows])

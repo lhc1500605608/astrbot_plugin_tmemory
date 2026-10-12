@@ -46,6 +46,8 @@ class MemoryOps(DistillOpsMixin):
         event_date: str = "",
         valid_until: str = "",
     ) -> int:
+        from .data_safety import require_safe
+        require_safe(memory)
         normalized = self.plugin._normalize_text(memory)
         mhash = hashlib.sha256(
             f"{persona_id}:{scope}:{normalized}".encode("utf-8")
@@ -87,11 +89,11 @@ class MemoryOps(DistillOpsMixin):
             candidate_rows = conn.execute(
                 """
                 SELECT id, memory FROM memories
-                WHERE canonical_user_id=? AND memory_type=? AND is_active=1 AND is_pinned=0
+                WHERE canonical_user_id=? AND memory_type=? AND scope=? AND persona_id=? AND source_adapter=? AND is_active=1 AND is_pinned=0
                 ORDER BY created_at DESC
                 LIMIT 15
                 """,
-                (canonical_id, memory_type_safe),
+                (canonical_id, memory_type_safe, scope, persona_id, adapter),
             ).fetchall()
 
             deactivated = 0
@@ -190,6 +192,9 @@ class MemoryOps(DistillOpsMixin):
         deletes = operations.get("deletes", []) if isinstance(operations, dict) else []
         note = str(operations.get("note", "")) if isinstance(operations, dict) else ""
 
+        allowed_ids = {int(r["id"]) for r in rows}
+        updates = [u for u in updates if isinstance(u, dict) and str(u.get("id", "")).isdigit() and int(u["id"]) in allowed_ids]
+        deletes = [int(d) for d in deletes if str(d).isdigit() and int(d) in allowed_ids]
         pinned_ids = {int(r["id"]) for r in rows if int(r["is_pinned"]) == 1}
         if not include_pinned:
             updates = [u for u in updates if int(u.get("id", 0)) not in pinned_ids]
@@ -279,6 +284,8 @@ def update_memory_full(
     confidence: float,
 ) -> None:
     """更新记忆全字段(memory/tokenized_memory/hash/type/scores)。"""
+    from .data_safety import require_safe
+    require_safe(memory)
     now = plugin._now()
     mhash = hashlib.sha256(plugin._normalize_text(memory).encode("utf-8")).hexdigest()
     tokenized_memory = " ".join(jieba.cut_for_search(memory))

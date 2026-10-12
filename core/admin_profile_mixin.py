@@ -151,6 +151,10 @@ class AdminProfileMixin:
         """更新画像条目字段（title, content, facet_type, confidence, importance, status）。"""
         from .utils_shared import _now, _clamp01, _VALID_FACET_TYPES, _VALID_ITEM_STATUSES
 
+        from .data_safety import require_safe
+        for key in ("content", "title"):
+            if key in data:
+                require_safe(data[key])
         now = _now()
         fields: list = []
         params: list = []

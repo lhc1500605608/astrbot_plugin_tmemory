@@ -1,0 +1,8 @@
+[
+  {"user":"bench-language","category":"preference","facts":["用户偏好使用Python语言"],"query":"Python","expected":"Python"},
+  {"user":"bench-editor","category":"fact","facts":["用户经常使用VSCode编辑器"],"query":"VSCode","expected":"VSCode"},
+  {"user":"bench-drink","category":"restriction","facts":["用户喝咖啡时避免添加糖"],"query":"咖啡","expected":"咖啡"},
+  {"user":"bench-sport","category":"habit","facts":["用户喜欢每周参加游泳锻炼"],"query":"游泳","expected":"游泳"},
+  {"user":"bench-empty","category":"abstention","facts":[],"query":"职业","expected":null},
+  {"user":"bench-owner","query_user":"bench-stranger","category":"user-isolation","facts":["用户是一名软件工程师"],"query":"工程师","expected":null}
+]

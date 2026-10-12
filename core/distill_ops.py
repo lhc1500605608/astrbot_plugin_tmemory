@@ -250,164 +250,167 @@ class DistillOpsMixin:
 
         now_ts = time.time()
         for canonical_id in pending_users:
-            try:
-                # 用户级节流：force 模式跳过冷却检查
-                if (not force) and self.plugin._cfg.distill_user_throttle_sec > 0:
-                    last_ts = self.plugin._user_last_distilled_ts.get(canonical_id, 0.0)
-                    if now_ts - last_ts < self.plugin._cfg.distill_user_throttle_sec:
-                        continue  # 冷却中，跳过本用户
+            from .data_safety import generation_guard
+            with generation_guard(self.plugin, canonical_id):
+                try:
+                    # 用户级节流：force 模式跳过冷却检查
+                    if (not force) and self.plugin._cfg.distill_user_throttle_sec > 0:
+                        last_ts = self.plugin._user_last_distilled_ts.get(canonical_id, 0.0)
+                        if now_ts - last_ts < self.plugin._cfg.distill_user_throttle_sec:
+                            continue  # 冷却中，跳过本用户
 
-                rows = self.plugin._fetch_pending_rows(canonical_id, self.plugin._cfg.distill_batch_limit)
-                if (not force) and len(rows) < self.plugin._cfg.distill_min_batch_count:
-                    continue
+                    from .data_safety import first_isolated_batch
+                    rows = first_isolated_batch(self.plugin._fetch_pending_rows(canonical_id, self.plugin._cfg.distill_batch_limit))
+                    if (not force) and len(rows) < self.plugin._cfg.distill_min_batch_count:
+                        continue
 
-                # 预过滤：在送入 LLM 前过滤掉低信息量行，减少 token 消耗
-                rows_for_llm = self.plugin._prefilter_distill_rows(rows)
-                if not rows_for_llm:
-                    # 所有行均为低信息量，直接标记为已蒸馏跳过
-                    self.plugin._mark_rows_distilled([int(r["id"]) for r in rows])
-                    self.plugin._distill_skipped_rows += len(rows)
-                    processed_users += 1
-                    self.plugin._user_last_distilled_ts[canonical_id] = now_ts
-                    continue
+                    # 预过滤：在送入 LLM 前过滤掉低信息量行，减少 token 消耗
+                    rows_for_llm = self.plugin._prefilter_distill_rows(rows)
+                    if not rows_for_llm:
+                        # 所有行均为低信息量，直接标记为已蒸馏跳过
+                        self.plugin._mark_rows_distilled([int(r["id"]) for r in rows])
+                        self.plugin._distill_skipped_rows += len(rows)
+                        processed_users += 1
+                        self.plugin._user_last_distilled_ts[canonical_id] = now_ts
+                        continue
 
-                if not any(str(r.get("role", "")) == "user" for r in rows_for_llm):
-                    # assistant-only 片段不能证明用户风格，避免误归因给用户。
-                    self.plugin._mark_rows_distilled([int(r["id"]) for r in rows])
-                    self.plugin._distill_skipped_rows += len(rows)
-                    processed_users += 1
-                    self.plugin._user_last_distilled_ts[canonical_id] = now_ts
-                    continue
+                    if not any(str(r.get("role", "")) == "user" for r in rows_for_llm):
+                        # assistant-only 片段不能证明用户风格，避免误归因给用户。
+                        self.plugin._mark_rows_distilled([int(r["id"]) for r in rows])
+                        self.plugin._distill_skipped_rows += len(rows)
+                        processed_users += 1
+                        self.plugin._user_last_distilled_ts[canonical_id] = now_ts
+                        continue
 
-                skipped = len(rows) - len(rows_for_llm)
-                self.plugin._distill_skipped_rows += skipped
+                    skipped = len(rows) - len(rows_for_llm)
+                    self.plugin._distill_skipped_rows += skipped
 
-                # ── 规则分级门控（Plan TMEAAA-379 B3 / BC-4）──
-                # 命中长期记忆信号的 complex 样本升级 LLM；无信号的 simple 样本由规则
-                # 直接判定（零 LLM 调用）。预算耗尽时强制走规则分级，避免超支。
-                decision, force_rule_only = self._classify_distill_rows(rows_for_llm)
-                if decision == "simple":
-                    self.plugin._mark_rows_distilled([int(r["id"]) for r in rows])
-                    self.plugin._distill_rule_gated_batches = (
-                        getattr(self.plugin, "_distill_rule_gated_batches", 0) + 1
-                    )
-                    self.plugin._distill_rule_gated_rows = (
-                        getattr(self.plugin, "_distill_rule_gated_rows", 0) + len(rows_for_llm)
-                    )
-                    processed_users += 1
-                    self.plugin._user_last_distilled_ts[canonical_id] = now_ts
-                    continue
-                if force_rule_only:
-                    # 复杂样本需要 LLM，但当日预算已耗尽：保留待预算恢复后重试，避免丢数据。
-                    self.plugin._distill_rule_deferred_batches = (
-                        getattr(self.plugin, "_distill_rule_deferred_batches", 0) + 1
-                    )
-                    continue
-
-                llm_items, tok_in, tok_out, distill_errors = await self.plugin._distill_rows_with_llm(rows_for_llm)
-
-                # 收集结构化错误
-                if distill_errors:
-                    all_errors.extend(distill_errors)
-                    if any(
-                        e.category in (
-                            DistillErrorCategory.PROVIDER_FAILURE,
-                            DistillErrorCategory.PARSE_FAILURE,
-                            DistillErrorCategory.NO_PROVIDER,
-                            DistillErrorCategory.LLM_ERROR,
-                            DistillErrorCategory.UNPARSEABLE,
+                    # ── 规则分级门控（Plan TMEAAA-379 B3 / BC-4）──
+                    # 命中长期记忆信号的 complex 样本升级 LLM；无信号的 simple 样本由规则
+                    # 直接判定（零 LLM 调用）。预算耗尽时强制走规则分级，避免超支。
+                    decision, force_rule_only = self._classify_distill_rows(rows_for_llm)
+                    if decision == "simple":
+                        self.plugin._mark_rows_distilled([int(r["id"]) for r in rows])
+                        self.plugin._distill_rule_gated_batches = (
+                            getattr(self.plugin, "_distill_rule_gated_batches", 0) + 1
                         )
-                        for e in distill_errors
-                    ):
-                        failed_users += 1
+                        self.plugin._distill_rule_gated_rows = (
+                            getattr(self.plugin, "_distill_rule_gated_rows", 0) + len(rows_for_llm)
+                        )
+                        processed_users += 1
+                        self.plugin._user_last_distilled_ts[canonical_id] = now_ts
+                        continue
+                    if force_rule_only:
+                        # 复杂样本需要 LLM，但当日预算已耗尽：保留待预算恢复后重试，避免丢数据。
+                        self.plugin._distill_rule_deferred_batches = (
+                            getattr(self.plugin, "_distill_rule_deferred_batches", 0) + 1
+                        )
+                        continue
 
-                # 累加 token 计数（-1 表示 provider 未返回，跳过累加）
-                if tok_in >= 0:
-                    cycle_tok_in = max(cycle_tok_in, 0) + tok_in
-                if tok_out >= 0:
-                    cycle_tok_out = max(cycle_tok_out, 0) + tok_out
+                    llm_items, tok_in, tok_out, distill_errors = await self.plugin._distill_rows_with_llm(rows_for_llm)
 
-                if not llm_items:
+                    # 收集结构化错误
+                    if distill_errors:
+                        all_errors.extend(distill_errors)
+                        if any(
+                            e.category in (
+                                DistillErrorCategory.PROVIDER_FAILURE,
+                                DistillErrorCategory.PARSE_FAILURE,
+                                DistillErrorCategory.NO_PROVIDER,
+                                DistillErrorCategory.LLM_ERROR,
+                                DistillErrorCategory.UNPARSEABLE,
+                            )
+                            for e in distill_errors
+                        ):
+                            failed_users += 1
+
+                    # 累加 token 计数（-1 表示 provider 未返回，跳过累加）
+                    if tok_in >= 0:
+                        cycle_tok_in = max(cycle_tok_in, 0) + tok_in
+                    if tok_out >= 0:
+                        cycle_tok_out = max(cycle_tok_out, 0) + tok_out
+
+                    if not llm_items:
+                        self.plugin._mark_rows_distilled([int(r["id"]) for r in rows])
+                        self.plugin._user_last_distilled_ts[canonical_id] = now_ts
+                        processed_users += 1
+                        continue
+
+                    user_transcript = "\n".join(
+                        str(r.get("content", ""))
+                        for r in rows
+                        if str(r.get("role", "")) == "user"
+                    )
+                    valid_items = self.plugin._validate_distill_output(
+                        llm_items, user_transcript
+                    )
+                    if not valid_items:
+                        from .distill_errors import make_validation_failure_record
+                        vf_err = make_validation_failure_record(
+                            pipeline="flat_distill",
+                            user_id=canonical_id,
+                            reason=f"LLM 返回 {len(llm_items)} 条，全部未通过校验",
+                        )
+                        vf_err.log()
+                        all_errors.append(vf_err)
+                        self.plugin._mark_rows_distilled([int(r["id"]) for r in rows])
+                        self.plugin._user_last_distilled_ts[canonical_id] = now_ts
+                        processed_users += 1
+                        continue
+
+                    for item in valid_items:
+                        memory_type = str(item.get("memory_type", "fact"))
+                        mem_text = self.plugin._sanitize_text(
+                            self.plugin._normalize_text(str(item.get("memory", "")))
+                        )
+                        if not mem_text:
+                            continue
+                        row_scope = str(rows[0].get("scope", "user"))
+                        row_persona = str(rows[0].get("persona_id", ""))
+                        # 规则兜底项标记 source=rule_fallback，入库时以独立来源区分。
+                        item_source = str(item.get("source", ""))
+                        insert_channel = (
+                            "rule_fallback"
+                            if item_source == "rule_fallback"
+                            else "scheduled_distill"
+                        )
+                        new_id = self.plugin._insert_memory(
+                            canonical_id=canonical_id,
+                            adapter=str(rows[0]["source_adapter"]),
+                            adapter_user=str(rows[0]["source_user_id"]),
+                            memory=mem_text,
+                            score=self.plugin._clamp01(item.get("score", 0.7)),
+                            memory_type=memory_type,
+                            importance=self.plugin._clamp01(item.get("importance", 0.6)),
+                            confidence=self.plugin._clamp01(item.get("confidence", 0.7)),
+                            source_channel=insert_channel,
+                            scope=row_scope,
+                            persona_id=row_persona,
+                            event_date=str(item.get("event_date", "") or "").strip(),
+                            valid_until=str(item.get("valid_until", "") or "").strip(),
+                        )
+                        if self.plugin._vec_available and new_id:
+                            await self.plugin._upsert_vector(new_id, mem_text)
+                        total_memories += 1
+
                     self.plugin._mark_rows_distilled([int(r["id"]) for r in rows])
-                    self.plugin._user_last_distilled_ts[canonical_id] = now_ts
+                    self.plugin._optimize_context(canonical_id)
                     processed_users += 1
-                    continue
-
-                user_transcript = "\n".join(
-                    str(r.get("content", ""))
-                    for r in rows
-                    if str(r.get("role", "")) == "user"
-                )
-                valid_items = self.plugin._validate_distill_output(
-                    llm_items, user_transcript
-                )
-                if not valid_items:
-                    from .distill_errors import make_validation_failure_record
-                    vf_err = make_validation_failure_record(
+                    self.plugin._user_last_distilled_ts[canonical_id] = now_ts
+                except Exception as e:
+                    # 整用户处理异常（不属于 LLM 调用的异常）
+                    failed_users += 1
+                    user_err = classify_llm_error(
+                        e,
                         pipeline="flat_distill",
                         user_id=canonical_id,
-                        reason=f"LLM 返回 {len(llm_items)} 条，全部未通过校验",
+                        context_message="用户蒸馏流程异常",
                     )
-                    vf_err.log()
-                    all_errors.append(vf_err)
-                    self.plugin._mark_rows_distilled([int(r["id"]) for r in rows])
-                    self.plugin._user_last_distilled_ts[canonical_id] = now_ts
-                    processed_users += 1
-                    continue
-
-                for item in valid_items:
-                    memory_type = str(item.get("memory_type", "fact"))
-                    mem_text = self.plugin._sanitize_text(
-                        self.plugin._normalize_text(str(item.get("memory", "")))
+                    user_err.log()
+                    all_errors.append(user_err)
+                    logger.warning(
+                        "[tmemory] distill failed for user %s: %s", canonical_id, e
                     )
-                    if not mem_text:
-                        continue
-                    row_scope = str(rows[0].get("scope", "user"))
-                    row_persona = str(rows[0].get("persona_id", ""))
-                    # 规则兜底项标记 source=rule_fallback，入库时以独立来源区分。
-                    item_source = str(item.get("source", ""))
-                    insert_channel = (
-                        "rule_fallback"
-                        if item_source == "rule_fallback"
-                        else "scheduled_distill"
-                    )
-                    new_id = self.plugin._insert_memory(
-                        canonical_id=canonical_id,
-                        adapter=str(rows[0]["source_adapter"]),
-                        adapter_user=str(rows[0]["source_user_id"]),
-                        memory=mem_text,
-                        score=self.plugin._clamp01(item.get("score", 0.7)),
-                        memory_type=memory_type,
-                        importance=self.plugin._clamp01(item.get("importance", 0.6)),
-                        confidence=self.plugin._clamp01(item.get("confidence", 0.7)),
-                        source_channel=insert_channel,
-                        scope=row_scope,
-                        persona_id=row_persona,
-                        event_date=str(item.get("event_date", "") or "").strip(),
-                        valid_until=str(item.get("valid_until", "") or "").strip(),
-                    )
-                    if self.plugin._vec_available and new_id:
-                        await self.plugin._upsert_vector(new_id, mem_text)
-                    total_memories += 1
-
-                self.plugin._mark_rows_distilled([int(r["id"]) for r in rows])
-                self.plugin._optimize_context(canonical_id)
-                processed_users += 1
-                self.plugin._user_last_distilled_ts[canonical_id] = now_ts
-            except Exception as e:
-                # 整用户处理异常（不属于 LLM 调用的异常）
-                failed_users += 1
-                user_err = classify_llm_error(
-                    e,
-                    pipeline="flat_distill",
-                    user_id=canonical_id,
-                    context_message="用户蒸馏流程异常",
-                )
-                user_err.log()
-                all_errors.append(user_err)
-                logger.warning(
-                    "[tmemory] distill failed for user %s: %s", canonical_id, e
-                )
 
         # 记录蒸馏历史（errors 字段序列化为 JSON）
         duration = round(time.time() - t0, 2)

@@ -36,17 +36,34 @@ logger = logging.getLogger("astrbot")
 
 
 class _LockedConnection:
-    def __init__(self, lock: threading.Lock, conn: sqlite3.Connection):
+    def __init__(self, lock: threading.Lock, conn: sqlite3.Connection, db_path=""):
+        self.db_path = db_path
+        self.savepoint = None
         self.lock = lock
         self.conn = conn
 
     def __enter__(self) -> sqlite3.Connection:
         self.lock.acquire()
-        self.conn.__enter__()
-        return self.conn
+        try:
+            from .data_safety import check_generation
+            check_generation(self.conn, self.db_path)
+            if self.conn.in_transaction:
+                self.savepoint = f"nested_{id(self)}"
+                self.conn.execute(f"SAVEPOINT {self.savepoint}")
+            else:
+                self.conn.execute("BEGIN")
+            return self.conn
+        except BaseException:
+            self.lock.release()
+            raise
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         try:
+            if self.savepoint:
+                if exc_type is not None:
+                    self.conn.execute(f"ROLLBACK TO {self.savepoint}")
+                self.conn.execute(f"RELEASE {self.savepoint}")
+                return False
             return self.conn.__exit__(exc_type, exc_val, exc_tb)
         finally:
             self.lock.release()
@@ -139,7 +156,7 @@ class DatabaseManager(DbFtsMixin):
                         conn.row_factory = sqlite3.Row
                     self._load_vec_extension(conn)
                     self._conn = conn
-        return _LockedConnection(self._conn_lock, self._conn)
+        return _LockedConnection(self._conn_lock, self._conn, self.db_path)
 
     @staticmethod
     def _is_malformed(conn: sqlite3.Connection) -> bool:
@@ -332,7 +349,17 @@ class DatabaseManager(DbFtsMixin):
             return False
 
     def init_db(self, vec_available: bool, embed_dim: int) -> None:
+        # SQLite backup includes committed WAL data, unlike copying the main file.
+        backup_path = self.db_path + ".pre-v018.sqlite3"
+        with self._conn_lock:
+            connection = self.db().conn
+            if connection.execute("SELECT 1 FROM sqlite_master WHERE name='memories'").fetchone() and not os.path.exists(backup_path):
+                with sqlite3.connect(backup_path) as target:
+                    connection.backup(target)
         with self.db() as conn:
+            from .data_safety import DDL
+            for ddl in DDL:
+                conn.execute(ddl)
             conn.execute(_DDL_MEMORIES)
             conn.execute(_DDL_MEMORY_EVENTS)
             conn.execute(_DDL_PROACTIVE_USER_POLICY)
